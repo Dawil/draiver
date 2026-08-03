@@ -44,20 +44,30 @@ single embedded JS file — no CDN, no build step.
 ## Storage layout
 
 The ticket folder is the atomic, portable unit. Team/project/assignee are
-fields, not folders.
+fields, not folders. `spec.md` is shared at the ticket level; the mutable state
+lives under one folder per **attempt** — a journey with its own working tree,
+log, hash chain, and projection.
 
 ```
 <data-root>/
   PROJ-123/
-    spec.md         # immutable input: frontmatter identity + design body
-    log/            # append-only, one write-once file per event
-      20260803T160102Z-0001-created.md
-      20260803T160415Z-0002-gotcha.md
-      20260803T161230Z-0003-escalation.md
-      20260803T164500Z-0004-resolution.md
-    artefacts/      # blobs the log references, never inlines
-    state.md        # generated projection — do not edit
+    spec.md                 # immutable input, SHARED across attempts
+    attempts/
+      0001/
+        attempt.md          # provenance: tool, model, actor, started (+ reserved room)
+        log/                # append-only, one write-once file per event; own hash chain
+          20260803T160102Z-0001-created.md
+          20260803T160415Z-0002-gotcha.md
+          20260803T161230Z-0003-escalation.md
+          20260803T164500Z-0004-resolution.md
+        artefacts/          # blobs the log references, never inlines
+        state.md            # generated projection — do not edit
+      0002/                 # a separate attempt (different tool/model) — for comparison
+        attempt.md  log/  artefacts/  state.md
 ```
+
+- **Attempt id** is a zero-padded numeric directory (`0001`); tool/model live in
+  `attempt.md`, not the name. Allocated race-safe (exclusive `mkdir` + retry).
 
 - **Filename** `<ts>-<seq>-<type>.md`: basic-ISO-8601 UTC timestamp (no colons —
   filesystem-safe), zero-padded 4-digit sequence, and type. Sorts
@@ -78,6 +88,7 @@ type: escalation          # created|note|gotcha|decision|escalation|resolution|r
 ts: 2026-08-03T16:12:30Z
 actor: agent:claude-code   # or human:dave — free-form "kind:name"
 ticket: PROJ-123
+attempt: "0001"            # the attempt this event belongs to (in the hash — tamper-evident)
 refs: []                   # e.g. a resolution sets refs: [3]
 artefacts: []              # e.g. [artefacts/build-fail.log]
 prev: 9f2c…                # hash of predecessor event ("" for genesis)
@@ -101,15 +112,16 @@ git blame, so the ticket stays portable.
 
 ### Sequence allocation & write-once
 
-At append time the store scans `log/` for the max `seq`, computes the new event,
-and creates the file with `O_CREATE|O_EXCL` (fails if it exists). On the rare
-`EEXIST` (a concurrent writer took the seq) it re-scans and retries. This keeps
-writes strictly additive and safe under the single-agent-per-ticket assumption
-of the MVP.
+At append time the store scans the attempt's `log/` for the max `seq`, computes
+the new event, and creates the file with `O_CREATE|O_EXCL` (fails if it exists).
+On the rare `EEXIST` (a concurrent writer took the seq) it re-scans and retries.
+Each attempt is its own chain: `seq` resets to 1 per attempt, and the genesis
+`created` event has `prev: ""`.
 
 ## Control states (projection)
 
-Derived from the log — the human's *relationship* to the ticket, not progress:
+Derived per attempt from its log — the human's *relationship* to that attempt,
+not progress. A ticket with several attempts yields several cards:
 
 - `Running` — agent working; rendered as a **count**.
 - `Needs me` — an unresolved escalation exists. **The board.**
@@ -125,28 +137,33 @@ Derivation (first match wins):
    **Review**.
 4. Otherwise → **Running**.
 
-`draiver status` writes this into each ticket's `state.md` (the generated
-projection) and prints a board summary. `state.md` is never read back as truth —
-it is regenerated from the log.
+`draiver status` writes this into each attempt's `state.md` (the generated
+projection) and prints a board summary of attempts. `state.md` is never read back
+as truth — it is regenerated from the log.
 
 ## CLI surface
 
 Global: `--data <dir>` (or `DRAIVER_DATA`), `--actor <kind:name>` (or
-`DRAIVER_ACTOR`; defaults from `$USER`).
+`DRAIVER_ACTOR`; defaults from `$USER`), `--attempt <id>` (or `DRAIVER_ATTEMPT`;
+defaults to the ticket's **latest** attempt).
 
 | Verb | Purpose | Notes |
 | --- | --- | --- |
-| `new PROJ-123 --title "…" [--project --team --assignee --spec <file>]` | Create ticket folder, `spec.md` skeleton (or import `--spec`), and the genesis `created` event | |
-| `log PROJ-123 --type gotcha "msg" [--ref N] [--artefact path]` | Append a typed event (gotcha, decision, note, …) | The generic recorder |
-| `escalate PROJ-123 "question" [--artefact path]` | Append an `escalation` event **and halt with a nonzero exit code** | Gate enforced by process control, not agent goodwill |
-| `resolve PROJ-123 N "answer"` | Append a `resolution` referencing escalation `seq N`; escalation+resolution become one durable artefact | Human's answer |
+| `new PROJ-123 --title "…" [--project --team --assignee --spec <file> --tool --model]` | Create ticket + `spec.md` (or import `--spec`) + attempt `0001` with its genesis event | |
+| `attempt new PROJ-123 [--tool --model --from N]` | Start a new attempt (own log/chain/working tree); becomes the latest | The comparison unit |
+| `attempt ls PROJ-123` | List attempts with tool, model, derived state, event count | |
+| `log PROJ-123 --type gotcha "msg" [--ref N --artefact path]` | Append a typed event to the target attempt | The generic recorder |
+| `escalate PROJ-123 "question" [--artefact path]` | Append an `escalation` **and halt with a nonzero exit code** | Gate enforced by process control |
+| `resolve PROJ-123 N "answer"` | Append a `resolution` referencing escalation `seq N` in the target attempt | Human's answer |
 | `review PROJ-123 ["claim"]` | Append a `review` event — agent claims done | Load-bearing claim |
 | `done PROJ-123` | Append a `done` event | Terminal |
-| `brief PROJ-123` | Replay `spec.md` + log into a single context blob on stdout that cold-starts a fresh agent | If brief can't resume the work, the design is leaking state |
-| `status [PROJ-123]` | Regenerate `state.md` projection(s); print board summary | |
-| `inbox [--mine]` | List unresolved escalations across all tickets; `--mine` filters by assignee | |
-| `audit PROJ-123` | Recompute and verify the hash chain; nonzero exit + first broken link on failure | |
+| `brief PROJ-123` | Replay `spec.md` + the target attempt's log into a context blob on stdout | If brief can't resume, the design is leaking state |
+| `status [PROJ-123]` | Regenerate per-attempt `state.md`; print the attempt board summary | |
+| `inbox [--mine]` | List unresolved escalations across all attempts of all tickets | `--mine` filters by assignee |
+| `audit PROJ-123` | Verify the hash chain of every attempt (or one with `--attempt`) | nonzero exit + first broken link |
 | `webui [--addr 127.0.0.1:7777] [--data <dir>]` | Run the read-only HTMX server | |
+
+The write/read verbs act on `--attempt` / `DRAIVER_ATTEMPT` / the latest attempt.
 
 **Exit codes**: `0` ok; `3` escalation raised (distinct, so a supervising loop
 can branch on "blocked" vs "failed"); `1` usage/other error; `4` audit failure.
@@ -155,8 +172,8 @@ Documented in `--help` and honored by the skill.
 ## Onboarding skill
 
 Ships in-repo at `skills/draiver-onboarding/SKILL.md` (installable to
-`.claude/skills/`). It onboards a fresh agent that has just been handed a ticket
-ID. Contents:
+`.claude/skills/`). It onboards a fresh agent handed a ticket **and an attempt**
+id (it exports `DRAIVER_ATTEMPT` so every command targets its attempt). Contents:
 
 1. **Cold-start**: run `draiver brief <TICKET>` first; treat its output as the
    full context. Never assume in-flight memory survives.
@@ -186,19 +203,21 @@ the filesystem log on each request; **never writes, never spawns**.
 
 Routes:
 
-- `GET /` — the board shell. Four control states: `Running` and `Done` as
-  counts, `Needs me` and `Review` as lists of ticket cards. The `Needs me`
-  column carries the most weight visually.
+- `GET /` — the board shell. Four control states, one card **per attempt**
+  (a ticket can appear several times). The `Needs me` column carries the most
+  weight visually.
 - `GET /board` — board partial, polled by `hx-get="/board" hx-trigger="every
   3s"` so the board stays live without a full reload.
-- `GET /ticket/{id}` — detail: rendered `spec.md`, then the log as a timeline
-  (type badge, `ts`, `actor`, body; resolutions visually linked to their
-  escalation via `refs`).
+- `GET /ticket/{id}` — attempt index: the ticket's attempts (tool/model/state),
+  each linking to its detail.
+- `GET /ticket/{id}/{attempt}` — detail: rendered `spec.md` + the attempt's
+  provenance (tool/model), then its log as a timeline (type badge, `ts`, `actor`,
+  body; resolutions visually linked to their escalation via `refs`).
 
 Every meaningful element gets a stable `data-testid` (`board`, `col-needs-me`,
-`col-review`, `count-running`, `count-done`, `ticket-link-<id>`,
-`ticket-detail`, `spec`, `event-<seq>`, `state-badge`) so Playwright selectors
-are robust.
+`col-review`, `count-running`, `count-done`, `attempt-link-<id>-<attempt>`,
+`attempt-index`, `ticket-detail`, `spec`, `attempt-tool`, `event-<seq>`,
+`state-badge`) so Playwright selectors are robust.
 
 ## Package layout
 
@@ -207,23 +226,23 @@ draiver/
   go.mod                       # module draiver
   main.go                      # thin: cmd.Execute()
   cmd/                         # cobra commands, one file per verb
-    root.go new.go log.go escalate.go resolve.go review.go done.go
+    root.go new.go attempt.go log.go escalate.go resolve.go review.go done.go
     brief.go status.go inbox.go audit.go webui.go
   internal/
-    store/     # data-root resolution, ticket & log paths, listing
-    event/     # Event struct, frontmatter (un)marshal, canonicalization, hashing
-    ticketlog/ # append (write-once/O_EXCL/seq), read+replay in order
-    project/   # control-state derivation, state.md generation
-    brief/     # brief assembly (spec + replayed log)
-    audit/     # chain verification, first-broken-link reporting
+    store/     # data-root resolution, ticket + attempt paths, listing
+    event/     # Event struct (incl. attempt), frontmatter (un)marshal, hashing
+    ticketlog/ # per-attempt append (write-once/O_EXCL/seq), read+replay
+    attempt/   # attempt Create (race-safe id, attempt.md, genesis), LoadMeta, Latest
+    project/   # per-attempt control-state derivation, state.md generation
+    brief/     # brief assembly (spec + one attempt's replayed log)
+    audit/     # per-attempt chain verification, first-broken-link reporting
     web/       # server, handlers, embedded templates + static (go:embed)
   skills/
     draiver-onboarding/SKILL.md
   e2e/                         # Playwright (mirrors ../acp-portal setup)
-    package.json playwright.config.ts
-    fixtures/board/            # seeded tickets the UI serves under test
-    *.spec.ts
-  testdata/                    # Go fixture tickets (golden logs)
+    package.json playwright.config.ts global-setup.ts
+    .fixture-data/             # seeded (by global-setup) board the UI serves under test
+    tests/*.spec.ts
   docs/mvp.md
 ```
 
@@ -235,32 +254,34 @@ fixtures and `t.TempDir()`:
 - `event`: frontmatter round-trip; hash determinism; `hash` excluded from its own
   input; `prev` linkage.
 - `ticketlog`: append allocates monotonic `seq`; write-once refuses to clobber;
-  replay yields causal order.
-- `project`: control-state table — running, unresolved-escalation→Needs me,
-  resolved→Running, review→Review, done→Done, and the precedence rules.
-- `brief`: output contains spec + every event, with escalation/resolution paired.
-- `audit`: clean chain passes; a mutated body, a swapped field, and a reordered
-  file each fail with the correct first-broken `seq`; nonzero exit.
-- `cmd`: `escalate` exits 3 and appends exactly one escalation; `resolve` links
-  by `seq`; `new` scaffolds correctly. Driven via Cobra command execution.
-- `web`: `httptest` against a fixture data dir — board shows correct
-  counts/lists, detail renders spec + timeline, and the server exposes **no**
-  write routes (read-only contract).
+  replay yields causal order; **attempts have independent chains** (each starts at
+  seq 1, and same body under different attempt ids hashes differently).
+- `attempt`: `Create` allocates sequential ids with a genesis event; meta
+  round-trips; `Latest` returns the highest id.
+- `project`: control-state table; `LoadAll` returns one card per attempt with
+  independent state.
+- `brief`: output contains spec + every event of the attempt, escalation/resolution paired.
+- `audit`: clean chain passes; a mutated body fails with the right first-broken
+  `seq`; `VerifyTicket` covers every attempt; nonzero exit.
+- `cmd`: `escalate` exits 3; `resolve` links by `seq`; `attempt new/ls`;
+  `--attempt` targets a specific attempt and the default is the latest.
+- `web`: `httptest` — board shows one card per attempt (a ticket appears twice),
+  attempt index + detail render, and the server exposes **no** write routes.
 
 **Playwright e2e** for the web UI, mirroring `../acp-portal` conventions
 (`@playwright/test`, `webServer` boots the stack, `baseURL`, `data-testid`,
 chromium project — browsers already cached):
 
-- `webServer.command` builds & runs the binary against a seeded fixture board:
-  `go run . webui --data e2e/fixtures/board --addr 127.0.0.1:7788`, `url`
-  pointed at it, `reuseExistingServer` off in CI.
+- `webServer.command` builds & runs the binary against a fixture board seeded by
+  `global-setup.ts` (which drives the real CLI, including a second attempt on one
+  ticket); `reuseExistingServer` off in CI.
 - Specs:
   - **smoke**: `/` loads, renders the four control states, header present.
-  - **board**: `Needs me` lists the escalated fixture ticket(s); `Running`/`Done`
-    show correct counts.
-  - **detail**: clicking `ticket-link-PROJ-123` opens the detail view with the
-    rendered spec and a log timeline; an escalation event shows its linked
-    resolution.
+  - **board**: per-attempt counts; the escalated attempt is in `Needs me`; the
+    same ticket appears again as a second `Running` card.
+  - **detail**: clicking `attempt-link-PROJ-101-0001` opens `/ticket/PROJ-101/0001`
+    with the rendered spec, provenance, and log timeline; the attempt index lists
+    both attempts.
   - **live refresh**: with polling active, the board reflects fixture state
     (kept deterministic; no runtime mutation needed for a green MVP).
 

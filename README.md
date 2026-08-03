@@ -47,18 +47,22 @@ picks it up next.
 
 ## Storage: append-only, portable per ticket
 
-The ticket is the atomic, portable unit — team, project, and assignee are fields, not folders, so tickets move freely between them. Markdown files contain frontmatter. A Folder per ticket.
+The ticket is the atomic, portable unit — team, project, and assignee are fields, not folders, so tickets move freely between them. Markdown files contain frontmatter. A folder per ticket; the shared `spec.md` sits at the top, and the mutable state lives under one folder per **attempt**.
 
 ```
 PROJ-123/
-  spec.md        # frontloaded design — the immutable input
-  log/           # append-only events, one write-once file each
-                 # ISO-8601 timestamp prefix, type in YAML frontmatter
-  artefacts/     # blobs the log references, never inlines
-  state.md       # generated projection — do not edit
+  spec.md                 # frontloaded design — the immutable input, SHARED by every attempt
+  attempts/
+    0001/                 # one attempt = one journey from a starting point (its own working tree)
+      attempt.md          # provenance: tool, model, actor, started (+ reserved room for metrics)
+      log/                # append-only events, one write-once file each; its own hash chain
+      artefacts/          # blobs the log references, never inlines
+      state.md            # generated projection — do not edit
+    0002/                 # a separate attempt: different tool/model, for comparison and audit
+      attempt.md  log/  artefacts/  state.md
 ```
 
-Event type is a field, not a directory. Structure lives in references between events, never in the tree. Corrections are new events; history is never rewritten.
+An **attempt** owns one log and one hash chain, and spans many respawned sessions (§ *Attempts outlive the agent*). Separate attempts are the comparison unit: run `claude-code` against `aider`, or re-try a stuck ticket, and each keeps its own durable trail against the same `spec.md`. Event type is a field, not a directory; structure lives in references between events, never in the tree. Corrections are new events; history is never rewritten.
 
 ## Vocabulary (CLI verbs = the shared protocol)
 
@@ -67,13 +71,14 @@ Discoverable via --help; the verbs are to agents what the status enum is to Issu
 * `brief PROJ-123` — replay spec + log into a context blob that cold-starts a fresh agent. If brief isn't enough to resume, the design is leaking state.
 * `escalate` — append an escalation event and halt (nonzero exit). The gate is enforced by process control, not agent goodwill.
 * `resolve` — the human's answer, appended and linked back. Escalation + resolution is one durable artefact.
-* `inbox --mine` — unresolved escalations across all tickets.
-* `status` — regenerate the projection.
-* `audit PROJ-123` - verifies the hash-chained log (see below)
+* `inbox --mine` — unresolved escalations across all attempts of all tickets.
+* `status` — regenerate the projection(s).
+* `audit PROJ-123` - verifies the hash-chained log of every attempt (see below)
+* `attempt new PROJ-123 --tool …` / `attempt ls PROJ-123` — start or list attempts. Verbs act on the ticket's latest attempt by default; `--attempt 0002` (or `DRAIVER_ATTEMPT`) targets a specific one.
 
 ## Control states (not progress states)
 
-The dashboard columns are the human's relationship to the ticket, weighted asymmetrically:
+The dashboard columns are the human's relationship to the ticket, weighted asymmetrically. Control state is **per attempt**, so a ticket with two live attempts shows as two cards:
 
 * `Running` — agent working, no action. Rendered as a count.
 * `Needs me` — unresolved escalation. This is the board.

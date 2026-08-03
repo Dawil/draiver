@@ -12,15 +12,24 @@ description: >-
 
 # Working a Draiver ticket
 
-You are a **stateless** worker on a ticket. Your in-flight context is **not
-precious** — the ticket's durable log is. Another agent (or you, freshly
-respawned) must be able to resume from disk alone. Your job is to keep that log
-good enough that they can.
+You are a **stateless** worker on one **attempt** of a ticket. A ticket may have
+several attempts — different tools or models trying the same spec — but you only
+ever work *yours*. Your in-flight context is **not precious**; the attempt's
+durable log is. Another agent (or you, freshly respawned) must be able to resume
+your attempt from disk alone. Your job is to keep that log good enough that they
+can.
 
-The ticket id and data root come from the task. All commands take the ticket id;
-set `DRAIVER_ACTOR=agent:<your-name>` (e.g. `agent:claude-code`) so your writes
-are attributed. If a data root isn't the default, pass `--data <dir>` or export
-`DRAIVER_DATA`.
+The task names your **ticket id** and **attempt id**, plus the data root. Export
+both so every command targets your attempt and attributes your writes:
+
+```
+export DRAIVER_ACTOR=agent:<your-name>    # e.g. agent:claude-code
+export DRAIVER_ATTEMPT=<attempt-id>        # e.g. 0001 — the attempt you were assigned
+```
+
+Without `DRAIVER_ATTEMPT` (or a `--attempt <id>` flag), commands fall back to the
+ticket's *latest* attempt — which may not be yours, so set it. If the data root
+isn't the default, pass `--data <dir>` or export `DRAIVER_DATA`.
 
 Your side of the protocol is entirely CLI: `brief` to load, `log` to record,
 `escalate` to ask, `review` to hand off. Run those yourself — never offload your
@@ -101,7 +110,8 @@ draiver escalate <TICKET> "What prod DB URL should CI use, or should this enviro
 ```
 
 **The human resolves it, not you.** Monitoring the board, they run `draiver
-resolve <TICKET> <seq> "<answer>"` themselves. You never run `resolve`, and you
+resolve <TICKET> <seq> "<answer>" --attempt <your-attempt>` themselves (the
+`escalate` output prints the exact command). You never run `resolve`, and you
 never tell them to run it — the board already routes them there.
 
 **When the ticket is worked again** — whether you are resumed with fresh context

@@ -33,10 +33,13 @@ export default async function globalSetup() {
     }
   };
 
-  // PROJ-101 -> Needs me (open escalation)
-  draiver("new", "PROJ-101", "--title", "Payment webhook", "--assignee", "dave");
+  // PROJ-101 attempt 0001 -> Needs me (open escalation), with claude-code.
+  draiver("new", "PROJ-101", "--title", "Payment webhook", "--assignee", "dave", "--tool", "claude-code");
   draiver("log", "PROJ-101", "Stripe test keys only work in test mode.", "--type", "gotcha");
   draiver("escalate", "PROJ-101", "Which currency rounding rule for JPY?");
+  // PROJ-101 attempt 0002 -> Running: a second journey with a different tool, so
+  // the same ticket shows twice on the board.
+  draiver("attempt", "new", "PROJ-101", "--tool", "aider");
 
   // PROJ-102 -> Review (agent claims done)
   draiver("new", "PROJ-102", "--title", "Search index", "--assignee", "dave");
