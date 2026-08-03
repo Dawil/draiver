@@ -2,11 +2,11 @@
 
 > Agents are cattle, and it takes a village of agents to raise a ticket.
 
-A Continuous Development tool that is a coordination substrate for supervising AI coding agents at the ticket level. It replaces Tickets's human-to-human status protocol with a human-to-agent one, on a single premise: agents are cattle, tickets are pets. You manage tickets, not agents. A fresh agent can pick up any ticket from disk, and a human attends only to the tickets that need them.
+A Continuous Development tool that is a coordination substrate for supervising AI coding agents at the ticket level. It replaces the issue tracker's human-to-human status protocol with a human-to-agent one, on a single premise: agents are cattle, tickets are pets. You manage tickets, not agents. A fresh agent can pick up any ticket from disk, and a human attends only to the tickets that need them.
 
 Issue Tracking software manage the interface between managers and developers. This aims to manage the interface between developers and agents.
 
-Agents work well with CLIs (they have HATEOAS built it) and humans work well with UIs so this also has a Htmx web ui built in.
+Agents work well with CLIs (they have HATEOAS built in) and humans work well with UIs so this also has a Htmx web ui built in.
 
 ## Purpose
 
@@ -18,6 +18,32 @@ This tool is one thing leading to another:
 
 1. Durable state/context, associated with the ticket, so that agents can be "stateless" (obviously they're intensely stateful, but let the context be an input)
 2. Agent management comes naturally from the durable state, with swimlanes per ticket. 
+
+## Attempts outlive the agent
+
+An *attempt* is the progression of a ticket toward a PR — running `brief` to load
+context, logging gotchas and decisions, escalating when blocked, applying
+resolutions once answered. One attempt can span many escalate→resolve cycles;
+escalation pauses the work, it doesn't abandon the ticket. What it need not span
+is a single agent: the session that starts an attempt is rarely the one that
+finishes it.
+
+The point of draiver is that the attempt is not trapped inside the agent's
+context window. When a session fills its context, drifts, or derails, you don't
+lose the work. Kill the agent — it's cattle. Start a fresh session; it runs
+`brief`, replays the spec and the log, and resumes exactly where the last one
+left off: same decisions, same resolved escalations, no re-litigation. The log is
+the memory; the agent is disposable. That resumption *is* the product.
+
+Escalations are asynchronous. The agent runs `escalate`, which records the
+question durably and returns a nonzero exit, and then its turn ends — it does not
+sit and poll for an answer. The human isn't watching the CLI; they watch the
+board (`draiver webui`), where the ticket surfaces under **Needs me**, and from
+there they `resolve` it — via the CLI today, in-UI once manage mode lands.
+Resolving is the human's move, not the agent's. The next attempt — resumed or
+brand-new — re-enters through `brief` and reads the resolution inline. A blocked
+ticket and its answer are one durable artefact, independent of whichever agent
+picks it up next.
 
 ## Storage: append-only, portable per ticket
 
@@ -66,7 +92,7 @@ Each event carries the hash of its predecessor, so any edit breaks the chain —
 
 ## Dashboard
 
-UIs are for humans, so `draiver webui` will run a Htmx webserver (dynamic SPA, self contained within the cli tool). It can be used in a Read Only fashion, by just pointing at a data folder, or can be used in a Manage mode, being able to spin up agents, refresh agent context (kill agent and reload a fresh one with the same context), or restart ticket with a separate attempt if stuck (still append only, creates a new, potentially concurrent attempt on the ticket, possibly even with different inference model or coding agent). Renders the four control states. Joins to Isseu Tracker by ticket ID: the thin glanceable state syncs up for managers, the rich log stays down for agents and devs.
+UIs are for humans, so `draiver webui` will run a Htmx webserver (dynamic SPA, self contained within the cli tool). It can be used in a Read Only fashion, by just pointing at a data folder, or can be used in a Manage mode, being able to spin up agents, refresh agent context (kill agent and reload a fresh one with the same context), or restart ticket with a separate attempt if stuck (still append only, creates a new, potentially concurrent attempt on the ticket, possibly even with different inference model or coding agent). Renders the four control states. Joins to the Issue Tracker by ticket ID: the thin glanceable state syncs up for managers, the rich log stays down for agents and devs.
 
 ## Agent control: JSON-stream over stdio
 

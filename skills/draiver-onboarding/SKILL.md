@@ -4,9 +4,10 @@ description: >-
   Onboards a coding agent that has been handed a Draiver ticket. Use at the START
   of any session where you are assigned a ticket id (e.g. PROJ-123) and a data
   root is available via `draiver` on PATH or the DRAIVER_DATA env var. Teaches the
-  agent to cold-start once from `brief`, externalize gotchas and decisions into
-  the append-only log, ask humans ONLY via `draiver escalate` and record their
-  answer with `draiver resolve`, and claim `review` rather than self-close.
+  agent to cold-start each session from `brief`, externalize gotchas and
+  decisions into the append-only log, ask humans via `draiver escalate` and then
+  stop (the human resolves from their board — the agent does not run `resolve`),
+  and claim `review` rather than self-close.
 ---
 
 # Working a Draiver ticket
@@ -21,27 +22,32 @@ set `DRAIVER_ACTOR=agent:<your-name>` (e.g. `agent:claude-code`) so your writes
 are attributed. If a data root isn't the default, pass `--data <dir>` or export
 `DRAIVER_DATA`.
 
-Every human touchpoint goes through the CLI. **You** run the commands — never ask
-the human to run `draiver` themselves. They talk to you in the conversation; you
-translate that into log events.
+Your side of the protocol is entirely CLI: `brief` to load, `log` to record,
+`escalate` to ask, `review` to hand off. Run those yourself — never offload your
+own logging onto the human. The one verb that is *theirs*, not yours, is
+`resolve`: the human answers escalations from the board on their own time (§4).
+Assume you cannot see the human in real time — you communicate by writing events
+they will read on the board, not by chatting.
 
-## 1. Cold-start from the brief — once, when you pick up the ticket
+## 1. Cold-start from the brief — once per session, at the start
 
-The first thing you do on a ticket you did not start is load the full context:
+The first thing every session does — whether you are the first agent on the
+ticket, a resumed session, or a fresh one taking over after a previous agent ran
+out of context — is load the full context:
 
 ```
 draiver brief <TICKET>
 ```
 
 Treat its output as the complete truth: the spec, every prior decision, and any
-open escalation you are inheriting. **Do not assume you remember anything the
-brief doesn't show.** If the brief isn't enough to resume the work, that's a
-signal the log is leaking state — fix it by logging more, below.
+resolved-or-open escalation you are inheriting. **Do not assume you remember
+anything the brief doesn't show.** If the brief isn't enough to resume the work,
+that's a signal the log is leaking state — fix it by logging more, below.
 
-This is a **one-time entry step.** It is NOT something you repeat during a
-session — not after each event, and *not after an escalation is answered*. If you
-are already working the ticket, you have the context; keep going. Re-briefing
-mid-session is a mistake.
+Run it **once, at the start of your session.** Re-briefing mid-session is a
+mistake: don't loop back to it after each event, and — critically — don't poll it
+after you escalate to see whether an answer has landed (see §4). Once you're
+working, you have the context; keep going.
 
 ## 2. Log gotchas the moment they bite
 
@@ -65,13 +71,18 @@ Use `--type note` for context that is neither a gotcha nor a decision, and
 `--artefact <path-under-artefacts/>` to reference a blob (a failing log, a
 screenshot) instead of pasting it inline.
 
-## 4. When you need a human, escalate — that is the ONLY way to ask
+## 4. When you need a human, escalate — then stop
 
 When you hit something only a human can decide (missing credentials, a product
-choice, an ambiguous spec), **do not guess past it, and do not invent your own
-way of asking** — no ad-hoc question list, no form, no "please answer these"
-message. The single mechanism for putting a question to a human is
-`draiver escalate`. If you didn't run `escalate`, you didn't ask.
+choice, an ambiguous spec), **do not guess past it.** The one mechanism that
+actually puts a question to a human is `draiver escalate`: it records the
+question durably, and the human sees it on their board (`draiver webui`, under
+**Needs me**). If you didn't run `escalate`, you didn't ask — a message in the
+conversation reaches no one, because the human is watching the board, not the CLI.
+
+A written-out list or form of questions is fine **as long as `escalate` ran
+first** — the escalation is the durable record; the prose is just a nicer way to
+read it. Put the real question in the `escalate` body.
 
 **a. Capture the context first** so the escalation is self-contained — the human
 should not have to ask you what you already know:
@@ -80,29 +91,23 @@ should not have to ask you what you already know:
 draiver log <TICKET> --type note "Deploy needs a prod DB URL. Tried the staging URL (works locally); prod is firewalled from CI. Blocked on the real value or a decision to mock."
 ```
 
-**b. Escalate.** This appends the question and exits nonzero (3) to signal a
-block. Stop working the blocked path, then surface the question to the human in
-the conversation:
+**b. Escalate, then stop working this ticket.** `escalate` appends the question
+and returns a nonzero exit (3) to signal a block. Your turn on this ticket ends
+here. **Do not** poll, wait, or loop back to `brief` to check whether it's been
+answered — the human resolves asynchronously, on their own time.
 
 ```
 draiver escalate <TICKET> "What prod DB URL should CI use, or should this environment be mocked?"
 ```
 
-**c. Record the human's answer yourself.** When the human answers you (in the
-conversation), it is *your* responsibility to write it back with `draiver
-resolve`, referencing the escalation's seq. Attribute it to the human, since it
-is their decision:
+**The human resolves it, not you.** Monitoring the board, they run `draiver
+resolve <TICKET> <seq> "<answer>"` themselves. You never run `resolve`, and you
+never tell them to run it — the board already routes them there.
 
-```
-draiver resolve <TICKET> <ESCALATION_SEQ> "Mock it: CI reads DATABASE_URL from a fixture; a follow-up ticket wires the real secret." --actor human:<name>
-```
-
-(You know the escalation's seq from the `escalate` output, or from `draiver
-brief`. Never tell the human to run `resolve` — that's your job.)
-
-**d. Act on the answer and log what you did** — no re-briefing, you already have
-the context. Just continue, and record how you applied the resolution so the
-escalate → resolve → action arc is one durable trail:
+**When the ticket is worked again** — whether you are resumed with fresh context
+budget or an entirely new session takes over — it re-enters at step 1 with
+`brief`, which now shows the resolution inline. *That* is when you act on the
+answer and log what you did, closing the escalate → resolve → action arc:
 
 ```
 draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_URL from a fixture; opened PROJ-140 for the real secret."
@@ -119,9 +124,10 @@ draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's thre
 
 ## Loop
 
-Cold-start once with `brief` → work → `log` gotchas/decisions as you go → when
-blocked, `escalate` (the only way to ask) and stop the blocked path → record the
-human's answer with `resolve` and continue *without re-briefing* → `review` when
-done.
+Each session: `brief` once → work → `log` gotchas/decisions as you go → when
+blocked, `escalate` and stop (the human resolves from their board, on their own
+time) → when the ticket is worked again, a session `brief`s, reads the
+resolution, and continues → `review` when the work is done.
 
-Everything valuable lives in the log. Leave the ticket resumable.
+Everything valuable lives in the log. Leave the ticket resumable — the next
+`brief` is the only handoff.
