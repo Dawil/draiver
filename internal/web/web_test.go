@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"draiver/internal/event"
+	"draiver/internal/project"
 	"draiver/internal/store"
 	"draiver/internal/ticketlog"
 )
@@ -191,10 +192,11 @@ func TestLogBodyMarkdownRenderedAndSanitized(t *testing.T) {
 
 // TestFaviconServedAndWired pins the favicon contract: all three SVG variants
 // and the swap script are served from the embedded static FS, every full page
-// references the plain favicon by the id the script swaps, and each badged
-// variant carries its defining colour (eucalypt green "D" everywhere; rust-red
-// only on Stuck; misty blue only on Review). The count→variant swap itself is
-// client-side JS off the live counts and is not exercised here.
+// references the favicon by the id the script swaps, and each badged variant
+// carries its defining colour (eucalypt green "D" everywhere; rust-red only on
+// Stuck; misty blue only on Review). The board page server-renders the variant
+// that matches its live state; detail pages have no live counts, so they stay
+// plain. The per-refresh swap is driven by an HX-Trigger event, not scraping.
 func TestFaviconServedAndWired(t *testing.T) {
 	h := newServer(t)
 
@@ -202,15 +204,21 @@ func TestFaviconServedAndWired(t *testing.T) {
 	const rust = "#B7410E"  // Stuck badge
 	const misty = "#6E9BB5" // Blue Mountains Review badge
 
-	// The favicon must load on every full page, not just the board; the swap
-	// script only belongs where the live counts drive it (the board).
-	for _, p := range []string{"/", "/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
+	// Detail pages have no live board context, so they carry the plain favicon.
+	for _, p := range []string{"/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
 		page := get(t, h, p).Body.String()
 		if !strings.Contains(page, `id="favicon"`) || !strings.Contains(page, `href="/static/favicon.svg"`) {
-			t.Errorf("page %s is missing the favicon link", p)
+			t.Errorf("page %s is missing the plain favicon link", p)
 		}
 	}
-	if !strings.Contains(get(t, h, "/").Body.String(), `src="/static/favicon.js"`) {
+	// The board page server-renders the badged variant matching the live board.
+	// The seed has one Stuck attempt, so the favicon is correct on load with no
+	// client-side scraping or plain→badged flash.
+	boardPage := get(t, h, "/").Body.String()
+	if !strings.Contains(boardPage, `id="favicon"`) || !strings.Contains(boardPage, `href="/static/favicon-stuck.svg"`) {
+		t.Errorf("board page should server-render the Stuck favicon variant on load")
+	}
+	if !strings.Contains(boardPage, `src="/static/favicon.js"`) {
 		t.Errorf("board page missing the favicon swap script")
 	}
 
@@ -242,15 +250,56 @@ func TestFaviconServedAndWired(t *testing.T) {
 		}
 	}
 
-	// The swap script drives off both live counts the board exposes.
+	// The swap script listens for the server-emitted event and no longer scrapes
+	// the board's data-testid counts.
 	js := get(t, h, "/static/favicon.js")
 	if js.Code != 200 {
 		t.Fatalf("GET /static/favicon.js = %d", js.Code)
 	}
-	for _, want := range []string{"count-stuck", "count-review"} {
-		if !strings.Contains(js.Body.String(), want) {
-			t.Errorf("favicon.js should read the live %q count", want)
+	jsBody := js.Body.String()
+	if !strings.Contains(jsBody, "draiver:favicon") {
+		t.Errorf("favicon.js should listen for the draiver:favicon event")
+	}
+	for _, banned := range []string{"count-stuck", "count-review", "data-testid"} {
+		if strings.Contains(jsBody, banned) {
+			t.Errorf("favicon.js should not depend on the board test hook %q", banned)
 		}
+	}
+}
+
+// TestFaviconHrefPrecedence pins the Stuck>Review precedence that both the
+// server-rendered initial href and the HX-Trigger event depend on: plain with
+// nothing pending, Review badge with only reviews, Stuck badge whenever anything
+// is blocked — even alongside reviews.
+func TestFaviconHrefPrecedence(t *testing.T) {
+	one := []project.Attempt{{}}
+	for _, c := range []struct {
+		name string
+		vm   boardVM
+		want string
+	}{
+		{"idle", boardVM{}, "/static/favicon.svg"},
+		{"review only", boardVM{Review: one}, "/static/favicon-review.svg"},
+		{"stuck only", boardVM{NeedsMe: one}, "/static/favicon-stuck.svg"},
+		{"stuck outranks review", boardVM{NeedsMe: one, Review: one}, "/static/favicon-stuck.svg"},
+	} {
+		if got := c.vm.FaviconHref(); got != c.want {
+			t.Errorf("%s: FaviconHref() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestBoardPartialEmitsFaviconTrigger pins that /board drives the favicon via an
+// HX-Trigger response header (not DOM scraping), carrying the variant href.
+func TestBoardPartialEmitsFaviconTrigger(t *testing.T) {
+	h := newServer(t)
+	trig := get(t, h, "/board").Header().Get("HX-Trigger")
+	if trig == "" {
+		t.Fatal("/board should emit an HX-Trigger favicon event")
+	}
+	// Seed has a Stuck attempt, and Stuck outranks Review.
+	if !strings.Contains(trig, "draiver:favicon") || !strings.Contains(trig, "/static/favicon-stuck.svg") {
+		t.Errorf("HX-Trigger = %q, want draiver:favicon → stuck variant", trig)
 	}
 }
 

@@ -7,6 +7,7 @@ package web
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -88,6 +89,40 @@ type boardVM struct {
 	Done    []project.Attempt
 }
 
+// Favicon variants. The <head> is never re-rendered by htmx, so the board
+// favicon is kept in sync out of band (see FaviconHref and handleBoardPartial).
+const (
+	faviconPlain  = "/static/favicon.svg"
+	faviconStuck  = "/static/favicon-stuck.svg"
+	faviconReview = "/static/favicon-review.svg"
+)
+
+// FaviconHref is the favicon variant for the current board state. Stuck outranks
+// Review — a blocked attempt is more urgent than one merely awaiting
+// verification. This is the single source of truth for the precedence: it both
+// server-renders the initial <link rel="icon"> href (so there is no plain→badged
+// flash on load) and drives the per-refresh HX-Trigger event.
+func (vm boardVM) FaviconHref() string {
+	switch {
+	case len(vm.NeedsMe) > 0:
+		return faviconStuck
+	case len(vm.Review) > 0:
+		return faviconReview
+	default:
+		return faviconPlain
+	}
+}
+
+// faviconTrigger builds the HX-Trigger header value that asks htmx to dispatch a
+// bubbling "draiver:favicon" DOM event carrying the variant href. favicon.js
+// listens for it and points <link rel="icon"> at the href — no DOM scraping.
+func faviconTrigger(href string) string {
+	b, _ := json.Marshal(map[string]map[string]string{
+		"draiver:favicon": {"href": href},
+	})
+	return string(b)
+}
+
 type eventVM struct {
 	Seq        int
 	Type       string
@@ -149,6 +184,9 @@ func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// Keep the favicon in sync without coupling it to the board's data-testid
+	// counts: emit the variant as a custom event htmx fires after the swap.
+	w.Header().Set("HX-Trigger", faviconTrigger(vm.FaviconHref()))
 	s.render(w, "board.html", vm)
 }
 
