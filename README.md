@@ -133,3 +133,7 @@ Install it into Claude Code by adding this repo as a marketplace, then installin
 ```
 
 The `draiver-onboarding` skill then fires whenever an agent is handed a ticket. The same flow works headless via the CLI: `claude plugin marketplace add ./.claude` then `claude plugin install draiver@draiver` (`claude plugin details draiver` shows the discovered components).
+
+## License
+
+[MIT](LICENSE) © 2026 David Wilcox
