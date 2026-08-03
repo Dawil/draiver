@@ -124,14 +124,22 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 		`data-testid="ticket-detail"`,
 		`data-testid="state-badge"`,
 		"Use OAuth for login.",       // rendered spec markdown
-		`data-testid="event-1"`,      // created
-		`data-testid="event-2"`,      // escalation
-		"which base image?",          // escalation body
-		`data-testid="unresolved-2"`, // shown as unresolved
+		`data-testid="event-1"`,           // created
+		`data-testid="event-2"`,           // escalation
+		"which base image?",               // escalation body
+		`data-testid="unresolved-2"`,      // shown as unresolved
+		`data-testid="log-order-toggle"`,  // the ordering toggle
+		`data-testid="log-timeline"`,      // the toggle's target list
+		`data-order="newest"`,             // default order is newest-first
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q", want)
 		}
+	}
+
+	// Default ordering is newest-first: the later event (#2) renders before #1.
+	if i2, i1 := strings.Index(body, `data-testid="event-2"`), strings.Index(body, `data-testid="event-1"`); i2 > i1 {
+		t.Errorf("expected newest-first: event-2 (%d) should precede event-1 (%d)", i2, i1)
 	}
 }
 

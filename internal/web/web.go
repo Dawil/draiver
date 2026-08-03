@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/yuin/goldmark"
@@ -219,6 +220,9 @@ func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
 		}
 		vm.Events = append(vm.Events, ev)
 	}
+	// Present newest-first by default; the detail view offers a client-side
+	// toggle to flip back to oldest-first.
+	slices.Reverse(vm.Events)
 	s.render(w, "ticket.html", vm)
 }
 

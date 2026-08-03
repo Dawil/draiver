@@ -24,8 +24,11 @@
     </section>
 
     <section class="log">
-      <h2>Log <span class="count">{{len .Events}}</span></h2>
-      <ol class="timeline">
+      <div class="log-head">
+        <h2>Log <span class="count">{{len .Events}}</span></h2>
+        <button type="button" class="order-toggle" data-testid="log-order-toggle" aria-pressed="false">Newest first</button>
+      </div>
+      <ol class="timeline" data-testid="log-timeline" data-order="newest">
         {{range .Events}}
         <li class="event event-{{.Type}}" data-testid="event-{{.Seq}}">
           <div class="event-head">
@@ -49,5 +52,21 @@
       </ol>
     </section>
   </main>
+
+  <script>
+    (function () {
+      var toggle = document.querySelector('[data-testid="log-order-toggle"]');
+      var list = document.querySelector('[data-testid="log-timeline"]');
+      if (!toggle || !list) return;
+      toggle.addEventListener('click', function () {
+        var items = Array.prototype.slice.call(list.children);
+        items.reverse().forEach(function (li) { list.appendChild(li); });
+        var order = list.dataset.order === 'newest' ? 'oldest' : 'newest';
+        list.dataset.order = order;
+        toggle.textContent = order === 'newest' ? 'Newest first' : 'Oldest first';
+        toggle.setAttribute('aria-pressed', order === 'oldest' ? 'true' : 'false');
+      });
+    })();
+  </script>
 </body>
 </html>{{end}}
