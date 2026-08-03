@@ -23,7 +23,7 @@
 {{end}}
 
 {{define "card"}}
-<a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="/ticket/{{.Ticket}}/{{.ID}}">
+<a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
   <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
   <span class="title">{{.Title}}</span>
   <span class="meta-row">

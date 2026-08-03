@@ -55,12 +55,29 @@ type badgeVM struct {
 	OOB   bool
 }
 
+// cardHref is a board card's link target. A Stuck or Review card deep-links to
+// the log entry that put it there — the latest event, which is the open
+// escalation (Stuck) or the review claim (Review) — so one click lands the human
+// on and highlights the exact entry needing attention. Running/Done cards link
+// to the attempt with no fragment.
+func cardHref(a project.Attempt) string {
+	base := "/ticket/" + a.Ticket + "/" + a.ID
+	switch a.State {
+	case project.NeedsMe, project.Review:
+		if n := len(a.Events); n > 0 {
+			return fmt.Sprintf("%s#event-%d", base, a.Events[n-1].Seq)
+		}
+	}
+	return base
+}
+
 // New builds a Server over the given data root.
 func New(root store.Root) (*Server, error) {
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
 			"stateLabel": stateLabel,
 			"badge":      func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
+			"cardHref":   cardHref,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {

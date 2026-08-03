@@ -59,6 +59,36 @@
         toggle.setAttribute('aria-pressed', order === 'oldest' ? 'true' : 'false');
       });
     })();
+
+    (function () {
+      // Deep-link support: /ticket/{id}/{attempt}#event-{seq} scrolls to and
+      // highlights that entry. Native :target handles the initial load, but the
+      // log region is an htmx innerHTML poll (task-008): each swap replaces the
+      // <li id="event-N"> nodes and the browser drops its :target reference, so
+      // the highlight would vanish on the next poll. We mirror the target onto
+      // an .is-target class and re-apply it after every settle. DOM ids never
+      // move (the order toggle is a pure CSS flip), so anchors survive both the
+      // toggle and the poll.
+      function targetId() {
+        var m = (location.hash || '').match(/^#(event-\d+)$/);
+        return m ? m[1] : null;
+      }
+      function apply(scroll) {
+        var prev = document.querySelector('.event.is-target');
+        if (prev) prev.classList.remove('is-target');
+        var id = targetId();
+        if (!id) return;
+        var el = document.getElementById(id); // stale/unknown seq -> null, no jump
+        if (!el) return;
+        el.classList.add('is-target');
+        if (scroll) el.scrollIntoView({ block: 'center' });
+      }
+      // Land on load, follow same-page permalink clicks, and survive log swaps
+      // (re-highlight only — swaps keep scroll position, so don't yank the reader).
+      window.addEventListener('hashchange', function () { apply(true); });
+      document.body.addEventListener('htmx:afterSettle', function () { apply(false); });
+      apply(true);
+    })();
   </script>
 </body>
 </html>{{end}}
@@ -67,9 +97,9 @@
 
 {{define "attempt-log"}}<ol class="timeline" data-testid="log-timeline">
         {{range .Events}}
-        <li class="event event-{{.Type}}" data-testid="event-{{.Seq}}">
+        <li class="event event-{{.Type}}" id="event-{{.Seq}}" data-testid="event-{{.Seq}}">
           <div class="event-head">
-            <span class="seq">#{{.Seq}}</span>
+            <a class="seq" href="#event-{{.Seq}}" title="Permalink to this entry">#{{.Seq}}</a>
             <span class="type type-{{.Type}}">{{.Type}}</span>
             <span class="actor">{{.Actor}}</span>
             <span class="ts">{{.TS}}</span>

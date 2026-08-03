@@ -30,7 +30,8 @@ test.describe("attempt detail", () => {
     await page.goto("/");
     await page.getByTestId("col-stuck").getByTestId("attempt-link-PROJ-101-0001").click();
 
-    await expect(page).toHaveURL(/\/ticket\/PROJ-101\/0001$/);
+    // A Stuck card deep-links to its open escalation (the latest event, #3).
+    await expect(page).toHaveURL(/\/ticket\/PROJ-101\/0001#event-3$/);
     await expect(page.getByTestId("ticket-detail")).toBeVisible();
     await expect(page.getByTestId("state-badge")).toHaveText("Stuck");
     // Attempt provenance is shown.
@@ -116,6 +117,56 @@ test.describe("attempt detail", () => {
     await expect(page.getByTestId("log-region")).toHaveAttribute("data-order", "oldest");
     await expect(toggle).toHaveText("Oldest first");
     expect(await visualOrder(page)).toEqual(["event-1", "event-2", "event-3"]);
+  });
+
+  // task-011: a single log entry is linkable, lands on load, and stays
+  // highlighted through the order toggle and — the coordination with task-008 —
+  // the periodic htmx log swap, which drops the browser's native :target ref.
+  test.describe("deep link to a log entry", () => {
+    test("lands on and highlights the targeted entry on load", async ({ page }) => {
+      await page.goto("/ticket/PROJ-101/0001#event-2");
+      const target = page.getByTestId("event-2");
+      await expect(target).toHaveClass(/is-target/);
+      await expect(target).toBeInViewport();
+      // Only the targeted entry is highlighted.
+      await expect(page.locator(".event.is-target")).toHaveCount(1);
+    });
+
+    test("the seq label is a copyable permalink that highlights on click", async ({ page }) => {
+      await page.goto("/ticket/PROJ-101/0001");
+      const link = page.getByTestId("event-2").locator("a.seq");
+      await expect(link).toHaveAttribute("href", "#event-2");
+      await link.click();
+      await expect(page).toHaveURL(/\/ticket\/PROJ-101\/0001#event-2$/);
+      await expect(page.getByTestId("event-2")).toHaveClass(/is-target/);
+    });
+
+    test("the highlight survives the order toggle (DOM ids never move)", async ({ page }) => {
+      await page.goto("/ticket/PROJ-101/0001#event-1");
+      await expect(page.getByTestId("event-1")).toHaveClass(/is-target/);
+      await page.getByTestId("log-order-toggle").click();
+      await expect(page.getByTestId("log-region")).toHaveAttribute("data-order", "oldest");
+      await expect(page.getByTestId("event-1")).toHaveClass(/is-target/);
+    });
+
+    test("the highlight survives a live poll", async ({ page }) => {
+      await page.goto("/ticket/PROJ-101/0001#event-2");
+      await expect(page.getByTestId("event-2")).toHaveClass(/is-target/);
+      // Let at least one 3s poll swap the log region's innerHTML. Native :target
+      // is lost on the replaced node; the JS .is-target mirror re-applies it.
+      await page.waitForTimeout(3500);
+      await expect(page.getByTestId("event-2")).toHaveClass(/is-target/);
+      await expect(page.locator(".event.is-target")).toHaveCount(1);
+    });
+
+    test("a stale/unknown seq neither errors nor jumps", async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (e) => errors.push(String(e)));
+      await page.goto("/ticket/PROJ-101/0001#event-999");
+      await expect(page.getByTestId("ticket-detail")).toBeVisible();
+      await expect(page.locator(".event.is-target")).toHaveCount(0);
+      expect(errors).toEqual([]);
+    });
   });
 
   test("the attempt index lists a ticket's attempts", async ({ page }) => {

@@ -23,4 +23,36 @@ test.describe("board control states (per attempt)", () => {
     await expect(running.getByTestId("attempt-link-PROJ-101-0002")).toBeVisible();
     await expect(running.getByTestId("attempt-link-PROJ-103-0001")).toBeVisible();
   });
+
+  // task-011 (board follow-through): a Stuck/Review card deep-links to the log
+  // entry that put it there, so one click lands the human on the escalation or
+  // review claim already highlighted — no scrolling the log to find it.
+  test("a Stuck card opens on and highlights its open escalation", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("col-stuck").getByTestId("attempt-link-PROJ-101-0001").click();
+
+    // PROJ-101/0001's latest event is the escalation (#3).
+    await expect(page).toHaveURL(/\/ticket\/PROJ-101\/0001#event-3$/);
+    const esc = page.getByTestId("event-3");
+    await expect(esc).toHaveClass(/is-target/);
+    await expect(esc).toContainText("Which currency rounding rule for JPY?");
+    await expect(esc).toBeInViewport();
+  });
+
+  test("a Review card opens on and highlights its review claim", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("col-review").getByTestId("attempt-link-PROJ-102-0001").click();
+
+    // PROJ-102/0001's latest event is the review claim (#3).
+    await expect(page).toHaveURL(/\/ticket\/PROJ-102\/0001#event-3$/);
+    const review = page.getByTestId("event-3");
+    await expect(review).toHaveClass(/is-target/);
+    await expect(review).toContainText("PR #142 open");
+  });
+
+  test("a Running card links to the attempt with no deep-link fragment", async ({ page }) => {
+    await page.goto("/");
+    const link = page.getByTestId("col-running").getByTestId("attempt-link-PROJ-103-0001");
+    await expect(link).toHaveAttribute("href", "/ticket/PROJ-103/0001");
+  });
 });

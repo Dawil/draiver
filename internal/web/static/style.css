@@ -11,11 +11,12 @@
   --running: #56b6c2;
   --done: #6bbf73;
   --accent: #7aa2f7;
+  --accent-bg: #1c2438;
 }
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #f5f6f8; --panel: #fff; --panel-2: #eef0f4; --ink: #1a1d24;
-    --muted: #5c6474; --line: #dfe3ea; --alert-bg: #fdecee;
+    --muted: #5c6474; --line: #dfe3ea; --alert-bg: #fdecee; --accent-bg: #e9effc;
   }
 }
 * { box-sizing: border-box; }
@@ -87,13 +88,17 @@ body {
    the reader's choice. */
 .log-region[data-order="newest"] .timeline { flex-direction: column-reverse; }
 .log-region[data-order="oldest"] .timeline { flex-direction: column; }
-.event { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.event { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; scroll-margin-top: 16px; }
+/* Deep-linked entry: native :target lands it on load; the .is-target mirror keeps
+   the highlight across htmx log swaps (see the deep-link script in ticket.html). */
+.event:target, .event.is-target { border-color: var(--accent); border-left-color: var(--accent); background: var(--accent-bg); outline: 2px solid var(--accent); outline-offset: 1px; }
 .event-escalation { border-left-color: var(--alert); }
 .event-resolution { border-left-color: var(--done); }
 .event-decision { border-left-color: var(--accent); }
 .event-review { border-left-color: var(--review); }
 .event-head { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
-.event-head .seq { font-weight: 700; color: var(--ink); }
+.event-head .seq { font-weight: 700; color: var(--ink); text-decoration: none; }
+.event-head a.seq:hover { color: var(--accent); text-decoration: underline; }
 .event-head .type { text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
 .type-escalation { color: var(--alert); }
 .type-resolution { color: var(--done); }

@@ -96,6 +96,32 @@ func TestBoardPartialCounts(t *testing.T) {
 	}
 }
 
+// TestBoardCardsDeepLinkStuckAndReview pins that a Stuck or Review card links
+// straight to the latest log entry (the open escalation / the review claim) via
+// an #event-N fragment, while Running/Done cards link to the attempt with no
+// fragment. One click lands the human on the exact entry needing attention.
+func TestBoardCardsDeepLinkStuckAndReview(t *testing.T) {
+	h := newServer(t)
+	body := get(t, h, "/board").Body.String()
+	for _, want := range []string{
+		// Stuck: PROJ-1/0001's latest event is the escalation (#2).
+		`data-testid="attempt-link-PROJ-1-0001" href="/ticket/PROJ-1/0001#event-2"`,
+		// Review: PROJ-2/0001's latest event is the review claim (#2).
+		`data-testid="attempt-link-PROJ-2-0001" href="/ticket/PROJ-2/0001#event-2"`,
+		// Running cards stay plain (no deep link).
+		`data-testid="attempt-link-PROJ-3-0001" href="/ticket/PROJ-3/0001"`,
+		`data-testid="attempt-link-PROJ-1-0002" href="/ticket/PROJ-1/0002"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("board card link missing %q\n%s", want, body)
+		}
+	}
+	// A Running/Done card must not carry an #event fragment.
+	if strings.Contains(body, `href="/ticket/PROJ-3/0001#event`) {
+		t.Errorf("Running card should not deep-link to a log entry")
+	}
+}
+
 func TestAttemptIndexListsAttempts(t *testing.T) {
 	h := newServer(t)
 	rr := get(t, h, "/ticket/PROJ-1")
@@ -124,21 +150,21 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	for _, want := range []string{
 		`data-testid="ticket-detail"`,
 		`data-testid="state-badge"`,
-		"Use OAuth for login.",       // rendered spec markdown
-		`data-testid="event-1"`,           // created
-		`data-testid="event-2"`,           // escalation
-		"which base image?",               // escalation body
-		`data-testid="unresolved-2"`,      // shown as unresolved
-		`data-testid="log-order-toggle"`,  // the ordering toggle
-		`data-testid="log-timeline"`,      // the log list
-		`data-testid="log-region"`,        // the htmx-polled log region
-		`data-order="newest"`,             // default visual order is newest-first
+		"Use OAuth for login.",              // rendered spec markdown
+		`data-testid="event-1"`,             // created
+		`data-testid="event-2"`,             // escalation
+		"which base image?",                 // escalation body
+		`data-testid="unresolved-2"`,        // shown as unresolved
+		`data-testid="log-order-toggle"`,    // the ordering toggle
+		`data-testid="log-timeline"`,        // the log list
+		`data-testid="log-region"`,          // the htmx-polled log region
+		`data-order="newest"`,               // default visual order is newest-first
 		`hx-get="/ticket/PROJ-1/0001/live"`, // the region polls the live fragment
-		`hx-trigger="every 3s"`,           // ...on the board's polling cadence
-		"htmx.min.js",                     // htmx is loaded locally (no CDN)
-		`data-testid="breadcrumb"`,        // board › attempts › <attempt> trail
-		`href="/"`,                        // breadcrumb: one click to the board
-		`href="/ticket/PROJ-1"`,           // breadcrumb: one click to the attempt list
+		`hx-trigger="every 3s"`,             // ...on the board's polling cadence
+		"htmx.min.js",                       // htmx is loaded locally (no CDN)
+		`data-testid="breadcrumb"`,          // board › attempts › <attempt> trail
+		`href="/"`,                          // breadcrumb: one click to the board
+		`href="/ticket/PROJ-1"`,             // breadcrumb: one click to the attempt list
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q", want)
@@ -150,6 +176,54 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	// replaces only the list can never disturb the reader's chosen order.
 	if i1, i2 := strings.Index(body, `data-testid="event-1"`), strings.Index(body, `data-testid="event-2"`); i1 > i2 {
 		t.Errorf("expected oldest-first DOM: event-1 (%d) should precede event-2 (%d)", i1, i2)
+	}
+}
+
+// TestDeepLinkAnchors pins the deep-link contract (task-011): every log event is
+// URL-addressable, its seq label is a copyable permalink, and the anchor markup
+// is present in BOTH the full page and the /live fragment — so navigating to
+// /ticket/{id}/{attempt}#event-N lands on and highlights event N, and an htmx
+// swap of the log region re-renders the same ids (the client script re-applies
+// the highlight after the swap). The highlight itself is styled in style.css.
+func TestDeepLinkAnchors(t *testing.T) {
+	h := newServer(t)
+
+	// Full page: each event is a scroll target, the seq is a permalink, and the
+	// client script re-targets after every htmx settle so the highlight survives
+	// the log poll (task-008's innerHTML swap drops the browser's :target ref).
+	page := get(t, h, "/ticket/PROJ-1/0001").Body.String()
+	for _, want := range []string{
+		`id="event-1"`,     // event is a URL fragment target
+		`id="event-2"`,     //
+		`href="#event-1"`,  // seq label is a copyable permalink
+		`href="#event-2"`,  //
+		"htmx:afterSettle", // highlight is re-applied after each log swap
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("detail page missing deep-link hook %q", want)
+		}
+	}
+
+	// The live fragment carries the same anchor ids, so a swap never strips the
+	// addressable targets out of the DOM.
+	frag := get(t, h, "/ticket/PROJ-1/0001/live").Body.String()
+	for _, want := range []string{`id="event-1"`, `href="#event-1"`} {
+		if !strings.Contains(frag, want) {
+			t.Errorf("live fragment missing deep-link hook %q", want)
+		}
+	}
+
+	// The stylesheet highlights the targeted entry (native :target on load and
+	// the JS .is-target mirror across swaps).
+	css := get(t, h, "/static/style.css")
+	if css.Code != 200 {
+		t.Fatalf("GET /static/style.css = %d", css.Code)
+	}
+	cssBody := css.Body.String()
+	for _, want := range []string{".event:target", ".event.is-target"} {
+		if !strings.Contains(cssBody, want) {
+			t.Errorf("style.css missing target highlight rule %q", want)
+		}
 	}
 }
 
@@ -165,10 +239,10 @@ func TestAttemptLiveFragment(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, want := range []string{
-		`data-testid="log-timeline"`,               // primary swap: the log list
-		`data-testid="event-1"`,                    // ...with the events
-		`id="state-badge"`,                          // OOB state badge target
-		`hx-swap-oob="true"`,                        // ...swapped out of band
+		`data-testid="log-timeline"`, // primary swap: the log list
+		`data-testid="event-1"`,      // ...with the events
+		`id="state-badge"`,           // OOB state badge target
+		`hx-swap-oob="true"`,         // ...swapped out of band
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("live fragment missing %q", want)
