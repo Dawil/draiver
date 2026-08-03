@@ -68,6 +68,7 @@ An **attempt** owns one log and one hash chain, and spans many respawned session
 
 Discoverable via --help; the verbs are to agents what the status enum is to Issue Tracker.
 
+* `new PROJ-123 --title …` — create a ticket (`spec.md`) and its first attempt. A title is mandatory and comes from exactly one source: `--title`, or a `--spec` import file whose frontmatter already carries a `title:`. `--spec f.md --title T` titles a title-less import `T` (injecting the frontmatter); supplying a title from both sources, or from neither, is rejected and writes nothing. Blank/whitespace titles count as unset.
 * `brief PROJ-123` — replay spec + log into a context blob that cold-starts a fresh agent. If brief isn't enough to resume, the design is leaking state.
 * `escalate` — append an escalation event and halt (nonzero exit). The gate is enforced by process control, not agent goodwill.
 * `resolve` — the human's answer, appended and linked back. Escalation + resolution is one durable artefact.

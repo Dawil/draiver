@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"draiver/internal/project"
 	"draiver/internal/store"
 	"draiver/internal/ticketlog"
 )
@@ -153,15 +154,80 @@ func TestReviewAndDone(t *testing.T) {
 	}
 }
 
-func TestSpecImport(t *testing.T) {
+// specTitle returns the title project derives from a written ticket's spec.md,
+// the same value the board shows.
+func specTitle(t *testing.T, dir, id string) string {
+	t.Helper()
+	m, err := project.LoadAttempt(store.Root{Dir: dir}, id, "0001")
+	if err != nil {
+		t.Fatalf("load attempt %s: %v", id, err)
+	}
+	return m.Title
+}
+
+// A title-less import carried by --title yields a titled ticket, and the design
+// doc's body survives verbatim.
+func TestSpecImportInjectsTitle(t *testing.T) {
 	dir := t.TempDir()
 	specFile := filepath.Join(dir, "imported.md")
 	os.WriteFile(specFile, []byte("# Imported design\n\nbody"), 0o644)
-	if _, code := run(t, "--data", dir, "new", "PROJ-2", "--spec", specFile); code != 0 {
-		t.Fatalf("new --spec exited %d", code)
+	if _, code := run(t, "--data", dir, "new", "PROJ-2", "--spec", specFile, "--title", "Real Title"); code != 0 {
+		t.Fatalf("new --spec --title exited %d", code)
 	}
 	got, _ := os.ReadFile(store.Root{Dir: dir}.SpecPath("PROJ-2"))
 	if !strings.Contains(string(got), "Imported design") {
-		t.Errorf("imported spec not used: %s", got)
+		t.Errorf("imported body not preserved:\n%s", got)
+	}
+	if got := specTitle(t, dir, "PROJ-2"); got != "Real Title" {
+		t.Errorf("title = %q, want injected %q", got, "Real Title")
+	}
+}
+
+// An import whose frontmatter already carries a title needs no --title.
+func TestSpecImportUsesFrontmatterTitle(t *testing.T) {
+	dir := t.TempDir()
+	specFile := filepath.Join(dir, "imported.md")
+	os.WriteFile(specFile, []byte("---\ntitle: From Frontmatter\n---\n\nbody"), 0o644)
+	if _, code := run(t, "--data", dir, "new", "PROJ-3", "--spec", specFile); code != 0 {
+		t.Fatalf("new --spec exited %d", code)
+	}
+	if got := specTitle(t, dir, "PROJ-3"); got != "From Frontmatter" {
+		t.Errorf("title = %q, want %q", got, "From Frontmatter")
+	}
+}
+
+// No title from any source is rejected, and nothing is written.
+func TestNewRequiresTitle(t *testing.T) {
+	dir := t.TempDir()
+	if _, code := run(t, "--data", dir, "new", "PROJ-4"); code == 0 {
+		t.Error("expected nonzero exit creating a title-less ticket")
+	}
+	if (store.Root{Dir: dir}).Exists("PROJ-4") {
+		t.Error("rejected new left an orphan ticket dir")
+	}
+
+	// A blank/whitespace --title counts as unset.
+	if _, code := run(t, "--data", dir, "new", "PROJ-4", "--title", "   "); code == 0 {
+		t.Error("expected nonzero exit for a whitespace-only title")
+	}
+
+	// A title-less import with no --title is rejected too.
+	specFile := filepath.Join(dir, "prose.md")
+	os.WriteFile(specFile, []byte("# just prose\n"), 0o644)
+	if _, code := run(t, "--data", dir, "new", "PROJ-4", "--spec", specFile); code == 0 {
+		t.Error("expected nonzero exit importing a title-less doc without --title")
+	}
+	if (store.Root{Dir: dir}).Exists("PROJ-4") {
+		t.Error("rejected import left an orphan ticket dir")
+	}
+}
+
+// Supplying a title from both sources is ambiguous and rejected.
+func TestNewRejectsDoubleTitle(t *testing.T) {
+	dir := t.TempDir()
+	specFile := filepath.Join(dir, "imported.md")
+	os.WriteFile(specFile, []byte("---\ntitle: From Frontmatter\n---\n\nbody"), 0o644)
+	if _, code := run(t, "--data", dir, "new", "PROJ-5", "--spec", specFile, "--title", "From Flag"); code == 0 {
+		t.Error("expected nonzero exit when title is set by both sources")
 	}
 }
