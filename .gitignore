@@ -1,0 +1,19 @@
+# Go
+/draiver
+*.test
+*.out
+
+# Local data
+.draiver/
+
+# Node / Playwright (e2e)
+node_modules/
+/e2e/node_modules/
+/e2e/test-results/
+/e2e/playwright-report/
+/e2e/blob-report/
+/e2e/playwright/.cache/
+
+# misc
+.DS_Store
+*.log
