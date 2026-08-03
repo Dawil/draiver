@@ -14,6 +14,12 @@
     <h1>Draiver</h1>
     <p class="tagline">Agents are cattle, tickets are pets. You attend only to what needs you.</p>
   </header>
+  {{/* The board poll is unconditional by design: unlike a Done attempt (terminal
+       and immutable, so its detail self-cancels via 286), the board is never
+       terminal — a new ticket or attempt can appear at any moment, and polling is
+       the only thing that surfaces it (read-only server, no push/SSE). An "idle"
+       board is not a settled state, so it must keep listening. One 3s GET of a
+       single region is cheap; quiescing it would strand the board until F5. */}}
   <main id="board-region" data-testid="board" hx-get="/board" hx-trigger="every 3s" hx-swap="innerHTML">
     {{template "board.html" .}}
   </main>
