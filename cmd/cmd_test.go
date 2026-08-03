@@ -17,10 +17,14 @@ import (
 // tests don't contaminate each other.
 func run(t *testing.T, args ...string) (string, int) {
 	t.Helper()
-	dataFlag, actorFlag = "", ""
+	dataFlag, actorFlag, attemptFlag = "", "", ""
 	logType = ""
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
+	newTool, newModel = "", ""
+	attemptTool, attemptModel, attemptFrom = "", "", ""
+	inboxMine = false
+	t.Setenv("DRAIVER_ATTEMPT", "")
 
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)
@@ -62,7 +66,7 @@ func TestNewScaffolds(t *testing.T) {
 		t.Errorf("spec missing identity frontmatter:\n%s", spec)
 	}
 
-	events, err := ticketlog.Read(root, "PROJ-1")
+	events, err := ticketlog.Read(root, "PROJ-1", "0001")
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
@@ -82,7 +86,7 @@ func TestLogAppendsTypedEvent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("log exited %d: %s", code, out)
 	}
-	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1")
+	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
 	last := events[len(events)-1]
 	if last.Type != "gotcha" || last.Body != "cgo needed" || last.Actor != "agent:x" {
 		t.Errorf("unexpected event: %+v", last)
@@ -105,7 +109,7 @@ func TestEscalateExitsWithGateCode(t *testing.T) {
 	if !strings.Contains(out, "halting") {
 		t.Errorf("escalate output missing halt notice: %q", out)
 	}
-	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1")
+	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
 	last := events[len(events)-1]
 	if last.Type != "escalation" {
 		t.Errorf("last event = %q want escalation", last.Type)
@@ -120,7 +124,7 @@ func TestResolveLinksToEscalation(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("resolve exited %d: %s", code, out)
 	}
-	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1")
+	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
 	last := events[len(events)-1]
 	if last.Type != "resolution" || len(last.Refs) != 1 || last.Refs[0] != 2 {
 		t.Errorf("resolution not linked: %+v", last)
@@ -142,7 +146,7 @@ func TestReviewAndDone(t *testing.T) {
 	dir := newTicket(t)
 	run(t, "--data", dir, "--actor", "agent:x", "review", "PROJ-1")
 	run(t, "--data", dir, "--actor", "human:dave", "done", "PROJ-1")
-	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1")
+	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
 	if events[len(events)-2].Type != "review" || events[len(events)-1].Type != "done" {
 		t.Errorf("expected review then done, got %q %q",
 			events[len(events)-2].Type, events[len(events)-1].Type)

@@ -2,51 +2,33 @@
 <div class="columns">
   <section class="col col-needs-me" data-testid="col-needs-me">
     <h2>Needs me <span class="count" data-testid="count-needs-me">{{len .NeedsMe}}</span></h2>
-    {{range .NeedsMe}}
-      <a class="card card-alert" data-testid="ticket-link-{{.ID}}" href="/ticket/{{.ID}}">
-        <span class="tid">{{.ID}}</span>
-        <span class="title">{{.Title}}</span>
-        <span class="badge">{{len .OpenEscalations}} open</span>
-      </a>
-    {{else}}
-      <p class="muted">Nothing blocked.</p>
-    {{end}}
+    {{range .NeedsMe}}{{template "card" .}}{{else}}<p class="muted">Nothing blocked.</p>{{end}}
   </section>
 
   <section class="col col-review" data-testid="col-review">
     <h2>Review <span class="count" data-testid="count-review">{{len .Review}}</span></h2>
-    {{range .Review}}
-      <a class="card" data-testid="ticket-link-{{.ID}}" href="/ticket/{{.ID}}">
-        <span class="tid">{{.ID}}</span>
-        <span class="title">{{.Title}}</span>
-      </a>
-    {{else}}
-      <p class="muted">No claims to review.</p>
-    {{end}}
+    {{range .Review}}{{template "card" .}}{{else}}<p class="muted">No claims to review.</p>{{end}}
   </section>
 
   <section class="col col-running" data-testid="col-running">
     <h2>Running <span class="count" data-testid="count-running">{{len .Running}}</span></h2>
-    {{range .Running}}
-      <a class="card card-quiet" data-testid="ticket-link-{{.ID}}" href="/ticket/{{.ID}}">
-        <span class="tid">{{.ID}}</span>
-        <span class="title">{{.Title}}</span>
-      </a>
-    {{else}}
-      <p class="muted">Idle.</p>
-    {{end}}
+    {{range .Running}}{{template "card" .}}{{else}}<p class="muted">Idle.</p>{{end}}
   </section>
 
   <section class="col col-done" data-testid="col-done">
     <h2>Done <span class="count" data-testid="count-done">{{len .Done}}</span></h2>
-    {{range .Done}}
-      <a class="card card-quiet" data-testid="ticket-link-{{.ID}}" href="/ticket/{{.ID}}">
-        <span class="tid">{{.ID}}</span>
-        <span class="title">{{.Title}}</span>
-      </a>
-    {{else}}
-      <p class="muted">—</p>
-    {{end}}
+    {{range .Done}}{{template "card" .}}{{else}}<p class="muted">—</p>{{end}}
   </section>
 </div>
+{{end}}
+
+{{define "card"}}
+<a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="/ticket/{{.Ticket}}/{{.ID}}">
+  <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
+  <span class="title">{{.Title}}</span>
+  <span class="meta-row">
+    {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
+    {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
+  </span>
+</a>
 {{end}}

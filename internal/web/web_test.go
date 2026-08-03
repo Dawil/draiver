@@ -16,23 +16,29 @@ func seedBoard(t *testing.T) store.Root {
 	t.Helper()
 	root := store.Root{Dir: t.TempDir()}
 
-	mk := func(id, title string) {
-		if err := root.EnsureTicketDirs(id); err != nil {
+	mk := func(id, title, att string) {
+		if err := root.EnsureAttemptDirs(id, att); err != nil {
 			t.Fatal(err)
 		}
 		os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: "+title+"\n---\n\n# "+title+"\n\nUse OAuth for login."), 0o644)
-		if _, err := ticketlog.Append(root, id, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	mk("PROJ-1", "Blocked one")
-	ticketlog.Append(root, "PROJ-1", event.Event{Type: "escalation", Actor: "agent:x", Body: "which base image?"})
+	// PROJ-1 attempt 0001 -> Needs me
+	mk("PROJ-1", "Blocked one", "0001")
+	ticketlog.Append(root, "PROJ-1", "0001", event.Event{Type: "escalation", Actor: "agent:x", Body: "which base image?"})
+	// PROJ-1 attempt 0002 -> Running (same ticket, second card)
+	root.EnsureAttemptDirs("PROJ-1", "0002")
+	ticketlog.Append(root, "PROJ-1", "0002", event.Event{Type: "created", Actor: "a", Body: "retry"})
 
-	mk("PROJ-2", "Review two")
-	ticketlog.Append(root, "PROJ-2", event.Event{Type: "review", Actor: "agent:x", Body: "done, please review"})
+	// PROJ-2 attempt 0001 -> Review
+	mk("PROJ-2", "Review two", "0001")
+	ticketlog.Append(root, "PROJ-2", "0001", event.Event{Type: "review", Actor: "agent:x", Body: "done, please review"})
 
-	mk("PROJ-3", "Running three")
+	// PROJ-3 attempt 0001 -> Running
+	mk("PROJ-3", "Running three", "0001")
 	return root
 }
 
@@ -52,7 +58,7 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 	return rr
 }
 
-func TestBoardShowsControlStates(t *testing.T) {
+func TestBoardShowsControlStatesPerAttempt(t *testing.T) {
 	h := newServer(t)
 	rr := get(t, h, "/")
 	if rr.Code != 200 {
@@ -64,8 +70,9 @@ func TestBoardShowsControlStates(t *testing.T) {
 		`data-testid="col-review"`,
 		`data-testid="col-running"`,
 		`data-testid="col-done"`,
-		`data-testid="ticket-link-PROJ-1"`, // the blocked ticket is in Needs me
-		"htmx.min.js",                      // self-contained polling script
+		`data-testid="attempt-link-PROJ-1-0001"`, // blocked attempt in Needs me
+		`data-testid="attempt-link-PROJ-1-0002"`, // same ticket, second card, Running
+		"htmx.min.js",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("board missing %q", want)
@@ -76,19 +83,19 @@ func TestBoardShowsControlStates(t *testing.T) {
 func TestBoardPartialCounts(t *testing.T) {
 	h := newServer(t)
 	body := get(t, h, "/board").Body.String()
-	// PROJ-1 needs me, PROJ-2 review, PROJ-3 running.
+	// Needs me: PROJ-1/0001. Review: PROJ-2/0001. Running: PROJ-1/0002 + PROJ-3/0001.
 	if !strings.Contains(body, `data-testid="count-needs-me">1<`) {
 		t.Errorf("needs-me count wrong:\n%s", body)
 	}
 	if !strings.Contains(body, `data-testid="count-review">1<`) {
 		t.Errorf("review count wrong")
 	}
-	if !strings.Contains(body, `data-testid="count-running">1<`) {
-		t.Errorf("running count wrong")
+	if !strings.Contains(body, `data-testid="count-running">2<`) {
+		t.Errorf("running count wrong (want 2):\n%s", body)
 	}
 }
 
-func TestTicketDetailRendersSpecAndTimeline(t *testing.T) {
+func TestAttemptIndexListsAttempts(t *testing.T) {
 	h := newServer(t)
 	rr := get(t, h, "/ticket/PROJ-1")
 	if rr.Code != 200 {
@@ -96,13 +103,31 @@ func TestTicketDetailRendersSpecAndTimeline(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, want := range []string{
+		`data-testid="attempt-index"`,
+		`href="/ticket/PROJ-1/0001"`,
+		`href="/ticket/PROJ-1/0002"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("attempt index missing %q", want)
+		}
+	}
+}
+
+func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
+	h := newServer(t)
+	rr := get(t, h, "/ticket/PROJ-1/0001")
+	if rr.Code != 200 {
+		t.Fatalf("GET /ticket/PROJ-1/0001 = %d", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
 		`data-testid="ticket-detail"`,
 		`data-testid="state-badge"`,
-		"Use OAuth for login.",             // rendered spec markdown
-		`data-testid="event-1"`,            // created event in timeline
-		`data-testid="event-2"`,            // escalation event
-		"which base image?",                // escalation body
-		`data-testid="unresolved-2"`,       // escalation shown as unresolved
+		"Use OAuth for login.",       // rendered spec markdown
+		`data-testid="event-1"`,      // created
+		`data-testid="event-2"`,      // escalation
+		"which base image?",          // escalation body
+		`data-testid="unresolved-2"`, // shown as unresolved
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q", want)
@@ -110,16 +135,19 @@ func TestTicketDetailRendersSpecAndTimeline(t *testing.T) {
 	}
 }
 
-func TestUnknownTicket404(t *testing.T) {
+func TestUnknownRoutes404(t *testing.T) {
 	h := newServer(t)
 	if rr := get(t, h, "/ticket/NOPE-1"); rr.Code != 404 {
 		t.Errorf("unknown ticket = %d want 404", rr.Code)
+	}
+	if rr := get(t, h, "/ticket/PROJ-1/9999"); rr.Code != 404 {
+		t.Errorf("unknown attempt = %d want 404", rr.Code)
 	}
 }
 
 func TestReadOnlyNoWriteRoutes(t *testing.T) {
 	h := newServer(t)
-	for _, path := range []string{"/", "/board", "/ticket/PROJ-1"} {
+	for _, path := range []string{"/", "/board", "/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, path, nil))
 		if rr.Code != http.StatusMethodNotAllowed {

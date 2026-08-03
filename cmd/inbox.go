@@ -13,14 +13,14 @@ var inboxMine bool
 
 var inboxCmd = &cobra.Command{
 	Use:   "inbox",
-	Short: "List unresolved escalations across all tickets",
+	Short: "List unresolved escalations across all attempts of all tickets",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()
 		if err != nil {
 			return err
 		}
-		tickets, err := project.LoadAll(root)
+		attempts, err := project.LoadAll(root)
 		if err != nil {
 			return err
 		}
@@ -28,12 +28,12 @@ var inboxCmd = &cobra.Command{
 
 		out := cmd.OutOrStdout()
 		n := 0
-		for _, t := range tickets {
-			if inboxMine && !assigneeMatches(t.Assignee, me) {
+		for _, a := range attempts {
+			if inboxMine && !assigneeMatches(a.Assignee, me) {
 				continue
 			}
-			for _, e := range t.OpenEscalations {
-				fmt.Fprintf(out, "%s #%d — %s\n", t.ID, e.Seq, firstLine(e.Body))
+			for _, e := range a.OpenEscalations {
+				fmt.Fprintf(out, "%s/%s #%d — %s\n", a.Ticket, a.ID, e.Seq, firstLine(e.Body))
 				n++
 			}
 		}

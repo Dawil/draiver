@@ -1,5 +1,6 @@
-// Package audit verifies a ticket's hash-chained log: each event must recompute
-// to its stored hash and link to its predecessor. Any edit breaks the chain.
+// Package audit verifies an attempt's hash-chained log: each event must
+// recompute to its stored hash and link to its predecessor. Any edit breaks the
+// chain.
 package audit
 
 import (
@@ -12,6 +13,7 @@ import (
 
 // Result reports whether a chain is intact, and if not, the first broken event.
 type Result struct {
+	Attempt   string
 	OK        bool
 	Count     int
 	BrokenSeq int    // seq of the first broken event (0 if OK)
@@ -21,7 +23,7 @@ type Result struct {
 // Verify checks events (in seq order) for hash integrity and prev linkage.
 func Verify(events []event.Event) Result {
 	var prevHash string
-	for i, e := range events {
+	for _, e := range events {
 		if e.Prev != prevHash {
 			return Result{
 				OK:        false,
@@ -40,19 +42,38 @@ func Verify(events []event.Event) Result {
 					e.Seq, short(e.Hash), short(got)),
 			}
 		}
-		_ = i
 		prevHash = e.Hash
 	}
 	return Result{OK: true, Count: len(events)}
 }
 
-// VerifyTicket reads and verifies a ticket's log.
-func VerifyTicket(root store.Root, id string) (Result, error) {
-	events, err := ticketlog.Read(root, id)
+// VerifyAttempt reads and verifies one attempt's log.
+func VerifyAttempt(root store.Root, ticket, id string) (Result, error) {
+	events, err := ticketlog.Read(root, ticket, id)
 	if err != nil {
 		return Result{}, err
 	}
-	return Verify(events), nil
+	res := Verify(events)
+	res.Attempt = id
+	return res, nil
+}
+
+// VerifyTicket verifies every attempt's chain on a ticket, returning one result
+// per attempt in id order.
+func VerifyTicket(root store.Root, ticket string) ([]Result, error) {
+	ids, err := root.ListAttempts(ticket)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]Result, 0, len(ids))
+	for _, id := range ids {
+		res, err := VerifyAttempt(root, ticket, id)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
 }
 
 func short(h string) string {

@@ -1,5 +1,6 @@
-// Package project derives a ticket's control state — the human's relationship to
-// it — from the append-only log, and renders the generated state.md projection.
+// Package project derives an attempt's control state — the human's relationship
+// to it — from its append-only log, and renders the generated state.md
+// projection. Each attempt on a ticket has its own state.
 package project
 
 import (
@@ -10,12 +11,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"draiver/internal/attempt"
 	"draiver/internal/event"
 	"draiver/internal/store"
 	"draiver/internal/ticketlog"
 )
 
-// State is a control state: the human's relationship to the ticket, not its
+// State is a control state: the human's relationship to the attempt, not its
 // progress.
 type State string
 
@@ -26,8 +28,8 @@ const (
 	Done    State = "Done"     // closed
 )
 
-// Meta is the identity carried in spec.md frontmatter.
-type Meta struct {
+// SpecMeta is the identity carried in a ticket's spec.md frontmatter.
+type SpecMeta struct {
 	ID       string `yaml:"id"`
 	Title    string `yaml:"title"`
 	Project  string `yaml:"project"`
@@ -35,15 +37,21 @@ type Meta struct {
 	Assignee string `yaml:"assignee"`
 }
 
-// Ticket is a ticket's identity plus its derived control state and log.
-type Ticket struct {
-	Meta
+// Attempt is one attempt's identity plus its derived control state and log. It
+// is the unit rendered as a board card.
+type Attempt struct {
+	Ticket   string
+	ID       string // attempt id
+	Title    string // from ticket spec
+	Assignee string
+	Tool     string // from attempt.md
+	Model    string
+
 	State           State
 	Events          []event.Event
 	OpenEscalations []event.Event // escalations with no later resolution
 }
 
-// lifecycleTypes are the events that move a ticket between control states.
 func isLifecycle(t string) bool {
 	switch t {
 	case "escalation", "review", "done":
@@ -52,9 +60,9 @@ func isLifecycle(t string) bool {
 	return false
 }
 
-// Derive computes the control state and the set of unresolved escalations from a
-// ticket's events (which must be in seq order). Precedence, first match wins:
-// Done > Needs me (open escalation) > Review > Running.
+// Derive computes the control state and the set of unresolved escalations from
+// an attempt's events (which must be in seq order). Precedence, first match
+// wins: Done > Needs me (open escalation) > Review > Running.
 func Derive(events []event.Event) (State, []event.Event) {
 	resolved := map[int]bool{}
 	for _, e := range events {
@@ -89,90 +97,105 @@ func Derive(events []event.Event) (State, []event.Event) {
 	}
 }
 
-// Load reads a ticket's spec metadata and log and derives its state.
-func Load(root store.Root, id string) (Ticket, error) {
-	events, err := ticketlog.Read(root, id)
+// LoadAttempt reads one attempt's log + provenance + the ticket spec identity and
+// derives its state.
+func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
+	events, err := ticketlog.Read(root, ticket, id)
 	if err != nil {
-		return Ticket{}, err
+		return Attempt{}, err
 	}
-	meta, err := loadMeta(root.SpecPath(id))
+	spec, err := loadSpecMeta(root.SpecPath(ticket))
 	if err != nil {
-		return Ticket{}, err
+		return Attempt{}, err
 	}
-	if meta.ID == "" {
-		meta.ID = id
+	am, err := attempt.LoadMeta(root, ticket, id)
+	if err != nil {
+		return Attempt{}, err
 	}
-	if meta.Title == "" {
-		meta.Title = id
+	title := spec.Title
+	if title == "" {
+		title = ticket
 	}
 	state, open := Derive(events)
-	return Ticket{Meta: meta, State: state, Events: events, OpenEscalations: open}, nil
+	return Attempt{
+		Ticket: ticket, ID: id, Title: title, Assignee: spec.Assignee,
+		Tool: am.Tool, Model: am.Model,
+		State: state, Events: events, OpenEscalations: open,
+	}, nil
 }
 
-// LoadAll loads every ticket under the root, sorted by id.
-func LoadAll(root store.Root) ([]Ticket, error) {
-	ids, err := root.ListTickets()
+// LoadAll loads every attempt of every ticket under the root, sorted by ticket
+// then attempt id. Each returned Attempt is one board card.
+func LoadAll(root store.Root) ([]Attempt, error) {
+	tickets, err := root.ListTickets()
 	if err != nil {
 		return nil, err
 	}
-	tickets := make([]Ticket, 0, len(ids))
-	for _, id := range ids {
-		t, err := Load(root, id)
+	var out []Attempt
+	for _, ticket := range tickets {
+		ids, err := root.ListAttempts(ticket)
 		if err != nil {
 			return nil, err
 		}
-		tickets = append(tickets, t)
+		for _, id := range ids {
+			a, err := LoadAttempt(root, ticket, id)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, a)
+		}
 	}
-	return tickets, nil
+	return out, nil
 }
 
-func loadMeta(specPath string) (Meta, error) {
+func loadSpecMeta(specPath string) (SpecMeta, error) {
 	data, err := os.ReadFile(specPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Meta{}, nil
+			return SpecMeta{}, nil
 		}
-		return Meta{}, fmt.Errorf("read spec: %w", err)
+		return SpecMeta{}, fmt.Errorf("read spec: %w", err)
 	}
 	s := string(data)
 	if !strings.HasPrefix(s, "---\n") {
-		return Meta{}, nil // no frontmatter
+		return SpecMeta{}, nil
 	}
 	rest := s[len("---\n"):]
 	end := strings.Index(rest, "\n---")
 	if end < 0 {
-		return Meta{}, nil
+		return SpecMeta{}, nil
 	}
-	var m Meta
+	var m SpecMeta
 	if err := yaml.Unmarshal([]byte(rest[:end]), &m); err != nil {
-		return Meta{}, fmt.Errorf("parse spec frontmatter: %w", err)
+		return SpecMeta{}, fmt.Errorf("parse spec frontmatter: %w", err)
 	}
 	return m, nil
 }
 
-// RenderState renders the generated state.md projection. It is a projection of
-// the log and must never be read back as truth.
-func RenderState(t Ticket, now time.Time) []byte {
+// RenderState renders the generated per-attempt state.md projection. It is a
+// projection of the log and must never be read back as truth.
+func RenderState(a Attempt, now time.Time) []byte {
 	var b strings.Builder
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "ticket: %s\n", t.ID)
-	fmt.Fprintf(&b, "state: %s\n", t.State)
-	fmt.Fprintf(&b, "open_escalations: %d\n", len(t.OpenEscalations))
-	fmt.Fprintf(&b, "events: %d\n", len(t.Events))
+	fmt.Fprintf(&b, "ticket: %s\n", a.Ticket)
+	fmt.Fprintf(&b, "attempt: %s\n", a.ID)
+	fmt.Fprintf(&b, "state: %s\n", a.State)
+	fmt.Fprintf(&b, "open_escalations: %d\n", len(a.OpenEscalations))
+	fmt.Fprintf(&b, "events: %d\n", len(a.Events))
 	fmt.Fprintf(&b, "generated: %s\n", now.UTC().Format(time.RFC3339))
 	b.WriteString("---\n\n")
 	b.WriteString("<!-- GENERATED by `draiver status` — do not edit. Projection of the log. -->\n\n")
-	fmt.Fprintf(&b, "# %s — %s\n\n", t.ID, t.Title)
-	fmt.Fprintf(&b, "**State:** %s\n\n", t.State)
-	if len(t.OpenEscalations) > 0 {
+	fmt.Fprintf(&b, "# %s / %s — %s\n\n", a.Ticket, a.ID, a.Title)
+	fmt.Fprintf(&b, "**State:** %s\n\n", a.State)
+	if len(a.OpenEscalations) > 0 {
 		b.WriteString("## Open escalations\n\n")
-		for _, e := range t.OpenEscalations {
+		for _, e := range a.OpenEscalations {
 			fmt.Fprintf(&b, "- #%d: %s\n", e.Seq, firstLine(e.Body))
 		}
 		b.WriteString("\n")
 	}
-	if len(t.Events) > 0 {
-		last := t.Events[len(t.Events)-1]
+	if len(a.Events) > 0 {
+		last := a.Events[len(a.Events)-1]
 		fmt.Fprintf(&b, "**Last activity:** #%d %s by %s at %s\n",
 			last.Seq, last.Type, last.Actor, last.TS.UTC().Format(time.RFC3339))
 	}

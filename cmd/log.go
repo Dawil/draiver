@@ -26,7 +26,7 @@ var logCmd = &cobra.Command{
 		if logType == "" {
 			return fmt.Errorf("--type is required")
 		}
-		e, err := appendEvent(id, event.Event{
+		e, att, err := appendEvent(id, event.Event{
 			Type:      logType,
 			Refs:      logRefs,
 			Artefacts: logArtefacts,
@@ -35,7 +35,7 @@ var logCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s\n", e.Type, e.Seq, id)
+		fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s\n", e.Type, e.Seq, id, att)
 		return nil
 	},
 }

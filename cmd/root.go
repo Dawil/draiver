@@ -1,5 +1,5 @@
 // Package cmd wires the draiver CLI verbs — the shared human<->agent protocol —
-// onto the append-only ticket log.
+// onto the append-only per-attempt ticket log.
 package cmd
 
 import (
@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"draiver/internal/attempt"
 	"draiver/internal/event"
 	"draiver/internal/store"
 	"draiver/internal/ticketlog"
@@ -24,8 +25,9 @@ const (
 )
 
 var (
-	dataFlag  string
-	actorFlag string
+	dataFlag    string
+	actorFlag   string
+	attemptFlag string
 )
 
 // exitError carries a specific process exit code out of a command.
@@ -40,8 +42,8 @@ var rootCmd = &cobra.Command{
 	Use:   "draiver",
 	Short: "Coordination substrate for supervising AI coding agents at the ticket level",
 	Long: "draiver externalizes a ticket's valuable context — spec, decisions, " +
-		"escalations — into an append-only, hash-chained log on disk, so any fresh " +
-		"agent can pick up a ticket and a human attends only to what needs them.",
+		"escalations — into an append-only, hash-chained log on disk. A ticket holds " +
+		"one or more attempts; each attempt is a journey a fresh agent can pick up.",
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
@@ -49,6 +51,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().StringVar(&dataFlag, "data", "", "data root (default $DRAIVER_DATA or ~/.draiver/data)")
 	rootCmd.PersistentFlags().StringVar(&actorFlag, "actor", "", "actor as kind:name (default $DRAIVER_ACTOR or human:$USER)")
+	rootCmd.PersistentFlags().StringVar(&attemptFlag, "attempt", "", "attempt id (default $DRAIVER_ATTEMPT or the ticket's latest attempt)")
 }
 
 // Execute runs the CLI and returns the process exit code.
@@ -89,17 +92,45 @@ func resolveActor() string {
 	return "human:" + u
 }
 
-// appendEvent resolves the root, stamps the actor, and appends the event.
-func appendEvent(id string, e event.Event) (event.Event, error) {
+// resolveAttempt resolves which attempt of a ticket a command targets:
+// --attempt, then $DRAIVER_ATTEMPT, then the ticket's latest attempt.
+func resolveAttempt(root store.Root, id string) (string, error) {
+	if attemptFlag != "" {
+		return attemptFlag, nil
+	}
+	if v := os.Getenv("DRAIVER_ATTEMPT"); v != "" {
+		return v, nil
+	}
+	latest, ok, err := attempt.Latest(root, id)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("ticket %q has no attempts", id)
+	}
+	return latest, nil
+}
+
+// appendEvent resolves root + target attempt, stamps the actor, and appends the
+// event, returning the persisted event and the attempt it landed on.
+func appendEvent(id string, e event.Event) (event.Event, string, error) {
 	root, err := resolveRoot()
 	if err != nil {
-		return event.Event{}, err
+		return event.Event{}, "", err
 	}
 	if !root.Exists(id) {
-		return event.Event{}, fmt.Errorf("ticket %q not found under %s", id, root.Dir)
+		return event.Event{}, "", fmt.Errorf("ticket %q not found under %s", id, root.Dir)
+	}
+	att, err := resolveAttempt(root, id)
+	if err != nil {
+		return event.Event{}, "", err
+	}
+	if !root.AttemptExists(id, att) {
+		return event.Event{}, "", fmt.Errorf("attempt %s/%s not found", id, att)
 	}
 	if e.Actor == "" {
 		e.Actor = resolveActor()
 	}
-	return ticketlog.Append(root, id, e)
+	ev, err := ticketlog.Append(root, id, att, e)
+	return ev, att, err
 }

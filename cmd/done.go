@@ -18,11 +18,11 @@ var doneCmd = &cobra.Command{
 		if len(args) == 2 {
 			body = args[1]
 		}
-		e, err := appendEvent(id, event.Event{Type: "done", Body: body})
+		e, att, err := appendEvent(id, event.Event{Type: "done", Body: body})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "closed %s (seq %d)\n", id, e.Seq)
+		fmt.Fprintf(cmd.OutOrStdout(), "closed %s/%s (seq %d)\n", id, att, e.Seq)
 		return nil
 	},
 }

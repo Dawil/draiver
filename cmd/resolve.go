@@ -13,8 +13,9 @@ import (
 var resolveCmd = &cobra.Command{
 	Use:   "resolve TICKET ESCALATION_SEQ ANSWER",
 	Short: "Answer an escalation, linking the resolution back to it",
-	Long: "resolve appends a resolution event referencing the escalation by its seq.\n" +
-		"Escalation and resolution together form one durable artefact.",
+	Long: "resolve appends a resolution event referencing the escalation by its seq\n" +
+		"within the attempt. Escalation and resolution together form one durable artefact.\n" +
+		"Target a specific attempt with --attempt (defaults to the latest).",
 	Args: cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
@@ -28,7 +29,14 @@ var resolveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		events, err := ticketlog.Read(root, id)
+		if !root.Exists(id) {
+			return fmt.Errorf("ticket %q not found under %s", id, root.Dir)
+		}
+		att, err := resolveAttempt(root, id)
+		if err != nil {
+			return err
+		}
+		events, err := ticketlog.Read(root, id, att)
 		if err != nil {
 			return err
 		}
@@ -40,13 +48,13 @@ var resolveCmd = &cobra.Command{
 			}
 		}
 		if found == nil {
-			return fmt.Errorf("no event #%d on %s", seq, id)
+			return fmt.Errorf("no event #%d on %s/%s", seq, id, att)
 		}
 		if found.Type != "escalation" {
-			return fmt.Errorf("event #%d on %s is a %q, not an escalation", seq, id, found.Type)
+			return fmt.Errorf("event #%d on %s/%s is a %q, not an escalation", seq, id, att, found.Type)
 		}
 
-		e, err := appendEvent(id, event.Event{
+		e, _, err := appendEvent(id, event.Event{
 			Type: "resolution",
 			Refs: []int{seq},
 			Body: answer,
@@ -54,7 +62,7 @@ var resolveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "resolved %s #%d -> resolution #%d\n", id, seq, e.Seq)
+		fmt.Fprintf(cmd.OutOrStdout(), "resolved %s/%s #%d -> resolution #%d\n", id, att, seq, e.Seq)
 		return nil
 	},
 }

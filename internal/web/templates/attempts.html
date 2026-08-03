@@ -1,0 +1,32 @@
+{{define "attempts.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draiver — {{.Ticket}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="back" href="/">← board</a>
+    <h1>{{.Ticket}}</h1>
+    <p class="tagline">{{.Title}} · {{len .Attempts}} attempt(s)</p>
+  </header>
+  <main class="detail" data-testid="attempt-index">
+    <ol class="attempt-list">
+      {{range .Attempts}}
+      <li>
+        <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="/ticket/{{.Ticket}}/{{.ID}}">
+          <span class="tid">attempt {{.ID}}</span>
+          <span class="meta-row">
+            {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
+            {{if .Model}}<span class="tool">{{.Model}}</span>{{end}}
+            <span class="state state-{{.State}}">{{.State}}</span>
+          </span>
+        </a>
+      </li>
+      {{end}}
+    </ol>
+  </main>
+</body>
+</html>{{end}}

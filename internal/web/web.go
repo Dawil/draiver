@@ -1,5 +1,6 @@
 // Package web serves the read-only Draiver board: a self-contained HTMX server
-// that renders the four control states from the filesystem log. It never writes
+// that renders the four control states per ATTEMPT from the filesystem log. Each
+// attempt is its own card; one ticket can appear several times. It never writes
 // and never spawns processes.
 package web
 
@@ -23,7 +24,7 @@ var templatesFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// Server renders the read-only board and ticket detail from a data root.
+// Server renders the read-only board and attempt detail from a data root.
 type Server struct {
 	root store.Root
 	tmpl *template.Template
@@ -44,7 +45,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
 	mux.HandleFunc("GET /board", s.handleBoardPartial)
-	mux.HandleFunc("GET /ticket/{id}", s.handleTicket)
+	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -62,10 +64,10 @@ func (s *Server) Serve(addr string) error {
 // --- view models ---
 
 type boardVM struct {
-	Running []project.Ticket
-	NeedsMe []project.Ticket
-	Review  []project.Ticket
-	Done    []project.Ticket
+	Running []project.Attempt
+	NeedsMe []project.Attempt
+	Review  []project.Attempt
+	Done    []project.Attempt
 }
 
 type eventVM struct {
@@ -82,27 +84,33 @@ type eventVM struct {
 }
 
 type detailVM struct {
-	Ticket   project.Ticket
+	Attempt  project.Attempt
 	SpecHTML template.HTML
 	Events   []eventVM
 }
 
+type indexVM struct {
+	Ticket   string
+	Title    string
+	Attempts []project.Attempt
+}
+
 func (s *Server) board() (boardVM, error) {
-	tickets, err := project.LoadAll(s.root)
+	attempts, err := project.LoadAll(s.root)
 	if err != nil {
 		return boardVM{}, err
 	}
 	var vm boardVM
-	for _, t := range tickets {
-		switch t.State {
+	for _, a := range attempts {
+		switch a.State {
 		case project.Running:
-			vm.Running = append(vm.Running, t)
+			vm.Running = append(vm.Running, a)
 		case project.NeedsMe:
-			vm.NeedsMe = append(vm.NeedsMe, t)
+			vm.NeedsMe = append(vm.NeedsMe, a)
 		case project.Review:
-			vm.Review = append(vm.Review, t)
+			vm.Review = append(vm.Review, a)
 		case project.Done:
-			vm.Done = append(vm.Done, t)
+			vm.Done = append(vm.Done, a)
 		}
 	}
 	return vm, nil
@@ -126,20 +134,47 @@ func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "board.html", vm)
 }
 
-func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
+// handleAttemptIndex lists a ticket's attempts (GET /ticket/{id}).
+func (s *Server) handleAttemptIndex(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.root.Exists(id) {
 		http.NotFound(w, r)
 		return
 	}
-	t, err := project.Load(s.root, id)
+	ids, err := s.root.ListAttempts(id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm := indexVM{Ticket: id, Title: id}
+	for _, aid := range ids {
+		a, err := project.LoadAttempt(s.root, id, aid)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		vm.Title = a.Title
+		vm.Attempts = append(vm.Attempts, a)
+	}
+	s.render(w, "attempts.html", vm)
+}
+
+// handleAttempt renders one attempt's detail (GET /ticket/{id}/{attempt}).
+func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 
 	resolutionOf := map[int]int{}
-	for _, e := range t.Events {
+	for _, e := range a.Events {
 		if e.Type == "resolution" {
 			for _, ref := range e.Refs {
 				resolutionOf[ref] = e.Seq
@@ -147,8 +182,8 @@ func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	vm := detailVM{Ticket: t, SpecHTML: s.renderSpec(id)}
-	for _, e := range t.Events {
+	vm := detailVM{Attempt: a, SpecHTML: s.renderSpec(id)}
+	for _, e := range a.Events {
 		ev := eventVM{
 			Seq:       e.Seq,
 			Type:      e.Type,

@@ -10,11 +10,13 @@ import (
 	"draiver/internal/store"
 )
 
+const att = "0001"
+
 func newTicket(t *testing.T) (store.Root, string) {
 	t.Helper()
 	root := store.Root{Dir: t.TempDir()}
 	id := "PROJ-1"
-	if err := root.EnsureTicketDirs(id); err != nil {
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
 		t.Fatalf("ensure dirs: %v", err)
 	}
 	return root, id
@@ -23,15 +25,18 @@ func newTicket(t *testing.T) (store.Root, string) {
 func TestAppendAllocatesSeqAndChains(t *testing.T) {
 	root, id := newTicket(t)
 
-	e1, err := Append(root, id, event.Event{Type: "created", Actor: "human:dave", Body: "start"})
+	e1, err := Append(root, id, att, event.Event{Type: "created", Actor: "human:dave", Body: "start"})
 	if err != nil {
 		t.Fatalf("append 1: %v", err)
 	}
 	if e1.Seq != 1 || e1.Prev != "" {
 		t.Fatalf("genesis: seq=%d prev=%q", e1.Seq, e1.Prev)
 	}
+	if e1.Attempt != att {
+		t.Errorf("attempt not stamped: %q", e1.Attempt)
+	}
 
-	e2, err := Append(root, id, event.Event{Type: "gotcha", Actor: "agent:x", Body: "bit me"})
+	e2, err := Append(root, id, att, event.Event{Type: "gotcha", Actor: "agent:x", Body: "bit me"})
 	if err != nil {
 		t.Fatalf("append 2: %v", err)
 	}
@@ -43,14 +48,37 @@ func TestAppendAllocatesSeqAndChains(t *testing.T) {
 	}
 }
 
+func TestChainsAreIndependentPerAttempt(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	for _, a := range []string{"0001", "0002"} {
+		if err := root.EnsureAttemptDirs(id, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a1, _ := Append(root, id, "0001", event.Event{Type: "created", Actor: "a", Body: "x"})
+	b1, _ := Append(root, id, "0002", event.Event{Type: "created", Actor: "a", Body: "x"})
+	// Each attempt's chain starts fresh at seq 1 with an empty prev.
+	if a1.Seq != 1 || b1.Seq != 1 {
+		t.Fatalf("seqs = %d,%d want 1,1", a1.Seq, b1.Seq)
+	}
+	if a1.Prev != "" || b1.Prev != "" {
+		t.Errorf("genesis prev must be empty in both attempts")
+	}
+	// Same body but different attempt id => different hash (attempt is in the chain).
+	if a1.Hash == b1.Hash {
+		t.Errorf("attempts share a hash despite different attempt ids")
+	}
+}
+
 func TestReadReturnsCausalOrder(t *testing.T) {
 	root, id := newTicket(t)
 	for i := 0; i < 5; i++ {
-		if _, err := Append(root, id, event.Event{Type: "note", Actor: "a", Body: "n"}); err != nil {
+		if _, err := Append(root, id, att, event.Event{Type: "note", Actor: "a", Body: "n"}); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	events, err := Read(root, id)
+	events, err := Read(root, id, att)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -68,11 +96,11 @@ func TestSameSecondEventsOrderBySeq(t *testing.T) {
 	root, id := newTicket(t)
 	ts := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 3; i++ {
-		if _, err := Append(root, id, event.Event{Type: "note", Actor: "a", TS: ts, Body: "same second"}); err != nil {
+		if _, err := Append(root, id, att, event.Event{Type: "note", Actor: "a", TS: ts, Body: "same second"}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	events, err := Read(root, id)
+	events, err := Read(root, id, att)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -88,15 +116,14 @@ func TestSameSecondEventsOrderBySeq(t *testing.T) {
 
 func TestWriteOnceNeverClobbers(t *testing.T) {
 	root, id := newTicket(t)
-	e, err := Append(root, id, event.Event{Type: "note", Actor: "a", Body: "original"})
+	e, err := Append(root, id, att, event.Event{Type: "note", Actor: "a", Body: "original"})
 	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	path := filepath.Join(root.LogDir(id), e.Filename())
+	path := filepath.Join(root.LogDir(id, att), e.Filename())
 	before, _ := os.ReadFile(path)
 
-	// A second append must land on a new seq/file, leaving the first byte-identical.
-	if _, err := Append(root, id, event.Event{Type: "note", Actor: "a", Body: "second"}); err != nil {
+	if _, err := Append(root, id, att, event.Event{Type: "note", Actor: "a", Body: "second"}); err != nil {
 		t.Fatalf("append 2: %v", err)
 	}
 	after, _ := os.ReadFile(path)
@@ -105,9 +132,9 @@ func TestWriteOnceNeverClobbers(t *testing.T) {
 	}
 }
 
-func TestAppendRejectsUnknownTicket(t *testing.T) {
+func TestAppendRejectsUnknownAttempt(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
-	if _, err := Append(root, "NOPE-1", event.Event{Type: "note", Actor: "a"}); err == nil {
-		t.Error("expected error appending to nonexistent ticket")
+	if _, err := Append(root, "NOPE-1", att, event.Event{Type: "note", Actor: "a"}); err == nil {
+		t.Error("expected error appending to nonexistent attempt")
 	}
 }

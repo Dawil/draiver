@@ -22,6 +22,7 @@ type Event struct {
 	TS        time.Time `yaml:"ts"`
 	Actor     string    `yaml:"actor"`
 	Ticket    string    `yaml:"ticket"`
+	Attempt   string    `yaml:"attempt"`
 	Refs      []int     `yaml:"refs,omitempty"`
 	Artefacts []string  `yaml:"artefacts,omitempty"`
 	Prev      string    `yaml:"prev"`
@@ -39,6 +40,7 @@ type hashable struct {
 	TS        string   `yaml:"ts"`
 	Actor     string   `yaml:"actor"`
 	Ticket    string   `yaml:"ticket"`
+	Attempt   string   `yaml:"attempt"`
 	Refs      []int    `yaml:"refs,omitempty"`
 	Artefacts []string `yaml:"artefacts,omitempty"`
 	Prev      string   `yaml:"prev"`
@@ -54,6 +56,7 @@ func (e Event) ComputeHash() string {
 		TS:        e.TS.UTC().Format(time.RFC3339),
 		Actor:     e.Actor,
 		Ticket:    e.Ticket,
+		Attempt:   e.Attempt,
 		Refs:      e.Refs,
 		Artefacts: e.Artefacts,
 		Prev:      e.Prev,

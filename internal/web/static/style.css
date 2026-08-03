@@ -48,11 +48,18 @@ body {
 }
 .card:hover { border-color: var(--accent); }
 .card .tid { font-weight: 600; font-size: 13px; }
+.card .att { color: var(--muted); font-weight: 500; }
 .card .title { color: var(--muted); font-size: 13px; }
-.card-alert { background: var(--alert-bg); border-color: var(--alert); }
-.card .badge { align-self: flex-start; margin-top: 4px; font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
-.card-quiet { opacity: .85; }
+.meta-row { display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+.tool { font-size: 11px; color: var(--accent); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.badge { font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
+/* control-state accents come from the parent column */
+.col-needs-me .card { background: var(--alert-bg); border-color: var(--alert); }
+.col-running .card, .col-done .card { opacity: .9; }
 .muted { color: var(--muted); font-size: 13px; margin: 4px 0; }
+.att { color: var(--muted); font-weight: 500; }
+.attempt-list { list-style: none; padding: 0; margin: 0; }
+.attempt-list .card { max-width: 520px; }
 
 .detail { max-width: 860px; margin: 0 auto; padding: 20px 24px; }
 .state { font-size: 12px; padding: 2px 10px; border-radius: 999px; vertical-align: middle; }

@@ -8,8 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/event"
-	"draiver/internal/ticketlog"
+	"draiver/internal/attempt"
 )
 
 var (
@@ -18,11 +17,13 @@ var (
 	newTeam     string
 	newAssignee string
 	newSpecFile string
+	newTool     string
+	newModel    string
 )
 
 var newCmd = &cobra.Command{
 	Use:   "new TICKET",
-	Short: "Create a ticket folder, spec.md, and the genesis event",
+	Short: "Create a ticket (spec.md) and its first attempt",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
@@ -33,7 +34,7 @@ var newCmd = &cobra.Command{
 		if root.Exists(id) {
 			return fmt.Errorf("ticket %q already exists", id)
 		}
-		if err := root.EnsureTicketDirs(id); err != nil {
+		if err := root.EnsureTicketDir(id); err != nil {
 			return err
 		}
 
@@ -45,19 +46,15 @@ var newCmd = &cobra.Command{
 			return fmt.Errorf("write spec: %w", err)
 		}
 
-		body := fmt.Sprintf("Ticket created: %s", newTitle)
-		if newTitle == "" {
-			body = "Ticket created."
-		}
-		e, err := ticketlog.Append(root, id, event.Event{
-			Type:  "created",
+		m, err := attempt.Create(root, id, attempt.New{
+			Tool:  newTool,
+			Model: newModel,
 			Actor: resolveActor(),
-			Body:  body,
 		})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "created %s (seq %d) at %s\n", id, e.Seq, root.TicketDir(id))
+		fmt.Fprintf(cmd.OutOrStdout(), "created %s attempt %s at %s\n", id, m.ID, root.TicketDir(id))
 		return nil
 	},
 }
@@ -80,8 +77,8 @@ func buildSpec(id string) ([]byte, error) {
 	fmt.Fprintf(&b, "created: %s\n", time.Now().UTC().Format(time.RFC3339))
 	b.WriteString("---\n\n")
 	fmt.Fprintf(&b, "# %s\n\n", title)
-	b.WriteString("<!-- Frontloaded design goes here. This file is the immutable input;\n")
-	b.WriteString("     everything mutable lives in the append-only log. -->\n")
+	b.WriteString("<!-- Frontloaded design goes here. This file is the immutable input,\n")
+	b.WriteString("     shared by every attempt; everything mutable lives in the log. -->\n")
 	return []byte(b.String()), nil
 }
 
@@ -91,5 +88,7 @@ func init() {
 	newCmd.Flags().StringVar(&newTeam, "team", "", "team field")
 	newCmd.Flags().StringVar(&newAssignee, "assignee", "", "assignee field")
 	newCmd.Flags().StringVar(&newSpecFile, "spec", "", "import spec.md from this file instead of scaffolding one")
+	newCmd.Flags().StringVar(&newTool, "tool", "", "coding-agent tool for the first attempt (e.g. claude-code)")
+	newCmd.Flags().StringVar(&newModel, "model", "", "model for the first attempt (e.g. opus-4.8)")
 	rootCmd.AddCommand(newCmd)
 }

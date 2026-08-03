@@ -11,11 +11,13 @@ import (
 	"draiver/internal/ticketlog"
 )
 
+const att = "0001"
+
 func seedChain(t *testing.T) (store.Root, string) {
 	t.Helper()
 	root := store.Root{Dir: t.TempDir()}
 	id := "PROJ-1"
-	if err := root.EnsureTicketDirs(id); err != nil {
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
 		t.Fatal(err)
 	}
 	for _, spec := range []struct{ typ, body string }{
@@ -24,7 +26,7 @@ func seedChain(t *testing.T) (store.Root, string) {
 		{"escalation", "which base image?"},
 		{"resolution", "bookworm"},
 	} {
-		if _, err := ticketlog.Append(root, id, event.Event{Type: spec.typ, Actor: "a", Body: spec.body}); err != nil {
+		if _, err := ticketlog.Append(root, id, att, event.Event{Type: spec.typ, Actor: "a", Body: spec.body}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -33,7 +35,7 @@ func seedChain(t *testing.T) (store.Root, string) {
 
 func TestVerifyCleanChain(t *testing.T) {
 	root, id := seedChain(t)
-	res, err := VerifyTicket(root, id)
+	res, err := VerifyAttempt(root, id, att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +51,7 @@ func TestVerifyDetectsBodyTamper(t *testing.T) {
 	root, id := seedChain(t)
 
 	// Rewrite the body of event #2 in place — tamper-evidence must catch it.
-	dir := root.LogDir(id)
+	dir := root.LogDir(id, att)
 	entries, _ := os.ReadDir(dir)
 	var target string
 	for _, e := range entries {
@@ -64,12 +66,34 @@ func TestVerifyDetectsBodyTamper(t *testing.T) {
 	}
 	os.WriteFile(target, []byte(tampered), 0o644)
 
-	res, _ := VerifyTicket(root, id)
+	res, _ := VerifyAttempt(root, id, att)
 	if res.OK {
 		t.Fatal("tampered chain reported OK")
 	}
 	if res.BrokenSeq != 2 {
 		t.Errorf("broken seq = %d want 2", res.BrokenSeq)
+	}
+}
+
+func TestVerifyTicketCoversEveryAttempt(t *testing.T) {
+	root, id := seedChain(t) // attempt 0001
+	if err := root.EnsureAttemptDirs(id, "0002"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, id, "0002", event.Event{Type: "created", Actor: "a", Body: "second attempt"}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := VerifyTicket(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results want 2 (one per attempt)", len(results))
+	}
+	for _, r := range results {
+		if !r.OK {
+			t.Errorf("attempt %s failed: %s", r.Attempt, r.Reason)
+		}
 	}
 }
 

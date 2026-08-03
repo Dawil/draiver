@@ -21,7 +21,7 @@ var escalateCmd = &cobra.Command{
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, question := args[0], args[1]
-		e, err := appendEvent(id, event.Event{
+		e, att, err := appendEvent(id, event.Event{
 			Type:      "escalation",
 			Artefacts: escalateArtefacts,
 			Body:      question,
@@ -29,8 +29,8 @@ var escalateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "escalated %s #%d — halting (exit %d). Resolve with: draiver resolve %s %d \"...\"\n",
-			id, e.Seq, ExitEscalated, id, e.Seq)
+		fmt.Fprintf(cmd.OutOrStdout(), "escalated %s/%s #%d — halting (exit %d). Resolve with: draiver resolve %s %d \"...\" --attempt %s\n",
+			id, att, e.Seq, ExitEscalated, id, e.Seq, att)
 		return &exitError{code: ExitEscalated}
 	},
 }

@@ -3,14 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Draiver — {{.Ticket.ID}}</title>
+  <title>Draiver — {{.Attempt.Ticket}}/{{.Attempt.ID}}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
-    <a class="back" href="/">← board</a>
-    <h1>{{.Ticket.ID}} <span class="state state-{{.Ticket.State}}" data-testid="state-badge">{{.Ticket.State}}</span></h1>
-    <p class="tagline">{{.Ticket.Title}}{{if .Ticket.Assignee}} · {{.Ticket.Assignee}}{{end}}</p>
+    <a class="back" href="/ticket/{{.Attempt.Ticket}}">← attempts</a>
+    <h1>{{.Attempt.Ticket}} <span class="att">/{{.Attempt.ID}}</span>
+      <span class="state state-{{.Attempt.State}}" data-testid="state-badge">{{.Attempt.State}}</span></h1>
+    <p class="tagline">{{.Attempt.Title}}
+      {{if .Attempt.Tool}} · <span data-testid="attempt-tool">{{.Attempt.Tool}}</span>{{end}}
+      {{if .Attempt.Model}} · {{.Attempt.Model}}{{end}}
+      {{if .Attempt.Assignee}} · {{.Attempt.Assignee}}{{end}}</p>
   </header>
 
   <main class="detail" data-testid="ticket-detail">

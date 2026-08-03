@@ -11,9 +11,10 @@ func sample() Event {
 		Seq:    3,
 		Type:   "escalation",
 		TS:     time.Date(2026, 8, 3, 16, 12, 30, 0, time.UTC),
-		Actor:  "agent:claude-code",
-		Ticket: "PROJ-123",
-		Refs:   nil,
+		Actor:   "agent:claude-code",
+		Ticket:  "PROJ-123",
+		Attempt: "0001",
+		Refs:    nil,
 		Prev:   "9f2c",
 		Body:   "Need a decision on the base image.\n",
 	}

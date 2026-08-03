@@ -18,11 +18,11 @@ var reviewCmd = &cobra.Command{
 		if len(args) == 2 {
 			body = args[1]
 		}
-		e, err := appendEvent(id, event.Event{Type: "review", Body: body})
+		e, att, err := appendEvent(id, event.Event{Type: "review", Body: body})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "review claimed on %s (seq %d)\n", id, e.Seq)
+		fmt.Fprintf(cmd.OutOrStdout(), "review claimed on %s/%s (seq %d)\n", id, att, e.Seq)
 		return nil
 	},
 }

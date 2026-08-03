@@ -20,7 +20,7 @@ func TestStatusWritesStateAndBoard(t *testing.T) {
 	if !strings.Contains(out, "Needs me: 1") {
 		t.Errorf("board summary wrong: %q", out)
 	}
-	statePath := store.Root{Dir: dir}.StatePath("PROJ-1")
+	statePath := store.Root{Dir: dir}.StatePath("PROJ-1", "0001")
 	data, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatalf("state.md not written: %v", err)
@@ -38,7 +38,7 @@ func TestInboxAndMine(t *testing.T) {
 	run(t, "--data", dir, "--actor", "agent:x", "escalate", "PROJ-2", "q2")
 
 	all, _ := run(t, "--data", dir, "inbox")
-	if !strings.Contains(all, "PROJ-1 #2") || !strings.Contains(all, "PROJ-2 #2") {
+	if !strings.Contains(all, "PROJ-1/0001 #2") || !strings.Contains(all, "PROJ-2/0001 #2") {
 		t.Errorf("inbox should list both:\n%s", all)
 	}
 
@@ -57,13 +57,13 @@ func TestAuditPassesThenFailsOnTamper(t *testing.T) {
 	}
 
 	// Tamper the genesis event body.
-	logDir := store.Root{Dir: dir}.LogDir("PROJ-1")
+	logDir := store.Root{Dir: dir}.LogDir("PROJ-1", "0001")
 	entries, _ := os.ReadDir(logDir)
 	for _, e := range entries {
 		if strings.Contains(e.Name(), "-0001-") {
 			p := filepath.Join(logDir, e.Name())
 			b, _ := os.ReadFile(p)
-			os.WriteFile(p, []byte(strings.Replace(string(b), "Test", "Tampered", 1)), 0o644)
+			os.WriteFile(p, []byte(strings.Replace(string(b), "Attempt", "Tampered", 1)), 0o644)
 		}
 	}
 
