@@ -106,3 +106,29 @@ When webui is run in Manage mode:
 Agents are driven headless, not screen-scraped. The backend spawns one agent per ticket in an isolated worktree and speaks newline-delimited JSON both ways (--input-format/--output-format stream-json), relayed to the browser over WebSocket/SSE. Backend-agnostic via thin per-agent adapters (Claude Code, Aider, Codex, …).
 
 Two hooks map straight onto the model: the session ID is the cattle mechanism — kill the process freely, keep the ID plus the log, respawn and --resume. The tool-permission callback is the escalation seam — route "may I?" to escalate instead of auto-approving, and the agent's own authority boundary becomes the human-in-the-loop gate.
+
+## Onboarding skill: install as a Claude Code plugin
+
+The agent side of the protocol — cold-start from `brief`, log gotchas/decisions, `escalate` and stop, claim `review` — is packaged as a Claude Code **skill**, shipped through a plugin marketplace rooted at [`./.claude`](.claude). Layout:
+
+```
+.claude/
+  .claude-plugin/
+    marketplace.json          # marketplace "draiver" → one plugin
+  plugins/
+    draiver/
+      .claude-plugin/
+        plugin.json           # plugin "draiver" v0.1.0
+      skills/
+        draiver-onboarding/
+          SKILL.md            # auto-discovered; the working-a-ticket protocol
+```
+
+Install it into Claude Code by adding this repo as a marketplace, then installing the plugin:
+
+```
+/plugin marketplace add ./.claude       # or a GitHub repo, once published: /plugin marketplace add <owner>/<repo>
+/plugin install draiver@draiver         # <plugin>@<marketplace>
+```
+
+The `draiver-onboarding` skill then fires whenever an agent is handed a ticket. The same flow works headless via the CLI: `claude plugin marketplace add ./.claude` then `claude plugin install draiver@draiver` (`claude plugin details draiver` shows the discovered components).

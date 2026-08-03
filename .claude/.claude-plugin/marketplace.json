@@ -1,0 +1,20 @@
+{
+  "name": "draiver",
+  "owner": {
+    "name": "David Wilcox",
+    "email": "dave@davidgwilcox.com"
+  },
+  "description": "Marketplace for draiver — externalize a ticket's context into an append-only, hash-chained log a fresh agent can resume.",
+  "plugins": [
+    {
+      "name": "draiver",
+      "source": "./plugins/draiver",
+      "description": "Onboards a coding agent handed a draiver ticket: cold-start from `brief`, log gotchas/decisions, `escalate` and stop, claim `review`.",
+      "version": "0.1.0",
+      "author": {
+        "name": "David Wilcox",
+        "email": "dave@davidgwilcox.com"
+      }
+    }
+  ]
+}

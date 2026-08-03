@@ -1,0 +1,15 @@
+{
+  "name": "draiver",
+  "version": "0.1.0",
+  "description": "Onboards a coding agent handed a draiver ticket: cold-start from `brief`, log gotchas/decisions, `escalate` and stop, claim `review`.",
+  "author": {
+    "name": "David Wilcox",
+    "email": "dave@davidgwilcox.com"
+  },
+  "keywords": [
+    "draiver",
+    "tickets",
+    "agent-workflow",
+    "onboarding"
+  ]
+}
