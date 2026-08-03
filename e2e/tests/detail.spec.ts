@@ -3,11 +3,11 @@ import { test, expect } from "@playwright/test";
 test.describe("attempt detail", () => {
   test("opens from the board and renders spec + log timeline", async ({ page }) => {
     await page.goto("/");
-    await page.getByTestId("col-needs-me").getByTestId("attempt-link-PROJ-101-0001").click();
+    await page.getByTestId("col-stuck").getByTestId("attempt-link-PROJ-101-0001").click();
 
     await expect(page).toHaveURL(/\/ticket\/PROJ-101\/0001$/);
     await expect(page.getByTestId("ticket-detail")).toBeVisible();
-    await expect(page.getByTestId("state-badge")).toHaveText("Needs me");
+    await expect(page.getByTestId("state-badge")).toHaveText("Stuck");
     // Attempt provenance is shown.
     await expect(page.getByTestId("attempt-tool")).toHaveText("claude-code");
 

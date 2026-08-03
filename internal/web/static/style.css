@@ -38,8 +38,8 @@ body {
 .col { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
 .col h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
 .count { background: var(--panel-2); color: var(--ink); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
-.col-needs-me { border-color: var(--alert); }
-.col-needs-me h2 { color: var(--alert); }
+.col-stuck { border-color: var(--alert); }
+.col-stuck h2 { color: var(--alert); }
 
 .card {
   display: flex; flex-direction: column; gap: 2px;
@@ -54,7 +54,7 @@ body {
 .tool { font-size: 11px; color: var(--accent); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
 .badge { font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
 /* control-state accents come from the parent column */
-.col-needs-me .card { background: var(--alert-bg); border-color: var(--alert); }
+.col-stuck .card { background: var(--alert-bg); border-color: var(--alert); }
 .col-running .card, .col-done .card { opacity: .9; }
 .muted { color: var(--muted); font-size: 13px; margin: 4px 0; }
 .att { color: var(--muted); font-weight: 500; }

@@ -66,11 +66,11 @@ func TestBoardShowsControlStatesPerAttempt(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, want := range []string{
-		`data-testid="col-needs-me"`,
-		`data-testid="col-review"`,
 		`data-testid="col-running"`,
+		`data-testid="col-stuck"`,
+		`data-testid="col-review"`,
 		`data-testid="col-done"`,
-		`data-testid="attempt-link-PROJ-1-0001"`, // blocked attempt in Needs me
+		`data-testid="attempt-link-PROJ-1-0001"`, // blocked attempt in Stuck
 		`data-testid="attempt-link-PROJ-1-0002"`, // same ticket, second card, Running
 		"htmx.min.js",
 	} {
@@ -83,9 +83,9 @@ func TestBoardShowsControlStatesPerAttempt(t *testing.T) {
 func TestBoardPartialCounts(t *testing.T) {
 	h := newServer(t)
 	body := get(t, h, "/board").Body.String()
-	// Needs me: PROJ-1/0001. Review: PROJ-2/0001. Running: PROJ-1/0002 + PROJ-3/0001.
-	if !strings.Contains(body, `data-testid="count-needs-me">1<`) {
-		t.Errorf("needs-me count wrong:\n%s", body)
+	// Stuck: PROJ-1/0001. Review: PROJ-2/0001. Running: PROJ-1/0002 + PROJ-3/0001.
+	if !strings.Contains(body, `data-testid="count-stuck">1<`) {
+		t.Errorf("stuck count wrong:\n%s", body)
 	}
 	if !strings.Contains(body, `data-testid="count-review">1<`) {
 		t.Errorf("review count wrong")

@@ -1,18 +1,18 @@
 {{define "board.html"}}
 <div class="columns">
-  <section class="col col-needs-me" data-testid="col-needs-me">
-    <h2>Needs me <span class="count" data-testid="count-needs-me">{{len .NeedsMe}}</span></h2>
+  <section class="col col-running" data-testid="col-running">
+    <h2>Running <span class="count" data-testid="count-running">{{len .Running}}</span></h2>
+    {{range .Running}}{{template "card" .}}{{else}}<p class="muted">Idle.</p>{{end}}
+  </section>
+
+  <section class="col col-stuck" data-testid="col-stuck">
+    <h2>Stuck <span class="count" data-testid="count-stuck">{{len .NeedsMe}}</span></h2>
     {{range .NeedsMe}}{{template "card" .}}{{else}}<p class="muted">Nothing blocked.</p>{{end}}
   </section>
 
   <section class="col col-review" data-testid="col-review">
     <h2>Review <span class="count" data-testid="count-review">{{len .Review}}</span></h2>
     {{range .Review}}{{template "card" .}}{{else}}<p class="muted">No claims to review.</p>{{end}}
-  </section>
-
-  <section class="col col-running" data-testid="col-running">
-    <h2>Running <span class="count" data-testid="count-running">{{len .Running}}</span></h2>
-    {{range .Running}}{{template "card" .}}{{else}}<p class="muted">Idle.</p>{{end}}
   </section>
 
   <section class="col col-done" data-testid="col-done">

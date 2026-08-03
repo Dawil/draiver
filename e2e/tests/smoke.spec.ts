@@ -5,7 +5,7 @@ test.describe("board shell", () => {
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Draiver", level: 1 })).toBeVisible();
     await expect(page.getByTestId("board")).toBeVisible();
-    for (const col of ["col-needs-me", "col-review", "col-running", "col-done"]) {
+    for (const col of ["col-running", "col-stuck", "col-review", "col-done"]) {
       await expect(page.getByTestId(col)).toBeVisible();
     }
   });

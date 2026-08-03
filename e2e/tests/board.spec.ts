@@ -5,15 +5,15 @@ test.describe("board control states (per attempt)", () => {
     await page.goto("/");
 
     // Counts are per attempt, weighted toward what needs the human.
-    await expect(page.getByTestId("count-needs-me")).toHaveText("1");
+    await expect(page.getByTestId("count-stuck")).toHaveText("1");
     await expect(page.getByTestId("count-review")).toHaveText("1");
     // PROJ-101/0002 (aider) and PROJ-103/0001 are both Running.
     await expect(page.getByTestId("count-running")).toHaveText("2");
 
-    // The blocked attempt is on the board (Needs me).
-    const needsMe = page.getByTestId("col-needs-me");
-    await expect(needsMe.getByTestId("attempt-link-PROJ-101-0001")).toBeVisible();
-    await expect(needsMe.getByText("1 open")).toBeVisible();
+    // The blocked attempt is on the board (Stuck).
+    const stuck = page.getByTestId("col-stuck");
+    await expect(stuck.getByTestId("attempt-link-PROJ-101-0001")).toBeVisible();
+    await expect(stuck.getByText("1 open")).toBeVisible();
 
     // The claimed attempt awaits review.
     await expect(page.getByTestId("col-review").getByTestId("attempt-link-PROJ-102-0001")).toBeVisible();

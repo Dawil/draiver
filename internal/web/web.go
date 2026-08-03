@@ -31,9 +31,26 @@ type Server struct {
 	md   goldmark.Markdown
 }
 
+// stateLabels overrides how a control state is shown in the human-facing web UI.
+// The domain vocabulary (project.State, surfaced by the CLI, state.md, and brief)
+// is unchanged; only the board column and the detail badge read differently.
+var stateLabels = map[project.State]string{
+	project.NeedsMe: "Stuck",
+}
+
+// stateLabel is the presentation label for a state on the board and detail views.
+func stateLabel(s project.State) string {
+	if l, ok := stateLabels[s]; ok {
+		return l
+	}
+	return string(s)
+}
+
 // New builds a Server over the given data root.
 func New(root store.Root) (*Server, error) {
-	tmpl, err := template.ParseFS(templatesFS, "templates/*.html")
+	tmpl, err := template.New("").
+		Funcs(template.FuncMap{"stateLabel": stateLabel}).
+		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}

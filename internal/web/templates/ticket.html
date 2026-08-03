@@ -10,7 +10,7 @@
   <header class="topbar">
     <a class="back" href="/ticket/{{.Attempt.Ticket}}">← attempts</a>
     <h1>{{.Attempt.Ticket}} <span class="att">/{{.Attempt.ID}}</span>
-      <span class="state state-{{.Attempt.State}}" data-testid="state-badge">{{.Attempt.State}}</span></h1>
+      <span class="state state-{{.Attempt.State}}" data-testid="state-badge">{{stateLabel .Attempt.State}}</span></h1>
     <p class="tagline">{{.Attempt.Title}}
       {{if .Attempt.Tool}} · <span data-testid="attempt-tool">{{.Attempt.Tool}}</span>{{end}}
       {{if .Attempt.Model}} · {{.Attempt.Model}}{{end}}
