@@ -143,6 +143,49 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	}
 }
 
+// TestLogBodyMarkdownRenderedAndSanitized pins the contract that log-event
+// bodies are treated as markdown on the board and rendered safely: structure
+// (emphasis, code) becomes HTML, while raw HTML and dangerous link schemes an
+// agent might write are neutralised. Log bodies are agent-authored input, so
+// this guarantee must be a tested contract, not incidental goldmark behaviour.
+func TestLogBodyMarkdownRenderedAndSanitized(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("MD-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("MD-1"), []byte("---\nid: MD-1\ntitle: Markdown\n---\n\nspec"), 0o644)
+	body := "Chose **server-side** paging; see `pager.go`. " +
+		"<script>alert(1)</script> [x](javascript:alert(1))"
+	if _, err := ticketlog.Append(root, "MD-1", "0001", event.Event{Type: "decision", Actor: "agent:x", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := get(t, s.Handler(), "/ticket/MD-1/0001")
+	if rr.Code != 200 {
+		t.Fatalf("GET detail = %d", rr.Code)
+	}
+	out := rr.Body.String()
+
+	// Markdown structure is rendered to HTML.
+	for _, want := range []string{"<strong>server-side</strong>", "<code>pager.go</code>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected rendered markdown %q in body", want)
+		}
+	}
+	// Dangerous input is neutralised: the raw <script> tag is dropped (goldmark
+	// replaces it with a "raw HTML omitted" comment) and the javascript: link
+	// destination is blanked. Check the exact payloads so the assertion can't
+	// collide with the page's own legitimate <script> chrome.
+	for _, bad := range []string{"<script>alert(1)", "javascript:alert(1)"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("unsanitised %q leaked into rendered log body", bad)
+		}
+	}
+}
+
 func TestUnknownRoutes404(t *testing.T) {
 	h := newServer(t)
 	if rr := get(t, h, "/ticket/NOPE-1"); rr.Code != 404 {

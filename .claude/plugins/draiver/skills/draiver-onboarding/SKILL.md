@@ -80,6 +80,26 @@ Use `--type note` for context that is neither a gotcha nor a decision, and
 `--artefact <path-under-artefacts/>` to reference a blob (a failing log, a
 screenshot) instead of pasting it inline.
 
+**Write log bodies in Markdown.** The board renders every event body as Markdown
+(and sanitizes it — raw HTML and `javascript:`/`data:` links are stripped, so you
+cannot break the page). Use that structure to make a log skimmable instead of a
+wall of text: fence code and errors, wrap file paths and identifiers in
+backticks, and list a decision's rejected alternatives as bullets. It stays plain
+text on disk and in `brief`; only the board renders it, so a body with no Markdown
+still reads fine. For example:
+
+```
+draiver log <TICKET> --type decision "$(cat <<'MD'
+Chose **server-side** pagination over client-side.
+
+- *Rejected* client-side: result sets exceed 10k rows; the table janks.
+- *Rejected* cursor API: the backend only exposes `OFFSET`/`LIMIT` today.
+
+Wired through `internal/api/list.go`; see the failing case in `pager_test.go`.
+MD
+)"
+```
+
 ## 4. When you need a human, escalate — then stop
 
 When you hit something only a human can decide (missing credentials, a product
