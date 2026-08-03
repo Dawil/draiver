@@ -1,0 +1,77 @@
+# Draiver
+
+> Agents are cattle, and it takes a village of agents to raise a ticket.
+
+A Continuous Development tool that is a coordination substrate for supervising AI coding agents at the ticket level. It replaces Tickets's human-to-human status protocol with a human-to-agent one, on a single premise: agents are cattle, tickets are pets. You manage tickets, not agents. A fresh agent can pick up any ticket from disk, and a human attends only to the tickets that need them.
+
+Issue Tracking software manage the interface between managers and developers. This aims to manage the interface between developers and agents.
+
+Agents work well with CLIs (they have HATEOAS built it) and humans work well with UIs so this also has a Htmx web ui built in.
+
+## Purpose
+
+Externalize the valuable context — spec, decisions, escalations — so no agent's in-flight context is ever precious. One human supervises N tickets by attending only to escalations and reviews, not progress. Management by exception, at scale.
+
+The current "development cycle" that is emerging is frontloaded and extensive design session with AI coding tools, that produce comprehensive designs as artifacts, either in an Issue tracker ticket or in a markdown file somewhere. Then you "babysit" AI agents, often in parallel on different tickets, until you have working PRs. The design at the front and the PR review at the back are the dev job, and the babysitting is new toil: managing context, loading tickets into agents, asking "Do you have everything you need", then jumping to the currently blocked AI agent to help advance it.
+
+This tool is one thing leading to another:
+
+1. Durable state/context, associated with the ticket, so that agents can be "stateless" (obviously they're intensely stateful, but let the context be an input)
+2. Agent management comes naturally from the durable state, with swimlanes per ticket. 
+
+## Storage: append-only, portable per ticket
+
+The ticket is the atomic, portable unit — team, project, and assignee are fields, not folders, so tickets move freely between them. Markdown files contain frontmatter. A Folder per ticket.
+
+```
+PROJ-123/
+  spec.md        # frontloaded design — the immutable input
+  log/           # append-only events, one write-once file each
+                 # ISO-8601 timestamp prefix, type in YAML frontmatter
+  artefacts/     # blobs the log references, never inlines
+  state.md       # generated projection — do not edit
+```
+
+Event type is a field, not a directory. Structure lives in references between events, never in the tree. Corrections are new events; history is never rewritten.
+
+## Vocabulary (CLI verbs = the shared protocol)
+
+Discoverable via --help; the verbs are to agents what the status enum is to Issue Tracker.
+
+* `brief PROJ-123` — replay spec + log into a context blob that cold-starts a fresh agent. If brief isn't enough to resume, the design is leaking state.
+* `escalate` — append an escalation event and halt (nonzero exit). The gate is enforced by process control, not agent goodwill.
+* `resolve` — the human's answer, appended and linked back. Escalation + resolution is one durable artefact.
+* `inbox --mine` — unresolved escalations across all tickets.
+* `status` — regenerate the projection.
+* `audit PROJ-123` - verifies the hash-chained log (see below)
+
+## Control states (not progress states)
+
+The dashboard columns are the human's relationship to the ticket, weighted asymmetrically:
+
+* `Running` — agent working, no action. Rendered as a count.
+* `Needs me` — unresolved escalation. This is the board.
+* `Review` — agent claims done; a claim, not a fact. Load-bearing.
+* `Done.`
+
+## Auditability: hash-chained log
+
+Each event carries the hash of its predecessor, so any edit breaks the chain — tamper-evidence without git, and without git's container problem (which conflicted with mobile tickets). Attribution (actor, ts) lives in the event data, not in git blame.
+
+## Persistence and speed
+
+* Filesystem - default, e.g. `~/.draiver/data/`
+* S3 — Easy sync. Completed tickets can be archived with zip → upload → drop from the working set. Versioning gives a second, independent tamper-evidence layer.
+* SQLite — local, rebuildable cache/index over the canonical log. Powers fast agent queries and the board. Never the source of truth; the backend must never surface its schema in the verbs.
+
+## Dashboard
+
+UIs are for humans, so `draiver webui` will run a Htmx webserver (dynamic SPA, self contained within the cli tool). It can be used in a Read Only fashion, by just pointing at a data folder, or can be used in a Manage mode, being able to spin up agents, refresh agent context (kill agent and reload a fresh one with the same context), or restart ticket with a separate attempt if stuck (still append only, creates a new, potentially concurrent attempt on the ticket, possibly even with different inference model or coding agent). Renders the four control states. Joins to Isseu Tracker by ticket ID: the thin glanceable state syncs up for managers, the rich log stays down for agents and devs.
+
+## Agent control: JSON-stream over stdio
+
+When webui is run in Manage mode:
+
+Agents are driven headless, not screen-scraped. The backend spawns one agent per ticket in an isolated worktree and speaks newline-delimited JSON both ways (--input-format/--output-format stream-json), relayed to the browser over WebSocket/SSE. Backend-agnostic via thin per-agent adapters (Claude Code, Aider, Codex, …).
+
+Two hooks map straight onto the model: the session ID is the cattle mechanism — kill the process freely, keep the ID plus the log, respawn and --resume. The tool-permission callback is the escalation seam — route "may I?" to escalate instead of auto-approving, and the agent's own authority boundary becomes the human-in-the-loop gate.
