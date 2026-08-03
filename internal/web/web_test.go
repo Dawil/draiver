@@ -290,6 +290,26 @@ func TestAttemptLiveStopsPollingWhenDone(t *testing.T) {
 	}
 }
 
+// TestBoardPollNeverQuiesces pins the counterpart decision to task-009: unlike a
+// terminal Done attempt, the board is never terminal — new tickets/attempts can
+// appear at any time and polling is the only thing that surfaces them (read-only,
+// no server push). So even an empty/idle board must keep its 3s poll armed;
+// quiescing it would strand the board until a manual reload.
+func TestBoardPollNeverQuiesces(t *testing.T) {
+	s, err := New(store.Root{Dir: t.TempDir()}) // no tickets: an idle board
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	page := get(t, h, "/").Body.String()
+	for _, want := range []string{`hx-get="/board"`, `hx-trigger="every 3s"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("idle board must keep polling; missing %q", want)
+		}
+	}
+}
+
 // TestLogBodyMarkdownRenderedAndSanitized pins the contract that log-event
 // bodies are treated as markdown on the board and rendered safely: structure
 // (emphasis, code) becomes HTML, while raw HTML and dangerous link schemes an
