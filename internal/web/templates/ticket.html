@@ -8,7 +8,13 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="back" href="/ticket/{{.Attempt.Ticket}}">← attempts</a>
+    <nav class="breadcrumb" aria-label="Breadcrumb" data-testid="breadcrumb">
+      <a href="/">board</a>
+      <span class="sep" aria-hidden="true">›</span>
+      <a href="/ticket/{{.Attempt.Ticket}}">attempts</a>
+      <span class="sep" aria-hidden="true">›</span>
+      <span class="current" aria-current="page">{{.Attempt.ID}}</span>
+    </nav>
     <h1>{{.Attempt.Ticket}} <span class="att">/{{.Attempt.ID}}</span>
       <span class="state state-{{.Attempt.State}}" data-testid="state-badge">{{stateLabel .Attempt.State}}</span></h1>
     <p class="tagline">{{.Attempt.Title}}

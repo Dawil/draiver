@@ -131,6 +131,9 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 		`data-testid="log-order-toggle"`,  // the ordering toggle
 		`data-testid="log-timeline"`,      // the toggle's target list
 		`data-order="newest"`,             // default order is newest-first
+		`data-testid="breadcrumb"`,        // board › attempts › <attempt> trail
+		`href="/"`,                        // breadcrumb: one click to the board
+		`href="/ticket/PROJ-1"`,           // breadcrumb: one click to the attempt list
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q", want)
