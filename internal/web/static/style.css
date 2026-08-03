@@ -1,0 +1,85 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --ink: #e6e8ee;
+  --muted: #8b93a7;
+  --line: #2a2f3a;
+  --alert: #ff5c6c;
+  --alert-bg: #2a1518;
+  --review: #f5b955;
+  --running: #56b6c2;
+  --done: #6bbf73;
+  --accent: #7aa2f7;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --panel-2: #eef0f4; --ink: #1a1d24;
+    --muted: #5c6474; --line: #dfe3ea; --alert-bg: #fdecee;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+.topbar { padding: 18px 24px; border-bottom: 1px solid var(--line); }
+.topbar h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+.tagline { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.back { color: var(--accent); text-decoration: none; font-size: 13px; }
+
+.columns {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 16px; padding: 20px 24px; align-items: start;
+}
+@media (max-width: 900px) { .columns { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .columns { grid-template-columns: 1fr; } }
+
+.col { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.col h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+.count { background: var(--panel-2); color: var(--ink); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
+.col-needs-me { border-color: var(--alert); }
+.col-needs-me h2 { color: var(--alert); }
+
+.card {
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px; text-decoration: none; color: var(--ink);
+}
+.card:hover { border-color: var(--accent); }
+.card .tid { font-weight: 600; font-size: 13px; }
+.card .title { color: var(--muted); font-size: 13px; }
+.card-alert { background: var(--alert-bg); border-color: var(--alert); }
+.card .badge { align-self: flex-start; margin-top: 4px; font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
+.card-quiet { opacity: .85; }
+.muted { color: var(--muted); font-size: 13px; margin: 4px 0; }
+
+.detail { max-width: 860px; margin: 0 auto; padding: 20px 24px; }
+.state { font-size: 12px; padding: 2px 10px; border-radius: 999px; vertical-align: middle; }
+.state-Running { background: color-mix(in srgb, var(--running) 22%, transparent); color: var(--running); }
+.state-Review { background: color-mix(in srgb, var(--review) 22%, transparent); color: var(--review); }
+.state-Done { background: color-mix(in srgb, var(--done) 22%, transparent); color: var(--done); }
+.state-Needs\ me { background: var(--alert-bg); color: var(--alert); }
+
+.spec .prose { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px; }
+.prose { overflow-x: auto; }
+.prose pre { background: var(--panel-2); padding: 12px; border-radius: 8px; overflow-x: auto; }
+.prose code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+
+.timeline { list-style: none; padding: 0; margin: 0; }
+.event { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.event-escalation { border-left-color: var(--alert); }
+.event-resolution { border-left-color: var(--done); }
+.event-decision { border-left-color: var(--accent); }
+.event-review { border-left-color: var(--review); }
+.event-head { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.event-head .seq { font-weight: 700; color: var(--ink); }
+.event-head .type { text-transform: uppercase; letter-spacing: .06em; font-size: 11px; }
+.type-escalation { color: var(--alert); }
+.type-resolution { color: var(--done); }
+.event-body { font-size: 14px; }
+.event-body p:first-child { margin-top: 6px; }
+.link-note { font-size: 12px; margin: 4px 0 0; }
+.resolved { color: var(--done); }
+.unresolved { color: var(--alert); font-weight: 600; }
+.refs, .artefacts { font-size: 12px; color: var(--muted); margin: 4px 0 0; }

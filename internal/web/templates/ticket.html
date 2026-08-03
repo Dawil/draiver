@@ -1,0 +1,49 @@
+{{define "ticket.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draiver — {{.Ticket.ID}}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="back" href="/">← board</a>
+    <h1>{{.Ticket.ID}} <span class="state state-{{.Ticket.State}}" data-testid="state-badge">{{.Ticket.State}}</span></h1>
+    <p class="tagline">{{.Ticket.Title}}{{if .Ticket.Assignee}} · {{.Ticket.Assignee}}{{end}}</p>
+  </header>
+
+  <main class="detail" data-testid="ticket-detail">
+    <section class="spec" data-testid="spec">
+      <h2>Spec</h2>
+      <div class="prose">{{.SpecHTML}}</div>
+    </section>
+
+    <section class="log">
+      <h2>Log <span class="count">{{len .Events}}</span></h2>
+      <ol class="timeline">
+        {{range .Events}}
+        <li class="event event-{{.Type}}" data-testid="event-{{.Seq}}">
+          <div class="event-head">
+            <span class="seq">#{{.Seq}}</span>
+            <span class="type type-{{.Type}}">{{.Type}}</span>
+            <span class="actor">{{.Actor}}</span>
+            <span class="ts">{{.TS}}</span>
+          </div>
+          <div class="prose event-body">{{.BodyHTML}}</div>
+          {{if .IsEsc}}
+            {{if .Resolved}}
+              <p class="link-note resolved" data-testid="resolved-{{.Seq}}">→ resolved by #{{.ResolvedBy}}</p>
+            {{else}}
+              <p class="link-note unresolved" data-testid="unresolved-{{.Seq}}">→ unresolved — needs a human</p>
+            {{end}}
+          {{end}}
+          {{if .Refs}}<p class="refs">refs: {{range .Refs}}#{{.}} {{end}}</p>{{end}}
+          {{if .Artefacts}}<p class="artefacts">{{range .Artefacts}}<span>📎 {{.}}</span> {{end}}</p>{{end}}
+        </li>
+        {{end}}
+      </ol>
+    </section>
+  </main>
+</body>
+</html>{{end}}

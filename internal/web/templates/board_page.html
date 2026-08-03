@@ -1,0 +1,19 @@
+{{define "board_page.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draiver — board</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Draiver</h1>
+    <p class="tagline">Agents are cattle, tickets are pets. You attend only to what needs you.</p>
+  </header>
+  <main id="board-region" data-testid="board" hx-get="/board" hx-trigger="every 3s" hx-swap="innerHTML">
+    {{template "board.html" .}}
+  </main>
+</body>
+</html>{{end}}
