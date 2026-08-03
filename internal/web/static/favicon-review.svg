@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Review-state variant: the eucalypt-green "D" plus a Blue Mountains
+       misty-blue circle badge, shown when one or more attempts await review. -->
+  <path fill="#3E6B48" fill-rule="evenodd"
+        d="M9 5 L16 5 A11 11 0 0 1 16 27 L9 27 Z
+           M13 10 L16 10 A6 6 0 0 1 16 22 L13 22 Z"/>
+  <circle cx="24" cy="8" r="7" fill="#6E9BB5" stroke="#fff" stroke-width="2"/>
+</svg>

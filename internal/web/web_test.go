@@ -189,6 +189,71 @@ func TestLogBodyMarkdownRenderedAndSanitized(t *testing.T) {
 	}
 }
 
+// TestFaviconServedAndWired pins the favicon contract: all three SVG variants
+// and the swap script are served from the embedded static FS, every full page
+// references the plain favicon by the id the script swaps, and each badged
+// variant carries its defining colour (eucalypt green "D" everywhere; rust-red
+// only on Stuck; misty blue only on Review). The count→variant swap itself is
+// client-side JS off the live counts and is not exercised here.
+func TestFaviconServedAndWired(t *testing.T) {
+	h := newServer(t)
+
+	const green = "#3E6B48" // eucalypt "D"
+	const rust = "#B7410E"  // Stuck badge
+	const misty = "#6E9BB5" // Blue Mountains Review badge
+
+	// The favicon must load on every full page, not just the board; the swap
+	// script only belongs where the live counts drive it (the board).
+	for _, p := range []string{"/", "/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
+		page := get(t, h, p).Body.String()
+		if !strings.Contains(page, `id="favicon"`) || !strings.Contains(page, `href="/static/favicon.svg"`) {
+			t.Errorf("page %s is missing the favicon link", p)
+		}
+	}
+	if !strings.Contains(get(t, h, "/").Body.String(), `src="/static/favicon.js"`) {
+		t.Errorf("board page missing the favicon swap script")
+	}
+
+	// Each variant is served and carries exactly its defining colours: the green
+	// D is on all three; each badge colour appears only on its own variant.
+	for _, c := range []struct {
+		path       string
+		wantColors []string
+		notColors  []string
+	}{
+		{"/static/favicon.svg", []string{green}, []string{rust, misty}},
+		{"/static/favicon-stuck.svg", []string{green, rust}, []string{misty}},
+		{"/static/favicon-review.svg", []string{green, misty}, []string{rust}},
+	} {
+		rr := get(t, h, c.path)
+		if rr.Code != 200 {
+			t.Fatalf("GET %s = %d", c.path, rr.Code)
+		}
+		body := rr.Body.String()
+		for _, want := range c.wantColors {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s should contain colour %s:\n%s", c.path, want, body)
+			}
+		}
+		for _, bad := range c.notColors {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s should not contain colour %s:\n%s", c.path, bad, body)
+			}
+		}
+	}
+
+	// The swap script drives off both live counts the board exposes.
+	js := get(t, h, "/static/favicon.js")
+	if js.Code != 200 {
+		t.Fatalf("GET /static/favicon.js = %d", js.Code)
+	}
+	for _, want := range []string{"count-stuck", "count-review"} {
+		if !strings.Contains(js.Body.String(), want) {
+			t.Errorf("favicon.js should read the live %q count", want)
+		}
+	}
+}
+
 func TestUnknownRoutes404(t *testing.T) {
 	h := newServer(t)
 	if rr := get(t, h, "/ticket/NOPE-1"); rr.Code != 404 {
