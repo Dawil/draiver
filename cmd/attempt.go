@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/attempt"
-	"draiver/internal/project"
+	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/project"
 )
 
 var (

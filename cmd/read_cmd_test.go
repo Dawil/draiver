@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 func TestStatusWritesStateAndBoard(t *testing.T) {

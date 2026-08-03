@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/project"
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 var statusCmd = &cobra.Command{

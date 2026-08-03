@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 // specWith writes raw spec.md content for ticket PROJ-1 under a fresh root.

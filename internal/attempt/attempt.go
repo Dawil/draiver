@@ -14,9 +14,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"draiver/internal/event"
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 // Meta is an attempt's static provenance, persisted as attempt.md frontmatter.

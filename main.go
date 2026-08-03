@@ -6,7 +6,7 @@ package main
 import (
 	"os"
 
-	"draiver/cmd"
+	"github.com/Dawil/draiver/cmd"
 )
 
 func main() {

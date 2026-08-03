@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 func TestAttemptNewAndLs(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"draiver/internal/event"
-	"draiver/internal/project"
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 // Build assembles the brief for one attempt on a ticket.

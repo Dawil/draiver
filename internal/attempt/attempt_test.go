@@ -3,8 +3,8 @@ package attempt
 import (
 	"testing"
 
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 func TestCreateAllocatesSequentialIDsWithGenesis(t *testing.T) {

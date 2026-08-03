@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/brief"
+	"github.com/Dawil/draiver/internal/brief"
 )
 
 var briefCmd = &cobra.Command{

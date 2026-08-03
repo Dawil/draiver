@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/web"
+	"github.com/Dawil/draiver/internal/web"
 )
 
 var webuiAddr string

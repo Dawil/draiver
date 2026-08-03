@@ -4,9 +4,9 @@ import (
 	"os"
 	"testing"
 
-	"draiver/internal/event"
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 func ev(seq int, typ string, refs ...int) event.Event {

@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/project"
+	"github.com/Dawil/draiver/internal/project"
 )
 
 var inboxMine bool

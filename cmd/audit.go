@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/audit"
+	"github.com/Dawil/draiver/internal/audit"
 )
 
 var auditCmd = &cobra.Command{

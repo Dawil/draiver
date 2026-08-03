@@ -15,8 +15,8 @@ import (
 
 	"github.com/yuin/goldmark"
 
-	"draiver/internal/project"
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 //go:embed templates/*.html

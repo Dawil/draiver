@@ -6,9 +6,9 @@ package audit
 import (
 	"fmt"
 
-	"draiver/internal/event"
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 // Result reports whether a chain is intact, and if not, the first broken event.

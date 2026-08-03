@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"draiver/internal/project"
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 // run executes the root command with args and returns combined output and the

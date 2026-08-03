@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"draiver/internal/event"
-	"draiver/internal/project"
-	"draiver/internal/store"
-	"draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 func seedBoard(t *testing.T) store.Root {

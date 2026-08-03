@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"draiver/internal/event"
+	"github.com/Dawil/draiver/internal/event"
 )
 
 var (

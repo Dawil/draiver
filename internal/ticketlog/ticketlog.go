@@ -13,8 +13,8 @@ import (
 	"sort"
 	"time"
 
-	"draiver/internal/event"
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 // Read returns an attempt's events in causal (seq) order.

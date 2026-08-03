@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"draiver/internal/event"
-	"draiver/internal/store"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 const att = "0001"

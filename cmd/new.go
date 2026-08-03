@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/attempt"
 )
 
 var (

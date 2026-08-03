@@ -1,4 +1,4 @@
-module draiver
+module github.com/Dawil/draiver
 
 go 1.26.5
 
