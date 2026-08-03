@@ -130,8 +130,12 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 		"which base image?",               // escalation body
 		`data-testid="unresolved-2"`,      // shown as unresolved
 		`data-testid="log-order-toggle"`,  // the ordering toggle
-		`data-testid="log-timeline"`,      // the toggle's target list
-		`data-order="newest"`,             // default order is newest-first
+		`data-testid="log-timeline"`,      // the log list
+		`data-testid="log-region"`,        // the htmx-polled log region
+		`data-order="newest"`,             // default visual order is newest-first
+		`hx-get="/ticket/PROJ-1/0001/live"`, // the region polls the live fragment
+		`hx-trigger="every 3s"`,           // ...on the board's polling cadence
+		"htmx.min.js",                     // htmx is loaded locally (no CDN)
 		`data-testid="breadcrumb"`,        // board › attempts › <attempt> trail
 		`href="/"`,                        // breadcrumb: one click to the board
 		`href="/ticket/PROJ-1"`,           // breadcrumb: one click to the attempt list
@@ -141,9 +145,74 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 		}
 	}
 
-	// Default ordering is newest-first: the later event (#2) renders before #1.
-	if i2, i1 := strings.Index(body, `data-testid="event-2"`), strings.Index(body, `data-testid="event-1"`); i2 > i1 {
-		t.Errorf("expected newest-first: event-2 (%d) should precede event-1 (%d)", i2, i1)
+	// The DOM is oldest-first (#1 before #2); the newest-first *default* is a
+	// visual CSS flip keyed off data-order on the region, so an htmx swap that
+	// replaces only the list can never disturb the reader's chosen order.
+	if i1, i2 := strings.Index(body, `data-testid="event-1"`), strings.Index(body, `data-testid="event-2"`); i1 > i2 {
+		t.Errorf("expected oldest-first DOM: event-1 (%d) should precede event-2 (%d)", i1, i2)
+	}
+}
+
+// TestAttemptLiveFragment pins the htmx polling contract: GET .../live returns
+// the log <ol> as the primary swap plus an out-of-band state badge (and count),
+// so a single poll refreshes every live region without a full-page reload. It is
+// a fragment, not a page: no <html>/<head> chrome.
+func TestAttemptLiveFragment(t *testing.T) {
+	h := newServer(t)
+	rr := get(t, h, "/ticket/PROJ-1/0001/live")
+	if rr.Code != 200 {
+		t.Fatalf("GET .../live = %d", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`data-testid="log-timeline"`,               // primary swap: the log list
+		`data-testid="event-1"`,                    // ...with the events
+		`id="state-badge"`,                          // OOB state badge target
+		`hx-swap-oob="true"`,                        // ...swapped out of band
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("live fragment missing %q", want)
+		}
+	}
+	if strings.Contains(body, "<html") || strings.Contains(body, "<head") {
+		t.Errorf("live fragment must not carry full-page chrome:\n%s", body)
+	}
+	// Oldest-first DOM in the fragment too, so swaps stay consistent with the page.
+	if i1, i2 := strings.Index(body, `data-testid="event-1"`), strings.Index(body, `data-testid="event-2"`); i1 > i2 {
+		t.Errorf("live fragment should be oldest-first DOM: event-1 (%d) before event-2 (%d)", i1, i2)
+	}
+}
+
+// TestAttemptLiveStopsPollingWhenDone pins that a terminal (Done) attempt answers
+// the live fragment with HTTP 286, htmx's signal to cancel the polling trigger,
+// and that its page renders the log region without an hx-trigger so polling never
+// starts.
+func TestAttemptLiveStopsPollingWhenDone(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("DONE-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("DONE-1"), []byte("---\nid: DONE-1\ntitle: Done\n---\n\nspec"), 0o644)
+	if _, err := ticketlog.Append(root, "DONE-1", "0001", event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, "DONE-1", "0001", event.Event{Type: "done", Actor: "a", Body: "shipped"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	// The live fragment self-cancels with 286.
+	if rr := get(t, h, "/ticket/DONE-1/0001/live"); rr.Code != 286 {
+		t.Errorf("Done live fragment = %d, want 286 (stop polling)", rr.Code)
+	}
+	// The page never arms polling for a Done attempt.
+	page := get(t, h, "/ticket/DONE-1/0001").Body.String()
+	if strings.Contains(page, "hx-trigger") {
+		t.Errorf("Done attempt page must not poll (no hx-trigger)")
 	}
 }
 

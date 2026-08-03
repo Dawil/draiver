@@ -6,6 +6,7 @@
   <title>Draiver — {{.Attempt.Ticket}}/{{.Attempt.ID}}</title>
   <link rel="icon" id="favicon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -17,7 +18,7 @@
       <span class="current" aria-current="page">{{.Attempt.ID}}</span>
     </nav>
     <h1>{{.Attempt.Ticket}} <span class="att">/{{.Attempt.ID}}</span>
-      <span class="state state-{{.Attempt.State}}" data-testid="state-badge">{{stateLabel .Attempt.State}}</span></h1>
+      {{template "state-badge" (badge .Attempt.State false)}}</h1>
     <p class="tagline">{{.Attempt.Title}}
       {{if .Attempt.Tool}} · <span data-testid="attempt-tool">{{.Attempt.Tool}}</span>{{end}}
       {{if .Attempt.Model}} · {{.Attempt.Model}}{{end}}
@@ -32,10 +33,39 @@
 
     <section class="log">
       <div class="log-head">
-        <h2>Log <span class="count">{{len .Events}}</span></h2>
+        <h2>Log <span class="count" id="log-count">{{len .Events}}</span></h2>
         <button type="button" class="order-toggle" data-testid="log-order-toggle" aria-pressed="false">Newest first</button>
       </div>
-      <ol class="timeline" data-testid="log-timeline" data-order="newest">
+      <div class="log-region" data-testid="log-region" data-order="newest"
+        {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
+        {{template "attempt-log" .}}
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      // The order toggle only flips VISUAL order: the DOM is always oldest-first
+      // and CSS (flex-direction) reverses it. Order state lives on the log-region
+      // element, which htmx's innerHTML swap preserves, so polling never disturbs
+      // the reader's chosen order.
+      var toggle = document.querySelector('[data-testid="log-order-toggle"]');
+      var region = document.querySelector('[data-testid="log-region"]');
+      if (!toggle || !region) return;
+      toggle.addEventListener('click', function () {
+        var order = region.dataset.order === 'newest' ? 'oldest' : 'newest';
+        region.dataset.order = order;
+        toggle.textContent = order === 'newest' ? 'Newest first' : 'Oldest first';
+        toggle.setAttribute('aria-pressed', order === 'oldest' ? 'true' : 'false');
+      });
+    })();
+  </script>
+</body>
+</html>{{end}}
+
+{{define "state-badge"}}<span id="state-badge" class="state state-{{.State}}" data-testid="state-badge"{{if .OOB}} hx-swap-oob="true"{{end}}>{{stateLabel .State}}</span>{{end}}
+
+{{define "attempt-log"}}<ol class="timeline" data-testid="log-timeline">
         {{range .Events}}
         <li class="event event-{{.Type}}" data-testid="event-{{.Seq}}">
           <div class="event-head">
@@ -56,24 +86,6 @@
           {{if .Artefacts}}<p class="artefacts">{{range .Artefacts}}<span>📎 {{.}}</span> {{end}}</p>{{end}}
         </li>
         {{end}}
-      </ol>
-    </section>
-  </main>
+      </ol>{{end}}
 
-  <script>
-    (function () {
-      var toggle = document.querySelector('[data-testid="log-order-toggle"]');
-      var list = document.querySelector('[data-testid="log-timeline"]');
-      if (!toggle || !list) return;
-      toggle.addEventListener('click', function () {
-        var items = Array.prototype.slice.call(list.children);
-        items.reverse().forEach(function (li) { list.appendChild(li); });
-        var order = list.dataset.order === 'newest' ? 'oldest' : 'newest';
-        list.dataset.order = order;
-        toggle.textContent = order === 'newest' ? 'Newest first' : 'Oldest first';
-        toggle.setAttribute('aria-pressed', order === 'oldest' ? 'true' : 'false');
-      });
-    })();
-  </script>
-</body>
-</html>{{end}}
+{{define "attempt-live"}}{{template "attempt-log" .}}{{template "state-badge" (badge .Attempt.State true)}}<span id="log-count" class="count" hx-swap-oob="true">{{len .Events}}</span>{{end}}

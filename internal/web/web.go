@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/yuin/goldmark"
@@ -48,10 +47,21 @@ func stateLabel(s project.State) string {
 	return string(s)
 }
 
+// badgeVM drives the reusable "state-badge" partial. OOB marks the copy the live
+// fragment emits with hx-swap-oob so a single poll updates the header badge that
+// lives outside the swapped log region.
+type badgeVM struct {
+	State project.State
+	OOB   bool
+}
+
 // New builds a Server over the given data root.
 func New(root store.Root) (*Server, error) {
 	tmpl, err := template.New("").
-		Funcs(template.FuncMap{"stateLabel": stateLabel}).
+		Funcs(template.FuncMap{
+			"stateLabel": stateLabel,
+			"badge":      func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
+		}).
 		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
@@ -66,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /board", s.handleBoardPartial)
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -140,6 +151,10 @@ type detailVM struct {
 	Attempt  project.Attempt
 	SpecHTML template.HTML
 	Events   []eventVM
+	// Polls is true while the attempt is non-terminal: the page arms htmx
+	// polling on the log region. A Done attempt renders without a trigger so
+	// polling never starts (and the live fragment returns 286 to self-cancel).
+	Polls bool
 }
 
 type indexVM struct {
@@ -215,18 +230,13 @@ func (s *Server) handleAttemptIndex(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "attempts.html", vm)
 }
 
-// handleAttempt renders one attempt's detail (GET /ticket/{id}/{attempt}).
-func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	att := r.PathValue("attempt")
-	if !s.root.AttemptExists(id, att) {
-		http.NotFound(w, r)
-		return
-	}
+// detail builds the view model for one attempt. Events are kept oldest-first in
+// the DOM; the detail view flips the *visual* order with CSS (flex-direction) so
+// an htmx innerHTML swap never disturbs the reader's chosen order.
+func (s *Server) detail(id, att string) (detailVM, error) {
 	a, err := project.LoadAttempt(s.root, id, att)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return detailVM{}, err
 	}
 
 	resolutionOf := map[int]int{}
@@ -238,7 +248,7 @@ func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	vm := detailVM{Attempt: a, SpecHTML: s.renderSpec(id)}
+	vm := detailVM{Attempt: a, SpecHTML: s.renderSpec(id), Polls: a.State != project.Done}
 	for _, e := range a.Events {
 		ev := eventVM{
 			Seq:       e.Seq,
@@ -258,10 +268,52 @@ func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
 		}
 		vm.Events = append(vm.Events, ev)
 	}
-	// Present newest-first by default; the detail view offers a client-side
-	// toggle to flip back to oldest-first.
-	slices.Reverse(vm.Events)
+	return vm, nil
+}
+
+// handleAttempt renders one attempt's detail (GET /ticket/{id}/{attempt}).
+func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	s.render(w, "ticket.html", vm)
+}
+
+// handleAttemptLive renders the htmx polling fragment (GET
+// /ticket/{id}/{attempt}/live): the log <ol> as the primary swap plus the state
+// badge and log count as hx-swap-oob copies, so one poll updates every live
+// region. A Done attempt answers 286 so htmx stops polling.
+func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "attempt-live", vm); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if !vm.Polls {
+		// 286 tells htmx to cancel the polling trigger on a terminal attempt.
+		w.WriteHeader(286)
+	}
+	buf.WriteTo(w)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
