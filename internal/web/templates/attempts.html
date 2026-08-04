@@ -4,10 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Draiver — {{.Ticket}}</title>
-  <link rel="icon" id="favicon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" id="favicon" type="image/svg+xml" href="{{.FaviconHref}}">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/favicon.js" defer></script>
 </head>
 <body>
+  {{/* Board-state signal on its own channel: a hidden poll that pulls only the
+       draiver:favicon HX-Trigger (empty body, hx-swap="none"). The attempts
+       index has no log poll of its own, so this is the tab icon's only feed. */}}
+  <span id="favicon-poll" hidden hx-get="/favicon-state" hx-trigger="every 3s" hx-swap="none"></span>
   <header class="topbar">
     <a class="back" href="/">← board</a>
     <h1>{{.Ticket}}</h1>

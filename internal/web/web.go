@@ -91,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
 	mux.HandleFunc("GET /board", s.handleBoardPartial)
+	mux.HandleFunc("GET /favicon-state", s.handleFaviconState)
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
@@ -151,6 +152,25 @@ func faviconTrigger(href string) string {
 	return string(b)
 }
 
+// emitFaviconTrigger arms the post-swap favicon event carrying the current board
+// variant. Shared by /board and the detail pages' /favicon-state poll so every
+// page swaps to the same variant off the one Stuck>Review precedence source.
+func emitFaviconTrigger(w http.ResponseWriter, vm boardVM) {
+	w.Header().Set("HX-Trigger", faviconTrigger(vm.FaviconHref()))
+}
+
+// faviconHref scans the board and returns the current favicon variant so a
+// detail page can server-render the right icon on load (no plain→badged flash).
+// The favicon is a nicety, so a board-scan error degrades to plain rather than
+// failing the whole detail page.
+func (s *Server) faviconHref() string {
+	vm, err := s.board()
+	if err != nil {
+		return faviconPlain
+	}
+	return vm.FaviconHref()
+}
+
 type eventVM struct {
 	Seq        int
 	Type       string
@@ -172,12 +192,18 @@ type detailVM struct {
 	// polling on the log region. A Done attempt renders without a trigger so
 	// polling never starts (and the live fragment returns 286 to self-cancel).
 	Polls bool
+	// FaviconHref is the current board variant, server-rendered into the detail
+	// page's <link rel="icon"> so the tab icon reflects live board state on load.
+	FaviconHref string
 }
 
 type indexVM struct {
 	Ticket   string
 	Title    string
 	Attempts []project.Attempt
+	// FaviconHref is the current board variant, server-rendered into the index
+	// page's <link rel="icon"> (see detailVM.FaviconHref).
+	FaviconHref string
 }
 
 func (s *Server) board() (boardVM, error) {
@@ -218,8 +244,25 @@ func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
 	}
 	// Keep the favicon in sync without coupling it to the board's data-testid
 	// counts: emit the variant as a custom event htmx fires after the swap.
-	w.Header().Set("HX-Trigger", faviconTrigger(vm.FaviconHref()))
+	emitFaviconTrigger(w, vm)
 	s.render(w, "board.html", vm)
+}
+
+// handleFaviconState answers the detail pages' favicon poll: it scans the board
+// and emits the same draiver:favicon HX-Trigger as /board with an empty body.
+// Detail pages poll this from a hidden element so their tab icon tracks live
+// board state — a channel of its own, independent of the log poll (which
+// self-cancels on a Done attempt and does not exist on the attempts index).
+func (s *Server) handleFaviconState(w http.ResponseWriter, r *http.Request) {
+	vm, err := s.board()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	emitFaviconTrigger(w, vm)
+	// Empty 200; the client polls with hx-swap="none", so nothing is swapped —
+	// only the HX-Trigger favicon event is processed.
+	w.WriteHeader(http.StatusOK)
 }
 
 // handleAttemptIndex lists a ticket's attempts (GET /ticket/{id}).
@@ -234,7 +277,7 @@ func (s *Server) handleAttemptIndex(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	vm := indexVM{Ticket: id, Title: id}
+	vm := indexVM{Ticket: id, Title: id, FaviconHref: s.faviconHref()}
 	for _, aid := range ids {
 		a, err := project.LoadAttempt(s.root, id, aid)
 		if err != nil {
@@ -301,6 +344,7 @@ func (s *Server) handleAttempt(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	vm.FaviconHref = s.faviconHref()
 	s.render(w, "ticket.html", vm)
 }
 

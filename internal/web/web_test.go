@@ -283,10 +283,12 @@ func TestAttemptLiveStopsPollingWhenDone(t *testing.T) {
 	if rr := get(t, h, "/ticket/DONE-1/0001/live"); rr.Code != 286 {
 		t.Errorf("Done live fragment = %d, want 286 (stop polling)", rr.Code)
 	}
-	// The page never arms polling for a Done attempt.
+	// The page never arms the log poll for a Done attempt. (The favicon poll is
+	// board-state, which is never terminal, so it stays armed — see
+	// TestBoardPollNeverQuiesces; only the immutable log region self-cancels.)
 	page := get(t, h, "/ticket/DONE-1/0001").Body.String()
-	if strings.Contains(page, "hx-trigger") {
-		t.Errorf("Done attempt page must not poll (no hx-trigger)")
+	if strings.Contains(page, `hx-get="/ticket/DONE-1/0001/live"`) {
+		t.Errorf("Done attempt page must not arm the log poll")
 	}
 }
 
@@ -357,9 +359,10 @@ func TestLogBodyMarkdownRenderedAndSanitized(t *testing.T) {
 // and the swap script are served from the embedded static FS, every full page
 // references the favicon by the id the script swaps, and each badged variant
 // carries its defining colour (eucalypt green "D" everywhere; rust-red only on
-// Stuck; misty blue only on Review). The board page server-renders the variant
-// that matches its live state; detail pages have no live counts, so they stay
-// plain. The per-refresh swap is driven by an HX-Trigger event, not scraping.
+// Stuck; misty blue only on Review). Every full page — board and detail alike —
+// server-renders the variant that matches live board state and is wired to
+// receive updates. The per-refresh swap is driven by an HX-Trigger event, not
+// scraping.
 func TestFaviconServedAndWired(t *testing.T) {
 	h := newServer(t)
 
@@ -367,11 +370,20 @@ func TestFaviconServedAndWired(t *testing.T) {
 	const rust = "#B7410E"  // Stuck badge
 	const misty = "#6E9BB5" // Blue Mountains Review badge
 
-	// Detail pages have no live board context, so they carry the plain favicon.
+	// Detail pages reflect live board state too: the seed has a Stuck attempt,
+	// so they server-render the Stuck variant (same precedence as the board),
+	// load the swap script, and poll /favicon-state for updates — no flash to
+	// plain on load, and the icon tracks state changes happening elsewhere.
 	for _, p := range []string{"/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
 		page := get(t, h, p).Body.String()
-		if !strings.Contains(page, `id="favicon"`) || !strings.Contains(page, `href="/static/favicon.svg"`) {
-			t.Errorf("page %s is missing the plain favicon link", p)
+		if !strings.Contains(page, `id="favicon"`) || !strings.Contains(page, `href="/static/favicon-stuck.svg"`) {
+			t.Errorf("page %s should server-render the live Stuck favicon variant", p)
+		}
+		if !strings.Contains(page, `src="/static/favicon.js"`) {
+			t.Errorf("page %s is missing the favicon swap script", p)
+		}
+		if !strings.Contains(page, `hx-get="/favicon-state"`) {
+			t.Errorf("page %s is not wired to poll board favicon state", p)
 		}
 	}
 	// The board page server-renders the badged variant matching the live board.
@@ -463,6 +475,25 @@ func TestBoardPartialEmitsFaviconTrigger(t *testing.T) {
 	// Seed has a Stuck attempt, and Stuck outranks Review.
 	if !strings.Contains(trig, "draiver:favicon") || !strings.Contains(trig, "/static/favicon-stuck.svg") {
 		t.Errorf("HX-Trigger = %q, want draiver:favicon → stuck variant", trig)
+	}
+}
+
+// TestFaviconStateEmitsTrigger pins the detail pages' favicon channel: /favicon-state
+// carries the same draiver:favicon HX-Trigger as /board (same precedence source)
+// with an empty body, so a detail page's hidden poll updates the tab icon to
+// live board state without pulling the board partial.
+func TestFaviconStateEmitsTrigger(t *testing.T) {
+	h := newServer(t)
+	rr := get(t, h, "/favicon-state")
+	if rr.Code != 200 {
+		t.Fatalf("GET /favicon-state = %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != "" {
+		t.Errorf("/favicon-state body = %q, want empty (hx-swap=none)", body)
+	}
+	// Seed has a Stuck attempt, and Stuck outranks Review.
+	if trig := rr.Header().Get("HX-Trigger"); !strings.Contains(trig, "draiver:favicon") || !strings.Contains(trig, "/static/favicon-stuck.svg") {
+		t.Errorf("/favicon-state HX-Trigger = %q, want draiver:favicon → stuck variant", trig)
 	}
 }
 
