@@ -260,6 +260,34 @@ func (m *Manager) Remove(ctx context.Context, k Key, opts RemoveOptions) error {
 	return nil
 }
 
+// Dirty reports whether the worktree for k holds changes that exist *only* in the
+// checkout — uncommitted modifications to tracked files, or untracked files — the
+// work a force-remove would silently destroy. It is the guard the reconciler
+// consults before reclaiming a worktree on retire: a Review/Done attempt with a
+// dirty checkout must be kept, not force-removed (drvctl-014).
+//
+// A worktree that was never created, or whose checkout vanished under a crash, is
+// reported clean: there is nothing in a working tree to lose, and any committed
+// work is safe on the branch. It shells out to `git status --porcelain` (which
+// lists untracked files by default) in the checkout itself.
+func (m *Manager) Dirty(ctx context.Context, k Key) (bool, error) {
+	if err := k.valid(); err != nil {
+		return false, err
+	}
+	path := m.pathFor(k)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // no checkout — nothing uncommitted to lose
+		}
+		return false, fmt.Errorf("worktree: stat %s/%s: %w", k.Ticket, k.Attempt, err)
+	}
+	out, err := m.gitIn(ctx, path, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("worktree: status %s/%s: %w", k.Ticket, k.Attempt, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // Reconcile brings the managed worktrees on disk in line with the set that
 // should still exist (keep). It is the crash-recovery entry point a restarted
 // daemon calls before it admits anything:
@@ -377,10 +405,18 @@ func (m *Manager) prune(ctx context.Context) error {
 	return nil
 }
 
-// git runs a git command in the repo and returns trimmed stdout, wrapping any
-// failure with the command's stderr for a legible error.
+// git runs a git command in the main repo and returns trimmed stdout, wrapping
+// any failure with the command's stderr for a legible error.
 func (m *Manager) git(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", m.repo}, args...)...)
+	return m.gitIn(ctx, m.repo, args...)
+}
+
+// gitIn runs a git command with its working directory set to dir — a specific
+// checkout path — rather than the main repo, so a caller can inspect one
+// worktree in isolation (e.g. its dirty state). Output and error handling match
+// git.
+func (m *Manager) gitIn(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

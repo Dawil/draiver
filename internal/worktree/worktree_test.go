@@ -354,6 +354,55 @@ func TestKeyFromBranch(t *testing.T) {
 	}
 }
 
+// TestDirtyReportsUncommittedWork covers the guard the reconciler consults before
+// reclaiming a worktree on retire (drvctl-014): a fresh checkout is clean, an
+// untracked file or an uncommitted modification makes it dirty, and committing the
+// change makes it clean again.
+func TestDirtyReportsUncommittedWork(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	wt := mustCreate(t, m, "PROJ-1", "0001")
+
+	// A just-created checkout mirrors HEAD — clean.
+	if dirty, err := m.Dirty(ctx, wt.Key); err != nil || dirty {
+		t.Fatalf("fresh checkout: Dirty=%v err=%v, want clean", dirty, err)
+	}
+
+	// An untracked file (the drv-002 scenario: implemented, not committed) is dirty.
+	untracked := filepath.Join(wt.Path, "feature.go")
+	if err := os.WriteFile(untracked, []byte("package feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := m.Dirty(ctx, wt.Key); err != nil || !dirty {
+		t.Fatalf("untracked file: Dirty=%v err=%v, want dirty", dirty, err)
+	}
+
+	// Committing the change (commitIn stages everything, including feature.go)
+	// returns the checkout to clean.
+	commitIn(t, wt.Path, "commit the work")
+	if dirty, err := m.Dirty(ctx, wt.Key); err != nil || dirty {
+		t.Fatalf("after commit: Dirty=%v err=%v, want clean", dirty, err)
+	}
+
+	// A modification to a tracked file is dirty too.
+	if err := os.WriteFile(filepath.Join(wt.Path, "f.txt"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if dirty, err := m.Dirty(ctx, wt.Key); err != nil || !dirty {
+		t.Fatalf("modified tracked file: Dirty=%v err=%v, want dirty", dirty, err)
+	}
+}
+
+// TestDirtyAbsentCheckoutIsClean: a worktree that was never created (or whose
+// checkout vanished under a crash) has nothing in a working tree to lose, so it is
+// reported clean rather than erroring.
+func TestDirtyAbsentCheckoutIsClean(t *testing.T) {
+	m := newManager(t)
+	if dirty, err := m.Dirty(context.Background(), Key{"PROJ-1", "0001"}); err != nil || dirty {
+		t.Fatalf("absent checkout: Dirty=%v err=%v, want clean, no error", dirty, err)
+	}
+}
+
 // --- helpers ---
 
 func commitIn(t *testing.T, dir, msg string) {
