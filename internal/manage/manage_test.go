@@ -140,6 +140,9 @@ func newRepo(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	// Worktree checkouts default to a base under the user cache dir; redirect it to
+	// a temp dir so tests never write into the real ~/.cache.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
