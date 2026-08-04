@@ -1,0 +1,3 @@
+FROM scratch
+COPY draiver-static /draiver
+ENTRYPOINT ["/draiver"]
