@@ -73,6 +73,34 @@ func (r Root) StatePath(id, attempt string) string {
 	return filepath.Join(r.AttemptDir(id, attempt), "state.md")
 }
 
+// --- session runtime paths (draiverctld; rebuildable, out of the hash chain) ---
+
+// SessionDir holds an attempt's per-session runtime state. It is rebuildable
+// from disk plus the live process table and is deliberately excluded from the
+// hash-chained log, so it is created on demand when a session starts rather than
+// with the attempt.
+func (r Root) SessionDir(id, attempt string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), "session")
+}
+
+// SessionMetaPath is the session's identity record (adapter, model, session id,
+// pid, worktree, started).
+func (r Root) SessionMetaPath(id, attempt string) string {
+	return filepath.Join(r.SessionDir(id, attempt), "session.json")
+}
+
+// SessionStreamPath is the raw stream-json tee (the session "journal"); semantic
+// events are promoted from it into the durable log.
+func (r Root) SessionStreamPath(id, attempt string) string {
+	return filepath.Join(r.SessionDir(id, attempt), "stream.jsonl")
+}
+
+// SessionMeterPath is the live token/cost/context + watchdog tally, folded into
+// attempt.md metrics on retire.
+func (r Root) SessionMeterPath(id, attempt string) string {
+	return filepath.Join(r.SessionDir(id, attempt), "meter.json")
+}
+
 // --- existence & listing ---
 
 // Exists reports whether a ticket folder is present.
@@ -102,6 +130,14 @@ func (r Root) EnsureAttemptDirs(id, attempt string) error {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return fmt.Errorf("ensure %s: %w", d, err)
 		}
+	}
+	return nil
+}
+
+// EnsureSessionDir creates an attempt's session/ runtime dir (and every parent).
+func (r Root) EnsureSessionDir(id, attempt string) error {
+	if err := os.MkdirAll(r.SessionDir(id, attempt), 0o755); err != nil {
+		return fmt.Errorf("ensure session dir %s/%s: %w", id, attempt, err)
 	}
 	return nil
 }
