@@ -3,6 +3,7 @@ package reconcile_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,6 +217,18 @@ func newRepo(t *testing.T) string {
 	// Worktree checkouts default to a base under the user cache dir; redirect it to
 	// a temp dir so tests never write into the real ~/.cache.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	return gitRepo(t)
+}
+
+// gitRepo inits a fresh git repo in a temp dir with one empty commit and returns
+// its path. Unlike newRepo it does not touch XDG_CACHE_HOME, so a test can stand
+// up a second repo sharing the already-redirected worktree cache — the multi-repo
+// fixture (drvctl-015).
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -250,7 +263,16 @@ func newWorld(t *testing.T) world {
 // enable gate itself create a disabled attempt with newDisabledTicket.
 func (w world) newTicket(t *testing.T, ticket string) string {
 	t.Helper()
-	att := w.newDisabledTicket(t, ticket)
+	return w.newTicketOnRepo(t, ticket, w.repo)
+}
+
+// newTicketOnRepo creates an enabled Running ticket whose attempt records the
+// given repo path — the multi-repo fixture (drvctl-015). A repo path that is not
+// a git working tree (or is empty) is recorded verbatim so an admit-failure path
+// can be exercised.
+func (w world) newTicketOnRepo(t *testing.T, ticket, repo string) string {
+	t.Helper()
+	att := w.newDisabledTicketOnRepo(t, ticket, repo)
 	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "enable", Actor: "agent:x", Body: "enabled"}); err != nil {
 		t.Fatalf("enable attempt: %v", err)
 	}
@@ -261,10 +283,15 @@ func (w world) newTicket(t *testing.T, ticket string) string {
 // enabled — the default. The reconcile loop should leave it alone.
 func (w world) newDisabledTicket(t *testing.T, ticket string) string {
 	t.Helper()
+	return w.newDisabledTicketOnRepo(t, ticket, w.repo)
+}
+
+func (w world) newDisabledTicketOnRepo(t *testing.T, ticket, repo string) string {
+	t.Helper()
 	if err := w.root.EnsureTicketDir(ticket); err != nil {
 		t.Fatal(err)
 	}
-	m, err := attempt.Create(w.root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Actor: "agent:x"})
+	m, err := attempt.Create(w.root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Repo: repo, Actor: "agent:x"})
 	if err != nil {
 		t.Fatalf("create attempt: %v", err)
 	}
@@ -280,13 +307,10 @@ func (w world) reconciler(t *testing.T, f *factory, p *fakeProc) *reconcile.Reco
 // disables it, matching the default reconciler).
 func (w world) reconcilerLimit(t *testing.T, f *factory, p *fakeProc, contextLimit int) *reconcile.Reconciler {
 	t.Helper()
-	wm, err := worktree.NewManager(w.repo)
-	if err != nil {
-		t.Fatalf("worktree manager: %v", err)
-	}
+	// Repo binding is per-attempt now (drvctl-015): the reconciler derives a
+	// worktree Manager from each attempt's recorded repo, so none is injected here.
 	r, err := reconcile.New(reconcile.Options{
 		Root:         w.root,
-		Worktrees:    wm,
 		Adapters:     f.adapters,
 		Actor:        "agent:claude-code",
 		ContextLimit: contextLimit,
@@ -296,6 +320,48 @@ func (w world) reconcilerLimit(t *testing.T, f *factory, p *fakeProc, contextLim
 		t.Fatalf("reconcile.New: %v", err)
 	}
 	return r
+}
+
+// reconcilerLog is reconciler with an operational log sink attached, so a test
+// can assert on the per-attempt errors a tick swallows (a bad repo path skips
+// just that attempt, drvctl-015).
+func (w world) reconcilerLog(t *testing.T, f *factory, p *fakeProc, logf func(string, ...any)) *reconcile.Reconciler {
+	t.Helper()
+	r, err := reconcile.New(reconcile.Options{
+		Root:     w.root,
+		Adapters: f.adapters,
+		Actor:    "agent:claude-code",
+		Proc:     p,
+		Logf:     logf,
+	})
+	if err != nil {
+		t.Fatalf("reconcile.New: %v", err)
+	}
+	return r
+}
+
+// logCapture is a concurrency-safe Logf sink: admit failures are logged from the
+// tick goroutine while ingest goroutines may log underneath it.
+type logCapture struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logCapture) logf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+func (l *logCapture) contains(sub string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, ln := range l.lines {
+		if strings.Contains(ln, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // usageEvt is a per-request usage frame carrying a live context reading.
@@ -955,22 +1021,132 @@ func TestReadoptRetiresAdoptedWhenUndesired(t *testing.T) {
 	}
 }
 
+// TestMultiRepoAdmitsEachIntoItsOwnWorktree is the drvctl-015 headline: one
+// reconciler over one data root drives two enabled attempts bound to *different*
+// repos, and admits each into a worktree of its own repo — the per-ticket repo
+// binding, with no shared controller repo and no collision.
+func TestMultiRepoAdmitsEachIntoItsOwnWorktree(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)    // data root + repo A
+	repoB := gitRepo(t) // a second, independent repo sharing the redirected cache
+	attA := w.newTicketOnRepo(t, "PROJ-A", w.repo)
+	attB := w.newTicketOnRepo(t, "PROJ-B", repoB)
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	waitFor(t, "both attempts admitted", func() bool { return f.count() == 2 })
+
+	// Each repo derives its own managed base (from its git-common-dir); the two
+	// must differ, and each attempt's checkout must live under its own repo's base.
+	baseA, baseB := mustBase(t, w.repo), mustBase(t, repoB)
+	if baseA == baseB {
+		t.Fatal("two distinct repos must derive distinct worktree bases")
+	}
+	wtA := attemptWorktree(t, w.root, "PROJ-A", attA)
+	wtB := attemptWorktree(t, w.root, "PROJ-B", attB)
+	if !strings.HasPrefix(wtA, baseA+string(os.PathSeparator)) {
+		t.Fatalf("PROJ-A worktree %q is not under repo A base %q", wtA, baseA)
+	}
+	if !strings.HasPrefix(wtB, baseB+string(os.PathSeparator)) {
+		t.Fatalf("PROJ-B worktree %q is not under repo B base %q", wtB, baseB)
+	}
+	// Both checkouts exist on disk — each admitted into a real, separate worktree.
+	for _, wt := range []string{wtA, wtB} {
+		if fi, err := os.Stat(wt); err != nil || !fi.IsDir() {
+			t.Fatalf("worktree %q not on disk: %v", wt, err)
+		}
+	}
+}
+
+// TestBadRepoSkipsAttemptButSiblingRuns is the drvctl-015 isolation guarantee: an
+// attempt whose repo path is not a git working tree fails only *its own* admit —
+// logged with the ticket and the offending path — while a sibling on a good repo
+// is still admitted, and the tick itself never errors.
+func TestBadRepoSkipsAttemptButSiblingRuns(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	badRepo := t.TempDir() // a plain dir, not a git repository
+	goodAtt := w.newTicketOnRepo(t, "PROJ-GOOD", w.repo)
+	badAtt := w.newTicketOnRepo(t, "PROJ-BAD", badRepo)
+
+	f := &factory{}
+	sink := &logCapture{}
+	r := w.reconcilerLog(t, f, newProc(), sink.logf)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("a per-attempt admit failure must not fail the tick: %v", err)
+	}
+
+	// The good sibling was admitted: a session came up with an id.
+	waitFor(t, "good sibling admitted", func() bool {
+		sess, err := session.Open(w.root, "PROJ-GOOD", goodAtt)
+		if err != nil {
+			return false
+		}
+		defer sess.Close()
+		id, err := sess.ReadIdentity()
+		return err == nil && id.SessionID != ""
+	})
+
+	// The bad attempt was not admitted: no session id recorded.
+	badSess, err := session.Open(w.root, "PROJ-BAD", badAtt)
+	if err != nil {
+		t.Fatalf("open bad session: %v", err)
+	}
+	t.Cleanup(func() { badSess.Close() })
+	if id, err := badSess.ReadIdentity(); err == nil && id.SessionID != "" {
+		t.Fatalf("bad-repo attempt should not have been admitted: %+v", id)
+	}
+
+	// The failure is logged, actionable: it names the ticket and the offending path.
+	if !sink.contains("PROJ-BAD") || !sink.contains(badRepo) {
+		t.Fatalf("bad-repo admit error must name the ticket and path; got %v", sink.lines)
+	}
+}
+
+// mustBase returns the managed worktree base a repo derives (via a throwaway
+// Manager), for asserting where an attempt's checkout landed.
+func mustBase(t *testing.T, repo string) string {
+	t.Helper()
+	m, err := worktree.NewManager(repo)
+	if err != nil {
+		t.Fatalf("worktree manager for %s: %v", repo, err)
+	}
+	return m.Base()
+}
+
+// attemptWorktree reads the on-disk checkout path recorded for an attempt.
+func attemptWorktree(t *testing.T, root store.Root, ticket, att string) string {
+	t.Helper()
+	sess, err := session.Open(root, ticket, att)
+	if err != nil {
+		t.Fatalf("open session %s/%s: %v", ticket, att, err)
+	}
+	defer sess.Close()
+	id, err := sess.ReadIdentity()
+	if err != nil {
+		t.Fatalf("read identity %s/%s: %v", ticket, att, err)
+	}
+	return id.Worktree
+}
+
 func TestNewValidatesOptions(t *testing.T) {
 	w := newWorld(t)
-	wm, err := worktree.NewManager(w.repo)
-	if err != nil {
-		t.Fatal(err)
-	}
 	f := &factory{}
-	good := reconcile.Options{Root: w.root, Worktrees: wm, Adapters: f.adapters, Actor: "agent:x"}
+	good := reconcile.Options{Root: w.root, Adapters: f.adapters, Actor: "agent:x"}
 	if _, err := reconcile.New(good); err != nil {
 		t.Fatalf("valid options rejected: %v", err)
 	}
 	cases := map[string]reconcile.Options{
-		"no root":     {Worktrees: wm, Adapters: f.adapters, Actor: "a"},
-		"no worktree": {Root: w.root, Adapters: f.adapters, Actor: "a"},
-		"no adapters": {Root: w.root, Worktrees: wm, Actor: "a"},
-		"no actor":    {Root: w.root, Worktrees: wm, Adapters: f.adapters},
+		"no root":     {Adapters: f.adapters, Actor: "a"},
+		"no adapters": {Root: w.root, Actor: "a"},
+		"no actor":    {Root: w.root, Adapters: f.adapters},
 	}
 	for name, opt := range cases {
 		t.Run(name, func(t *testing.T) {

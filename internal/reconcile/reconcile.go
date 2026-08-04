@@ -46,6 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -87,16 +88,21 @@ type Proc interface {
 // unknown adapter name.
 type AdapterFor func(name string) (func() agent.Adapter, error)
 
-// Options configures a Reconciler. Root, Worktrees, Adapters, and Actor are
-// required; the rest have sensible defaults.
+// Options configures a Reconciler. Root, Adapters, and Actor are required; the
+// rest have sensible defaults.
 type Options struct {
 	// Root is the ticket data root — the source of truth the desired set is
 	// derived from and the durable log is appended to.
 	Root store.Root
 
-	// Worktrees isolates each session in its own git checkout. One Manager over
-	// the repo the agents work in.
-	Worktrees *worktree.Manager
+	// DefaultRepo is the fallback local repo path used for an attempt that records
+	// none in its attempt.md — the `ctl --repo` single-repo default that preserved
+	// dogfooding before repo binding moved to the ticket (drvctl-015). Optional: an
+	// attempt with a recorded repo ignores it, and an attempt with neither a
+	// recorded repo nor this fallback fails its own admit (never the whole tick).
+	// The reconciler no longer takes a single injected worktree.Manager; it derives
+	// one per repo on demand and caches it (see managerFor).
+	DefaultRepo string
 
 	// Adapters resolves an attempt's adapter name to an adapter factory. Required;
 	// Tier 0 ships a single "claude-code" entry.
@@ -147,6 +153,14 @@ type Reconciler struct {
 
 	mu   sync.Mutex
 	runs map[worktree.Key]*run
+
+	// wtMu guards wtCache, the per-repo worktree.Manager cache. Repo binding is
+	// per-ticket now (drvctl-015), so one controller drives attempts across many
+	// repos; each admitted attempt's repo path is resolved to a Manager once and
+	// reused (the Manager is stateless, so caching is purely to avoid re-deriving
+	// the base). Keyed by the cleaned absolute repo path.
+	wtMu    sync.Mutex
+	wtCache map[string]*worktree.Manager
 }
 
 // run is one entry in the actual-state table. A run this daemon owns carries the
@@ -162,6 +176,11 @@ type run struct {
 
 	adopted bool
 	pid     int
+
+	// repo is the resolved local repo path this attempt's worktree was cut from,
+	// carried so retire can reclaim the checkout via the right per-repo Manager
+	// (drvctl-015). Empty only if the repo could not be resolved.
+	repo string
 }
 
 // New validates opt, applies defaults, and returns a Reconciler with an empty run
@@ -170,8 +189,6 @@ func New(opt Options) (*Reconciler, error) {
 	switch {
 	case opt.Root.Dir == "":
 		return nil, errors.New("reconcile: data root is required")
-	case opt.Worktrees == nil:
-		return nil, errors.New("reconcile: worktree manager is required")
 	case opt.Adapters == nil:
 		return nil, errors.New("reconcile: adapter resolver is required")
 	case opt.Actor == "":
@@ -192,7 +209,48 @@ func New(opt Options) (*Reconciler, error) {
 	if opt.Logf == nil {
 		opt.Logf = func(string, ...any) {}
 	}
-	return &Reconciler{opt: opt, runs: map[worktree.Key]*run{}}, nil
+	return &Reconciler{opt: opt, runs: map[worktree.Key]*run{}, wtCache: map[string]*worktree.Manager{}}, nil
+}
+
+// repoFor resolves the local repo path an attempt's worktree is cut from: its
+// own recorded path, else the DefaultRepo fallback. An attempt with neither is
+// an error — surfaced to the caller (admit/Adopt) as a per-attempt failure, so
+// it fails just that attempt rather than the whole tick.
+func (r *Reconciler) repoFor(a project.Attempt) (string, error) {
+	repo := a.Repo
+	if repo == "" {
+		repo = r.opt.DefaultRepo
+	}
+	if repo == "" {
+		return "", fmt.Errorf("attempt %s/%s records no repo path and no --repo fallback is set", a.Ticket, a.ID)
+	}
+	return repo, nil
+}
+
+// managerFor returns the worktree.Manager for a repo path, deriving and caching
+// one per repo (keyed by the cleaned absolute path). NewManager fails if the
+// path is missing or not a git working tree — the caller wraps that into a
+// per-attempt, actionable error. Managers are stateless, so the cache only saves
+// re-deriving the managed base; a concurrent double-derive would be harmless but
+// the lock keeps it single.
+func (r *Reconciler) managerFor(repo string) (*worktree.Manager, error) {
+	abs, err := filepath.Abs(repo)
+	if err != nil {
+		return nil, fmt.Errorf("resolve repo path %q: %w", repo, err)
+	}
+	abs = filepath.Clean(abs)
+
+	r.wtMu.Lock()
+	defer r.wtMu.Unlock()
+	if m, ok := r.wtCache[abs]; ok {
+		return m, nil
+	}
+	m, err := worktree.NewManager(abs)
+	if err != nil {
+		return nil, err
+	}
+	r.wtCache[abs] = m
+	return m, nil
 }
 
 // Run reconciles the fleet until ctx is cancelled: Adopt once to rebuild state
@@ -311,6 +369,7 @@ type wired struct {
 	permGate  *gate.Gate
 	limitGate *limit.Gate
 	watcher   *watch.Watcher
+	repo      string // resolved repo path, recorded on the run for retire
 }
 
 // bringUp opens an attempt's session store, binds a manage.Handle, Spawns a
@@ -330,12 +389,24 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		return nil, fmt.Errorf("resolve adapter %q: %w", adapterName, err)
 	}
 
+	// Resolve this attempt's own repo and get-or-create its Manager. A missing or
+	// non-git repo fails *this* attempt's bring-up with an actionable error naming
+	// the ticket and path; admit logs it and the tick moves on to other attempts.
+	repo, err := r.repoFor(a)
+	if err != nil {
+		return nil, err
+	}
+	wm, err := r.managerFor(repo)
+	if err != nil {
+		return nil, fmt.Errorf("attempt %s/%s repo %q is missing or not a git working tree: %w", a.Ticket, a.ID, repo, err)
+	}
+
 	sess, err := session.Open(r.opt.Root, a.Ticket, a.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	handle, err := manage.New(sess, r.opt.Worktrees, newAdapter, manage.Config{
+	handle, err := manage.New(sess, wm, newAdapter, manage.Config{
 		Ticket:  a.Ticket,
 		Attempt: a.ID,
 		Adapter: adapterName,
@@ -376,7 +447,7 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 	limitGate := limit.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.ContextLimit, handle.Kill)
 	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
 
-	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, watcher: watcher}, nil
+	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, watcher: watcher, repo: repo}, nil
 }
 
 // admit brings up a session for a desired attempt and attaches the ingest
@@ -393,7 +464,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 
 	stream := w.handle.Stream()
 	ictx, cancel := context.WithCancel(ctx)
-	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{})}
+	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo}
 
 	r.mu.Lock()
 	r.runs[key] = rn
@@ -518,7 +589,22 @@ func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.St
 		return
 	}
 
-	dirty, err := r.opt.Worktrees.Dirty(ctx, key)
+	// Reclamation acts on the attempt's own repo (drvctl-015). If it could not be
+	// resolved (no repo recorded, its checkout already gone), keep the worktree as
+	// it stands rather than guess — the process is already stopped either way.
+	if rn.repo == "" {
+		r.opt.Logf("reconcile: retire %s/%s: no repo resolved, leaving worktree as-is", key.Ticket, key.Attempt)
+		r.recordRetire(key, st, false, "the attempt's repo path could not be resolved, so its worktree was left untouched")
+		return
+	}
+	wm, err := r.managerFor(rn.repo)
+	if err != nil {
+		r.opt.Logf("reconcile: retire %s/%s: worktree manager for %q: %v", key.Ticket, key.Attempt, rn.repo, err)
+		r.recordRetire(key, st, false, fmt.Sprintf("the repo %q could not be opened to reclaim the checkout (%v)", rn.repo, err))
+		return
+	}
+
+	dirty, err := wm.Dirty(ctx, key)
 	if err != nil {
 		// Cannot prove the checkout is clean — err on the side of preserving it
 		// rather than risk a silent loss, and leave it warm for inspection.
@@ -533,7 +619,7 @@ func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.St
 
 	// Clean: reclaiming is non-destructive. Drop Force so that if the tree turned
 	// dirty since the check, git refuses the removal rather than clobbering it.
-	if err := r.opt.Worktrees.Remove(ctx, key, worktree.RemoveOptions{}); err != nil {
+	if err := wm.Remove(ctx, key, worktree.RemoveOptions{}); err != nil {
 		r.opt.Logf("reconcile: remove worktree %s/%s: %v", key.Ticket, key.Attempt, err)
 		r.recordRetire(key, st, false, fmt.Sprintf("attempted to reclaim the clean checkout but removal failed (%v)", err))
 		return
@@ -586,7 +672,13 @@ func (r *Reconciler) Adopt(ctx context.Context) error {
 		return err
 	}
 
-	var keep []worktree.Key
+	// Group the keep-set by repo so each per-repo Manager reconciles only its own
+	// checkouts (drvctl-015). A managed worktree only exists where a session was
+	// spawned, which also wrote session.json, so every managed checkout belongs to
+	// a key in keep — iterating repos-of-keep-keys covers every repo with worktrees
+	// to sweep. repoByKey feeds the resolved repo onto each adopted run for retire.
+	keepByRepo := map[string][]worktree.Key{}
+	repoByKey := map[worktree.Key]string{}
 	live := map[worktree.Key]int{}
 	for _, ticket := range tickets {
 		atts, err := r.opt.Root.ListAttempts(ticket)
@@ -599,15 +691,37 @@ func (r *Reconciler) Adopt(ctx context.Context) error {
 			if !ok {
 				continue // no session.json — nothing to re-adopt or keep
 			}
-			keep = append(keep, key)
 			if id.PID != 0 && r.opt.Proc.Alive(id.PID) {
 				live[key] = id.PID
 			}
+			a, err := project.LoadAttempt(r.opt.Root, ticket, att)
+			if err != nil {
+				r.opt.Logf("reconcile: adopt %s/%s: load attempt: %v", ticket, att, err)
+				continue
+			}
+			repo, err := r.repoFor(a)
+			if err != nil {
+				// A session exists but its repo can no longer be resolved: its
+				// worktree cannot be swept, but a live pid is still re-adopted below.
+				r.opt.Logf("reconcile: adopt %s/%s: %v", ticket, att, err)
+				continue
+			}
+			keepByRepo[repo] = append(keepByRepo[repo], key)
+			repoByKey[key] = repo
 		}
 	}
 
-	if _, err := r.opt.Worktrees.Reconcile(ctx, keep); err != nil {
-		return fmt.Errorf("reconcile worktrees on adopt: %w", err)
+	for repo, keep := range keepByRepo {
+		wm, err := r.managerFor(repo)
+		if err != nil {
+			// The repo is gone; its checkouts (also derived from it) are unreachable.
+			// Skip its sweep rather than fail the whole adopt over one missing repo.
+			r.opt.Logf("reconcile: adopt: worktree manager for %q: %v", repo, err)
+			continue
+		}
+		if _, err := wm.Reconcile(ctx, keep); err != nil {
+			return fmt.Errorf("reconcile worktrees on adopt (repo %s): %w", repo, err)
+		}
 	}
 
 	r.mu.Lock()
@@ -615,7 +729,7 @@ func (r *Reconciler) Adopt(ctx context.Context) error {
 		if _, exists := r.runs[key]; exists {
 			continue
 		}
-		r.runs[key] = &run{adopted: true, pid: pid}
+		r.runs[key] = &run{adopted: true, pid: pid, repo: repoByKey[key]}
 	}
 	r.mu.Unlock()
 	return nil

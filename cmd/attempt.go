@@ -13,6 +13,7 @@ import (
 var (
 	attemptTool  string
 	attemptModel string
+	attemptRepo  string
 	attemptFrom  string
 )
 
@@ -37,9 +38,21 @@ var attemptNewCmd = &cobra.Command{
 		if attemptFrom != "" && !root.AttemptExists(id, attemptFrom) {
 			return fmt.Errorf("--from attempt %s/%s not found", id, attemptFrom)
 		}
+		// Repo is a ticket-level attribute recorded per attempt, so a --from attempt
+		// inherits its parent's repo unless --repo overrides it — a sibling attempt
+		// targets the same working tree by default.
+		repo := attemptRepo
+		if repo == "" && attemptFrom != "" {
+			parent, err := attempt.LoadMeta(root, id, attemptFrom)
+			if err != nil {
+				return err
+			}
+			repo = parent.Repo
+		}
 		m, err := attempt.Create(root, id, attempt.New{
 			Tool:  attemptTool,
 			Model: attemptModel,
+			Repo:  repo,
 			Actor: resolveActor(),
 			From:  attemptFrom,
 		})
@@ -95,6 +108,7 @@ func dash(s string) string {
 func init() {
 	attemptNewCmd.Flags().StringVar(&attemptTool, "tool", "", "coding-agent tool (e.g. claude-code, aider, codex)")
 	attemptNewCmd.Flags().StringVar(&attemptModel, "model", "", "model (e.g. opus-4.8)")
+	attemptNewCmd.Flags().StringVar(&attemptRepo, "repo", "", "local path to the git working tree this attempt targets (defaults to --from's repo)")
 	attemptNewCmd.Flags().StringVar(&attemptFrom, "from", "", "record provenance: this attempt branches from attempt <id>")
 	attemptCmd.AddCommand(attemptNewCmd)
 	attemptCmd.AddCommand(attemptLsCmd)
