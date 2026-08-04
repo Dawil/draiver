@@ -44,6 +44,38 @@ func TestDerive(t *testing.T) {
 	}
 }
 
+func TestDeriveEnabled(t *testing.T) {
+	cases := []struct {
+		name   string
+		events []event.Event
+		want   bool
+	}{
+		{"default is disabled", []event.Event{ev(1, "created")}, false},
+		{"empty is disabled", nil, false},
+		{"enable turns it on", []event.Event{ev(1, "created"), ev(2, "enable")}, true},
+		{"disable after enable turns it off", []event.Event{ev(1, "created"), ev(2, "enable"), ev(3, "disable")}, false},
+		{"re-enable after disable", []event.Event{ev(1, "enable"), ev(2, "disable"), ev(3, "enable")}, true},
+		{"other events do not enable", []event.Event{ev(1, "created"), ev(2, "gotcha"), ev(3, "review")}, false},
+		{"last write wins", []event.Event{ev(1, "disable"), ev(2, "enable"), ev(3, "disable"), ev(4, "enable")}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DeriveEnabled(c.events); got != c.want {
+				t.Errorf("DeriveEnabled = %v want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestEnableDisableDoNotChangeState: enablement is a separate axis; enable/disable
+// events must never move an attempt off Running.
+func TestEnableDisableDoNotChangeState(t *testing.T) {
+	events := []event.Event{ev(1, "created"), ev(2, "enable"), ev(3, "disable")}
+	if got, _ := Derive(events); got != Running {
+		t.Errorf("state = %q want Running (enable/disable are not lifecycle)", got)
+	}
+}
+
 func TestLoadAllReturnsOneCardPerAttemptWithIndependentState(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	id := "PROJ-1"

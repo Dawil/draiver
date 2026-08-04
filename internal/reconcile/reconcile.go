@@ -260,10 +260,14 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	return nil
 }
 
-// desired returns the attempts that should have a live session — those whose
-// derived control state is Running. Needs-me (blocked on a human), Review (a claim
-// awaiting ratification), and Done (closed) are all not desired. With no explicit
-// enable flag yet (Tier 2), every Running attempt is enabled.
+// desired returns the attempts that should have a live session — those that are
+// both Running *and* enabled. Needs-me (blocked on a human), Review (a claim
+// awaiting ratification), and Done (closed) are all not desired; and Running is
+// necessary but not sufficient. Being in Running means "a human could pick this
+// up," not "the supervisor will auto-spawn an agent on it now" — so an attempt
+// must be explicitly enabled to join the supervised fleet (systemd's
+// enable/disable: in-fleet vs parked). The default is disabled, so an idle repo
+// full of Running tickets stays quiet until each is opted in.
 func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	all, err := project.LoadAll(r.opt.Root)
 	if err != nil {
@@ -271,7 +275,7 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	}
 	out := make(map[worktree.Key]project.Attempt)
 	for _, a := range all {
-		if a.State == project.Running {
+		if a.State == project.Running && a.Enabled {
 			out[worktree.Key{Ticket: a.Ticket, Attempt: a.ID}] = a
 		}
 	}
@@ -601,7 +605,8 @@ func (r *Reconciler) drain() {
 type Status struct {
 	Key      worktree.Key
 	State    project.State
-	Desired  bool // in the desired (Running) set this tick
+	Enabled  bool // opted into daemon supervision
+	Desired  bool // in the desired (Running AND enabled) set this tick
 	Running  bool // this daemon owns a live session for it
 	Adopted  bool // a re-adopted foreign live process (not streamed)
 	Identity session.Identity
@@ -628,7 +633,7 @@ func (r *Reconciler) Snapshot() ([]Status, error) {
 	out := make([]Status, 0, len(all))
 	for _, a := range all {
 		key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
-		s := Status{Key: key, State: a.State, Desired: a.State == project.Running}
+		s := Status{Key: key, State: a.State, Enabled: a.Enabled, Desired: a.State == project.Running && a.Enabled}
 		if rn, ok := runs[key]; ok {
 			s.Running = !rn.adopted
 			s.Adopted = rn.adopted
