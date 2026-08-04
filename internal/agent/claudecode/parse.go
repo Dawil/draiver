@@ -192,6 +192,14 @@ func normalizeResult(line []byte, raw json.RawMessage) []agent.Event {
 	ev := agent.Event{Kind: agent.EventTurnEnd, SessionID: res.SessionID, Result: res.Result, Turn: turn, Raw: raw}
 	if res.Usage != nil {
 		u := toUsage(res.Usage, res.TotalCostUSD)
+		// The result line closes a turn and its usage is CUMULATIVE across every
+		// request in the turn — cache_read alone can reach millions of tokens over
+		// a long session. That is a running total, not the size of a single
+		// request, so it is NOT a context-window snapshot: zero ContextTokens here
+		// so it cannot masquerade as one. The live context gauge is fed only by the
+		// per-message assistant usage frames (usageEvent), which report a single
+		// request's prompt size. Cost still flows from this line.
+		u.ContextTokens = 0
 		ev.Usage = &u
 	} else if res.TotalCostUSD != 0 {
 		ev.Usage = &agent.Usage{CostUSD: res.TotalCostUSD}

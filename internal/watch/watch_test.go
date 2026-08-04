@@ -178,6 +178,46 @@ func TestProcess_MetersUsageLiveAndCostMonotonic(t *testing.T) {
 	}
 }
 
+// A cumulative turn-end frame (ContextTokens == 0, as the adapter emits for a
+// result line) must fold cost only and leave the live context gauge alone — it
+// carries a session-wide token total, not a context snapshot. Guards the
+// drvctl-009 "2M context" regression.
+func TestProcess_CumulativeFrameDoesNotClobberContextGauge(t *testing.T) {
+	w, _, _, _, sess := newWatcher(t)
+
+	// Real per-request snapshot sets the live gauge.
+	if _, err := w.Process(agent.Event{
+		Kind:  agent.EventUsage,
+		Usage: &agent.Usage{InputTokens: 2, CacheReadTokens: 132895, CacheCreationTokens: 2623, ContextTokens: 135520, CostUSD: 0},
+		Raw:   json.RawMessage(`{"u":1}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Cumulative turn-end frame: huge summed tokens, ContextTokens deliberately 0,
+	// carrying the dollar figure.
+	if _, err := w.Process(agent.Event{
+		Kind:  agent.EventTurnEnd,
+		Usage: &agent.Usage{InputTokens: 43, CacheReadTokens: 1931206, CacheCreationTokens: 120403, ContextTokens: 0, CostUSD: 3.33},
+		Raw:   json.RawMessage(`{"u":2}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := sess.ReadMeter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Usage.ContextTokens != 135520 {
+		t.Fatalf("context = %d, want held 135520 (cumulative frame must not clobber the gauge)", m.Usage.ContextTokens)
+	}
+	if m.Usage.CacheReadTokens != 132895 {
+		t.Fatalf("cache_read = %d, want held 132895 (token counts held with the gauge)", m.Usage.CacheReadTokens)
+	}
+	if m.Usage.CostUSD != 3.33 {
+		t.Fatalf("cost = %v, want 3.33 folded from the turn-end frame", m.Usage.CostUSD)
+	}
+}
+
 func TestPromote_AdvancesHeartbeat(t *testing.T) {
 	w, _, _, _, sess := newWatcher(t)
 	fixed := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)

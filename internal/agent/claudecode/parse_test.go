@@ -115,6 +115,25 @@ func TestNormalize_AssistantWithUsage(t *testing.T) {
 	}
 }
 
+// The result line's usage is a cumulative turn total, not a single request's
+// prompt, so its ContextTokens must be zeroed — otherwise a long turn's summed
+// cache_read (millions of tokens) masquerades as context-window fill (the
+// drvctl-009 "2M context" artifact). Cost still flows through.
+func TestNormalize_ResultUsageIsNotAContextSnapshot(t *testing.T) {
+	line := `{"type":"result","subtype":"success","session_id":"s","total_cost_usd":3.33,"usage":{"input_tokens":43,"output_tokens":46321,"cache_read_input_tokens":1931206,"cache_creation_input_tokens":120403}}`
+	got := normalize([]byte(line))
+	if len(got) != 1 || got[0].Kind != agent.EventTurnEnd || got[0].Usage == nil {
+		t.Fatalf("want one turn-end with usage, got %+v", got)
+	}
+	u := got[0].Usage
+	if u.ContextTokens != 0 {
+		t.Errorf("ContextTokens = %d, want 0 (cumulative result usage is not a context snapshot)", u.ContextTokens)
+	}
+	if u.CostUSD != 3.33 {
+		t.Errorf("CostUSD = %v, want 3.33 (cost still flows from the result line)", u.CostUSD)
+	}
+}
+
 func TestNormalize_CanUseToolBecomesPermission(t *testing.T) {
 	line := `{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"}}}`
 	got := normalize([]byte(line))

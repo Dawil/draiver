@@ -13,16 +13,20 @@
 //   - Watch  — the ingest goroutine tees every stream line to the journal, meters
 //     tokens/cost/context, and promotes semantic events into the durable log
 //     (internal/watch).
-//   - Gate   — the same goroutine runs the two enforcement seams on each
+//   - Gate   — the same goroutine runs the enforcement seams. On each
 //     tool-permission callback: the protocol gate (withhold an edit until its
 //     rationale is logged, internal/protocol) then the permission gate (allow, or
-//     escalate-and-halt, internal/gate).
+//     escalate-and-halt, internal/gate). On each metered usage frame: the context
+//     auto-stop (escalate-and-halt a session that crosses the context-window
+//     limit, internal/limit) — the drvctl-012 runaway backstop.
 //   - Retire — an attempt that left the desired set is stopped. A terminal one
 //     (Review/Done) has its worktree cleaned; a blocked one (Needs-me) is parked
 //     with its worktree kept warm, so a later `resolve` — which flips it back to
 //     Running — re-admits it via Resume with no work lost.
 //
-// Respawn policy, the progress watchdog, StartLimit ceilings, budgets, the
+// The context auto-stop is the one narrow slice of budget enforcement that lands
+// at Tier 0 (a runaway session had to be survivable first). Full token/$ slice
+// budgets, respawn policy, the progress watchdog, StartLimit ceilings, the
 // dependency DAG, and instant path-activation on `resolution` are all Tier 1+ and
 // deliberately out of scope here (see the doc's implementation order). This is
 // Tier 0: one adapter, admit-on-enabled, no scheduler.
@@ -44,6 +48,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/gate"
+	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/manage"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/protocol"
@@ -109,6 +114,11 @@ type Options struct {
 	// The daemon typically sets PermissionMode here so the agent routes tool use
 	// through the callback the gates answer.
 	BaseSpec agent.SessionSpec
+
+	// ContextLimit is the context-window auto-stop threshold in tokens: a session
+	// whose live context fill crosses it is halted and the stop recorded as an
+	// escalation (internal/limit). Zero or negative disables the backstop.
+	ContextLimit int
 
 	// Proc probes and stops foreign session processes on restart. Zero value
 	// defaults to OSProc{}.
@@ -290,6 +300,7 @@ type wired struct {
 	sess      *session.Store
 	protoGate *protocol.Gate
 	permGate  *gate.Gate
+	limitGate *limit.Gate
 	watcher   *watch.Watcher
 }
 
@@ -353,9 +364,10 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		return nil, fmt.Errorf("protocol gate: %w", err)
 	}
 	permGate := gate.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.PermPolicy, handle, handle.Kill)
+	limitGate := limit.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.ContextLimit, handle.Kill)
 	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
 
-	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, watcher: watcher}, nil
+	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, watcher: watcher}, nil
 }
 
 // admit brings up a session for a desired attempt and attaches the ingest
@@ -378,7 +390,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	r.runs[key] = rn
 	r.mu.Unlock()
 
-	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.watcher, stream)
+	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.watcher, stream)
 
 	// Inject the cold-start brief last, so the stream is already being consumed
 	// when the agent starts producing. A brief that fails to build/deliver does
@@ -395,7 +407,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 // retire/drain do — so a session that exits on its own leaves a spent entry that
 // keeps the next tick from re-admitting it (Tier 0 has no respawn ceiling, so
 // re-admitting a crashed session would be an unbounded loop).
-func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, w *watch.Watcher, stream <-chan agent.Event) {
+func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, stream <-chan agent.Event) {
 	defer close(rn.done)
 	for {
 		select {
@@ -405,7 +417,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 			if !ok {
 				return
 			}
-			r.dispatch(ctx, key, pg, permGate, w, ev)
+			r.dispatch(ctx, key, pg, permGate, lg, w, ev)
 		}
 	}
 }
@@ -417,9 +429,20 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 // answering; a cleared request falls through to the permission gate, which allows
 // it or escalates-and-halts. Ordering protocol → permission is what keeps the two
 // from double-answering the agent.
-func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, w *watch.Watcher, ev agent.Event) {
+func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, ev agent.Event) {
 	if _, err := w.Process(ev); err != nil {
 		r.opt.Logf("reconcile: watch %s/%s: %v", key.Ticket, key.Attempt, err)
+	}
+
+	// Context-window backstop: after the meter has folded this event's usage,
+	// check the live context fill against the limit. A crossing records the
+	// auto-stop escalation and reaps the session (which closes the stream, ending
+	// this ingest); the attempt is now Needs-me, so the next tick parks it.
+	if out, err := lg.Consider(ev); err != nil {
+		r.opt.Logf("reconcile: limit gate %s/%s: %v", key.Ticket, key.Attempt, err)
+	} else if out == limit.Stopped {
+		r.opt.Logf("reconcile: context auto-stop %s/%s at %d tokens", key.Ticket, key.Attempt, ev.Usage.ContextTokens)
+		return
 	}
 
 	if ev.Kind != agent.EventPermission {
@@ -681,7 +704,7 @@ func (r *Reconciler) Start(ctx context.Context, ticket, attempt string, observe 
 			if observe != nil {
 				observe(ev)
 			}
-			r.dispatch(ctx, key, w.protoGate, w.permGate, w.watcher, ev)
+			r.dispatch(ctx, key, w.protoGate, w.permGate, w.limitGate, w.watcher, ev)
 		}
 	}
 }

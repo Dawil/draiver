@@ -18,6 +18,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/agent/claudecode"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -28,7 +29,9 @@ var (
 	ctlInterval      time.Duration
 	ctlPermMode      string
 	ctlModel         string
-	ctlContextWindow int
+	ctlConfigPath    string
+	ctlContextWindow int // -1 sentinel: resolve from config
+	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
 )
 
@@ -406,11 +409,26 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := config.Load(ctlConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	// A flag value overrides the config file; the -1 sentinel means "the flag was
+	// not given, use the config" (which itself carries the built-in default). The
+	// resolved window is written back to the global the gauges read.
+	if ctlContextWindow < 0 {
+		ctlContextWindow = cfg.ContextWindow
+	}
+	contextLimit := cfg.ContextLimit
+	if ctlContextLimit >= 0 {
+		contextLimit = ctlContextLimit
+	}
 	return reconcile.New(reconcile.Options{
-		Root:      root,
-		Worktrees: wm,
-		Adapters:  claudeAdapters,
-		Actor:     resolveActor(),
+		Root:         root,
+		Worktrees:    wm,
+		Adapters:     claudeAdapters,
+		Actor:        resolveActor(),
+		ContextLimit: contextLimit,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
@@ -432,12 +450,20 @@ func claudeAdapters(name string) (func() agent.Adapter, error) {
 func init() {
 	ctlCmd.PersistentFlags().StringVar(&ctlRepo, "repo", "", "path to the repo agents work in (default: cwd)")
 	ctlCmd.PersistentFlags().StringVar(&ctlModel, "model", "", "default model for spawned sessions (overridden per attempt)")
+	ctlCmd.PersistentFlags().StringVar(&ctlConfigPath, "config", "", "supervisor config file (default $DRAIVER_CONFIG or ~/.draiver/config.json)")
+	// context-window (gauge capacity) and context-limit (auto-stop threshold) both
+	// default to -1, the "use the config file" sentinel newReconciler resolves.
+	ctlCmd.PersistentFlags().IntVar(&ctlContextWindow, "context-window", -1, "context-window capacity (tokens) the context-% gauge is measured against (default from config, 200000)")
 	ctlUpCmd.Flags().DurationVar(&ctlInterval, "interval", 5*time.Second, "reconcile tick interval")
 	ctlUpCmd.Flags().StringVar(&ctlPermMode, "permission-mode", "", "agent permission mode (routes tool use through the gates)")
 	// The foreground drivers route tool use through the gates just like the daemon.
 	ctlStartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", "", "agent permission mode (routes tool use through the gates)")
 	ctlRestartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", "", "agent permission mode (routes tool use through the gates)")
-	ctlStatusCmd.Flags().IntVar(&ctlContextWindow, "context-window", 200_000, "context-window capacity (tokens) the context-% gauge is measured against")
+	// The auto-stop is only meaningful where a session is actually driven: up,
+	// start, restart. 0 disables it; -1 defers to the config (default 150000).
+	for _, c := range []*cobra.Command{ctlUpCmd, ctlStartCmd, ctlRestartCmd} {
+		c.Flags().IntVar(&ctlContextLimit, "context-limit", -1, "context-window auto-stop threshold (tokens); 0 disables (default from config, 150000)")
+	}
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlCmd.AddCommand(ctlUpCmd, ctlStartCmd, ctlStopCmd, ctlRestartCmd, ctlStatusCmd, ctlLogsCmd)
 	rootCmd.AddCommand(ctlCmd)

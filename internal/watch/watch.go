@@ -117,18 +117,30 @@ func (w *Watcher) tee(ev agent.Event) error {
 	return nil
 }
 
-// meter folds a usage snapshot into meter.json. EventUsage is cumulative per
-// session, so token and context figures replace the stored snapshot to track the
-// live context-window fill. Cost is folded monotonically: per-message usage
-// frames report a zero cost and only the turn's terminal result line carries the
-// cumulative dollar figure, so a naive replace would drop cost back to zero
-// between turn ends.
+// meter folds a usage snapshot into meter.json. Two figures are folded on
+// different rules because the stream reports them on different frames:
+//
+//   - Cost is folded monotonically. Per-message usage frames report a zero cost
+//     and only the turn's terminal result line carries the cumulative dollar
+//     figure, so a naive replace would drop cost back to zero between turn ends.
+//
+//   - The context-window gauge (and its sibling token counts) advances only from
+//     a real per-request snapshot — a frame whose ContextTokens is non-zero. The
+//     terminal result line's usage is a CUMULATIVE turn total (its cache_read can
+//     reach millions over a long session) and the adapter zeroes its ContextTokens
+//     for exactly this reason; folding it in would clobber the live ~context fill
+//     with a session-wide aggregate (the drvctl-009 "2M context" artifact). So a
+//     zero-ContextTokens frame folds cost only and leaves the gauge untouched.
 func (w *Watcher) meter(u agent.Usage) error {
 	_, err := w.sess.UpdateMeter(func(m *session.Meter) {
-		if u.CostUSD < m.Usage.CostUSD {
-			u.CostUSD = m.Usage.CostUSD
+		if u.CostUSD > m.Usage.CostUSD {
+			m.Usage.CostUSD = u.CostUSD
 		}
-		m.Usage = u
+		if u.ContextTokens > 0 {
+			cost := m.Usage.CostUSD
+			m.Usage = u
+			m.Usage.CostUSD = cost
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("watch: meter usage: %w", err)

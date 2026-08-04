@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
@@ -257,22 +259,38 @@ func (w world) newTicket(t *testing.T, ticket string) string {
 
 // reconciler wires a Reconciler over the world with the given factory and proc.
 func (w world) reconciler(t *testing.T, f *factory, p *fakeProc) *reconcile.Reconciler {
+	return w.reconcilerLimit(t, f, p, 0)
+}
+
+// reconcilerLimit is reconciler with a context-window auto-stop threshold set (0
+// disables it, matching the default reconciler).
+func (w world) reconcilerLimit(t *testing.T, f *factory, p *fakeProc, contextLimit int) *reconcile.Reconciler {
 	t.Helper()
 	wm, err := worktree.NewManager(w.repo)
 	if err != nil {
 		t.Fatalf("worktree manager: %v", err)
 	}
 	r, err := reconcile.New(reconcile.Options{
-		Root:      w.root,
-		Worktrees: wm,
-		Adapters:  f.adapters,
-		Actor:     "agent:claude-code",
-		Proc:      p,
+		Root:         w.root,
+		Worktrees:    wm,
+		Adapters:     f.adapters,
+		Actor:        "agent:claude-code",
+		ContextLimit: contextLimit,
+		Proc:         p,
 	})
 	if err != nil {
 		t.Fatalf("reconcile.New: %v", err)
 	}
 	return r
+}
+
+// usageEvt is a per-request usage frame carrying a live context reading.
+func usageEvt(ctxTokens int) agent.Event {
+	return agent.Event{
+		Kind:  agent.EventUsage,
+		Usage: &agent.Usage{ContextTokens: ctxTokens, CostUSD: 0.1},
+		Raw:   json.RawMessage(`{"ctx":` + strconv.Itoa(ctxTokens) + `}`),
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -547,6 +565,61 @@ func TestPermissionGateEscalates(t *testing.T) {
 	d, ok := live.decision("p1")
 	if !ok || d.Allow {
 		t.Fatalf("gated tool should be denied, got decision=%+v ok=%v", d, ok)
+	}
+}
+
+// TestContextLimitAutoStops is the drvctl-012 headline: a session whose live
+// context fill crosses the configured threshold is halted automatically, the stop
+// is recorded as a durable escalation, and the attempt parks at Needs-me — while
+// a session under the limit runs on untouched.
+func TestContextLimitAutoStops(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+	f := &factory{}
+	r := w.reconcilerLimit(t, f, newProc(), 150_000)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	live := f.at(0)
+	waitFor(t, "brief prompt", func() bool { return len(live.prompted()) > 0 })
+
+	// A frame under the limit meters but does not stop the session.
+	live.emit(usageEvt(135_520))
+	waitFor(t, "under-limit metered", func() bool {
+		sess, err := session.Open(w.root, ticket, att)
+		if err != nil {
+			return false
+		}
+		defer sess.Close()
+		m, err := sess.ReadMeter()
+		return err == nil && m.Usage.ContextTokens == 135_520
+	})
+	if live.wasKilled() {
+		t.Fatal("a session under the limit must not be auto-stopped")
+	}
+	if hasType(logTypes(t, w.root, ticket, att), "escalation") {
+		t.Fatal("no escalation should exist under the limit")
+	}
+
+	// A frame over the limit halts the session and records the auto-stop.
+	live.emit(usageEvt(151_000))
+	waitFor(t, "auto-stop escalation recorded", func() bool {
+		return hasType(logTypes(t, w.root, ticket, att), "escalation")
+	})
+	waitFor(t, "session halted", live.wasKilled)
+
+	// The open escalation parks the attempt at Needs-me, so the next tick stops
+	// desiring it rather than re-admitting it into the same runaway.
+	a, err := project.LoadAttempt(w.root, ticket, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.State != project.NeedsMe {
+		t.Fatalf("state = %v, want NeedsMe after auto-stop", a.State)
 	}
 }
 
