@@ -226,6 +226,18 @@ func (a *Adapter) SessionID() string {
 	return a.sessionID
 }
 
+// PID returns the session process's pid, or 0 before Spawn/Resume or after the
+// process has been reaped. It is best-effort runtime metadata (recorded in
+// session.json for status and re-adoption), not part of the core Adapter seam.
+func (a *Adapter) PID() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cmd == nil || a.cmd.Process == nil {
+		return 0
+	}
+	return a.cmd.Process.Pid
+}
+
 // Kill reaps the session process group and blocks until it is gone. The session
 // id and log survive for a later Resume. It is idempotent.
 func (a *Adapter) Kill() error {
