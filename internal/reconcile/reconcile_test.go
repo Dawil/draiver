@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -541,7 +542,8 @@ func TestTickIsIdempotent(t *testing.T) {
 }
 
 // TestRetireOnReview: when an attempt is claimed for review it leaves the desired
-// set; the tick reaps the session and cleans the worktree.
+// set; the tick reaps the session and — because the checkout is clean — reclaims
+// the worktree. The dirty-checkout counterpart is TestRetireOnReviewKeepsDirtyWorktree.
 func TestRetireOnReview(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
@@ -572,6 +574,74 @@ func TestRetireOnReview(t *testing.T) {
 	}
 	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
 		t.Fatalf("worktree %q should be removed on a terminal retire (err=%v)", worktreePath, err)
+	}
+}
+
+// TestRetireOnReviewKeepsDirtyWorktree is the drvctl-014 regression: an attempt
+// that reaches Review with an *uncommitted* change must not have that change
+// force-removed on retire. The daemon keeps the dirty checkout warm, records a
+// note that it did, and a subsequent reopen (Review → Running via a decision,
+// drv-002) resumes into the same worktree with the change intact — no silent loss.
+func TestRetireOnReviewKeepsDirtyWorktree(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	waitFor(t, "session admitted", func() bool { return f.count() == 1 })
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	id, _ := sess.ReadIdentity()
+	worktreePath := id.Worktree
+
+	// The session implements the feature but never commits it — exactly the
+	// drv-002 scenario. An untracked file in the checkout is the uncommitted work.
+	uncommitted := filepath.Join(worktreePath, "feature.go")
+	const want = "package feature // implemented, not committed\n"
+	if err := os.WriteFile(uncommitted, []byte(want), 0o644); err != nil {
+		t.Fatalf("write uncommitted change: %v", err)
+	}
+
+	// The agent claims review → Review state → no longer desired → retire.
+	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "review", Actor: "agent:x", Body: "done"}); err != nil {
+		t.Fatalf("append review: %v", err)
+	}
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("retire tick: %v", err)
+	}
+
+	// The dirty checkout — and the uncommitted change — must survive the retire.
+	if got, err := os.ReadFile(uncommitted); err != nil {
+		t.Fatalf("uncommitted change was lost on retire: %v", err)
+	} else if string(got) != want {
+		t.Fatalf("uncommitted change corrupted: got %q, want %q", got, want)
+	}
+	// The preservation is recorded to the durable log, visible on the board.
+	if !hasType(logTypes(t, w.root, ticket, att), "note") {
+		t.Fatal("retire that kept a dirty worktree should record a note")
+	}
+
+	// Reopen: a decision against the Review attempt returns it to Running (drv-002).
+	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "decision", Actor: "human:dave", Body: "reopen: finish and commit it"}); err != nil {
+		t.Fatalf("append reopen decision: %v", err)
+	}
+	if a, err := project.LoadAttempt(w.root, ticket, att); err != nil || a.State != project.Running {
+		t.Fatalf("expected Running after reopen decision, got state=%v err=%v", a.State, err)
+	}
+	// The next tick re-admits it via Resume into the *same* worktree, still holding
+	// the uncommitted change — the reopen resumes where the session stopped.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("reopen tick: %v", err)
+	}
+	waitFor(t, "session resumed", func() bool { return f.count() == 2 })
+	if got, err := os.ReadFile(uncommitted); err != nil || string(got) != want {
+		t.Fatalf("reopen must resume with the uncommitted change intact (got %q err %v)", got, err)
 	}
 }
 

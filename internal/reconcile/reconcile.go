@@ -19,10 +19,13 @@
 //     escalate-and-halt, internal/gate). On each metered usage frame: the context
 //     auto-stop (escalate-and-halt a session that crosses the context-window
 //     limit, internal/limit) — the drvctl-012 runaway backstop.
-//   - Retire — an attempt that left the desired set is stopped. A terminal one
-//     (Review/Done) has its worktree cleaned; a blocked one (Needs-me) is parked
-//     with its worktree kept warm, so a later `resolve` — which flips it back to
-//     Running — re-admits it via Resume with no work lost.
+//   - Retire — an attempt that left the desired set is stopped. A blocked one
+//     (Needs-me) is parked with its worktree kept warm, so a later `resolve` —
+//     which flips it back to Running — re-admits it via Resume with no work lost.
+//     A terminal one (Review/Done) has its worktree reclaimed only when the
+//     checkout is clean; a dirty checkout is kept warm instead, so uncommitted
+//     work is never silently lost and a reopened Review resumes where the session
+//     stopped (drvctl-014). Every terminal outcome is recorded to the log.
 //
 // The context auto-stop is the one narrow slice of budget enforcement that lands
 // at Tier 0 (a runaway session had to be survivable first). Full token/$ slice
@@ -47,6 +50,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/manage"
@@ -54,6 +58,7 @@ import (
 	"github.com/Dawil/draiver/internal/protocol"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/watch"
 	"github.com/Dawil/draiver/internal/worktree"
 )
@@ -249,13 +254,13 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	}
 
 	// Retire: running but no longer desired. The attempt's current state decides
-	// whether the worktree is cleaned (terminal) or kept warm (blocked).
+	// whether the worktree is a candidate for reclamation (terminal) or kept warm
+	// (blocked); retire further gates reclamation on a clean checkout.
 	for _, key := range current {
 		if _, ok := desired[key]; ok {
 			continue
 		}
-		st := r.stateOf(key)
-		r.retire(ctx, key, st != project.NeedsMe)
+		r.retire(ctx, key, r.stateOf(key))
 	}
 	return nil
 }
@@ -465,12 +470,25 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 	}
 }
 
-// retire stops the session for key and removes it from the table. removeWorktree
-// distinguishes a terminal retire (Review/Done — clean the checkout, keep the
-// branch as a crash-recovery net) from parking a blocked attempt (Needs-me — keep
-// the worktree warm so a post-resolution Resume continues where it left off). An
-// adopted (foreign) session is stopped by pid, the only handle Tier 0 has on it.
-func (r *Reconciler) retire(ctx context.Context, key worktree.Key, removeWorktree bool) {
+// retire stops the session for key and removes it from the table, then decides
+// what to do with its worktree based on the attempt's terminal state st:
+//
+//   - Needs-me (blocked): keep the worktree warm, untouched, so a post-resolution
+//     Resume continues exactly where it left off.
+//   - Review/Done (terminal) with a *dirty* checkout: keep it warm too. The branch
+//     is a crash-recovery net only for *committed* work; force-removing a checkout
+//     that holds uncommitted or untracked changes silently destroys them
+//     (drvctl-014). Because Review is a reopenable gate (drv-002), a preserved
+//     checkout also lets a reopen resume where the session stopped rather than
+//     from the last commit.
+//   - Review/Done (terminal) with a *clean* checkout: reclaim it. Removal is
+//     non-destructive (any work is committed to the branch), so the checkout is
+//     removed and the branch kept as the crash-recovery net.
+//
+// Every terminal outcome is recorded to the durable log, so a human or a resumed
+// agent can see whether the worktree was reclaimed or preserved. An adopted
+// (foreign) session is stopped by pid, the only handle Tier 0 has on it.
+func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.State) {
 	r.mu.Lock()
 	rn := r.runs[key]
 	delete(r.runs, key)
@@ -494,10 +512,52 @@ func (r *Reconciler) retire(ctx context.Context, key worktree.Key, removeWorktre
 		_ = rn.sess.Close()
 	}
 
-	if removeWorktree {
-		if err := r.opt.Worktrees.Remove(ctx, key, worktree.RemoveOptions{Force: true}); err != nil {
-			r.opt.Logf("reconcile: remove worktree %s/%s: %v", key.Ticket, key.Attempt, err)
-		}
+	// Needs-me is parked with its worktree kept warm; only a terminal retire is a
+	// candidate for reclaiming the checkout.
+	if st == project.NeedsMe {
+		return
+	}
+
+	dirty, err := r.opt.Worktrees.Dirty(ctx, key)
+	if err != nil {
+		// Cannot prove the checkout is clean — err on the side of preserving it
+		// rather than risk a silent loss, and leave it warm for inspection.
+		r.opt.Logf("reconcile: dirty check %s/%s: %v", key.Ticket, key.Attempt, err)
+		r.recordRetire(key, st, false, fmt.Sprintf("could not determine whether the checkout was clean (%v)", err))
+		return
+	}
+	if dirty {
+		r.recordRetire(key, st, false, "the checkout held uncommitted or untracked changes")
+		return
+	}
+
+	// Clean: reclaiming is non-destructive. Drop Force so that if the tree turned
+	// dirty since the check, git refuses the removal rather than clobbering it.
+	if err := r.opt.Worktrees.Remove(ctx, key, worktree.RemoveOptions{}); err != nil {
+		r.opt.Logf("reconcile: remove worktree %s/%s: %v", key.Ticket, key.Attempt, err)
+		r.recordRetire(key, st, false, fmt.Sprintf("attempted to reclaim the clean checkout but removal failed (%v)", err))
+		return
+	}
+	r.recordRetire(key, st, true, "the checkout was clean (all work committed to the branch)")
+}
+
+// recordRetire appends a durable note recording what retire did with the
+// worktree — reclaimed it, or kept it warm and why — so the decision is visible
+// on the board and to a resumed agent. It is best-effort: a note that cannot be
+// written is logged operationally, never failing the retire.
+func (r *Reconciler) recordRetire(key worktree.Key, st project.State, reclaimed bool, reason string) {
+	var body string
+	if reclaimed {
+		body = fmt.Sprintf("Daemon reclaimed the worktree on retire into %s: %s.", st, reason)
+	} else {
+		body = fmt.Sprintf("Daemon kept the worktree warm on retire into %s: %s. It is preserved so the attempt can resume where the session stopped without losing work.", st, reason)
+	}
+	if _, err := ticketlog.Append(r.opt.Root, key.Ticket, key.Attempt, event.Event{
+		Type:  "note",
+		Actor: r.opt.Actor,
+		Body:  body,
+	}); err != nil {
+		r.opt.Logf("reconcile: record retire %s/%s: %v", key.Ticket, key.Attempt, err)
 	}
 }
 
