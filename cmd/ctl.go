@@ -455,10 +455,17 @@ func init() {
 	// default to -1, the "use the config file" sentinel newReconciler resolves.
 	ctlCmd.PersistentFlags().IntVar(&ctlContextWindow, "context-window", -1, "context-window capacity (tokens) the context-% gauge is measured against (default from config, 200000)")
 	ctlUpCmd.Flags().DurationVar(&ctlInterval, "interval", 5*time.Second, "reconcile tick interval")
-	ctlUpCmd.Flags().StringVar(&ctlPermMode, "permission-mode", "", "agent permission mode (routes tool use through the gates)")
+	// Default to acceptEdits: claude's path-aware classifier auto-approves edits
+	// inside the worktree (so an attempt makes progress without a human waving
+	// through every write) while still *asking* — i.e. routing to the permission
+	// gate — for writes outside the checkout and other risky tools. Empty (the
+	// bare default mode) would instead route every in-worktree edit to the gate,
+	// which escalates them, stalling the attempt (drvctl-013).
+	ctlDefaultPermMode := "acceptEdits"
+	ctlUpCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
 	// The foreground drivers route tool use through the gates just like the daemon.
-	ctlStartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", "", "agent permission mode (routes tool use through the gates)")
-	ctlRestartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", "", "agent permission mode (routes tool use through the gates)")
+	ctlStartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
+	ctlRestartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
 	// The auto-stop is only meaningful where a session is actually driven: up,
 	// start, restart. 0 disables it; -1 defers to the config (default 150000).
 	for _, c := range []*cobra.Command{ctlUpCmd, ctlStartCmd, ctlRestartCmd} {

@@ -193,11 +193,26 @@ func TestBaseArgs(t *testing.T) {
 	joined := strings.Join(got, " ")
 	for _, want := range []string{
 		"--print", "--input-format stream-json", "--output-format stream-json", "--verbose",
+		// --permission-prompt-tool stdio activates the control-protocol permission
+		// callback the gate answers; without it headless claude auto-denies gated
+		// tools instead of asking the client (drvctl-013).
+		"--permission-prompt-tool stdio",
 		"--session-id abc", "--model opus", "--permission-mode acceptEdits", "--allowedTools Read Bash(echo *)",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("baseArgs missing %q in: %s", want, joined)
 		}
+	}
+}
+
+// The permission callback is how the gate is fed, so the activation flag must be
+// present unconditionally — even for a spec that sets no permission mode. A
+// regression here silently reverts to headless auto-deny (drvctl-013).
+func TestBaseArgsAlwaysActivatesPermissionCallback(t *testing.T) {
+	got := baseArgs(agent.SessionSpec{}, "--session-id", "abc")
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--permission-prompt-tool stdio") {
+		t.Errorf("baseArgs must always pass --permission-prompt-tool stdio; got: %s", joined)
 	}
 }
 

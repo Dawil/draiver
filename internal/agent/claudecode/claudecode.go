@@ -311,6 +311,13 @@ func baseArgs(spec agent.SessionSpec, head ...string) []string {
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose", // required for stream-json output under --print
+		// Route tool-permission asks over the stdio control protocol as
+		// control_request{can_use_tool} frames, which Decide answers — the seam the
+		// permission gate lives on. Without it, headless claude auto-denies any tool
+		// that needs approval ("…you haven't granted it yet") instead of asking the
+		// client, so the gate is never consulted. The flag is undocumented (dropped
+		// from --help) but live in claude 2.1.x; verified against 2.1.216.
+		"--permission-prompt-tool", "stdio",
 	}
 	args = append(args, head...)
 	if spec.Model != "" {
