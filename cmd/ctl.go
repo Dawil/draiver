@@ -22,7 +22,6 @@ import (
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/worktree"
 )
 
 var (
@@ -67,7 +66,11 @@ var ctlUpCmd = &cobra.Command{
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
-		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld up — repo %s, tick every %s (Ctrl-C to drain)\n", ctlRepo, ctlInterval)
+		repoNote := "repo per ticket"
+		if ctlRepo != "" {
+			repoNote = "fallback repo " + ctlRepo
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld up — %s, tick every %s (Ctrl-C to drain)\n", repoNote, ctlInterval)
 		return r.Run(ctx, ctlInterval)
 	},
 }
@@ -393,21 +396,13 @@ func openStream(ctx context.Context, path string, follow bool) (*os.File, error)
 	}
 }
 
-// newReconciler builds a Reconciler from the resolved data root, the target repo,
-// and the Claude Code adapter — the one adapter Tier 0 ships.
+// newReconciler builds a Reconciler from the resolved data root and the Claude
+// Code adapter — the one adapter Tier 0 ships. Repo binding is per-ticket now
+// (drvctl-015): the reconciler derives a worktree Manager per attempt's own repo
+// path, so no single repo is resolved here. --repo, when given, is only a
+// fallback for attempts that record none.
 func newReconciler() (*reconcile.Reconciler, error) {
 	root, err := resolveRoot()
-	if err != nil {
-		return nil, err
-	}
-	if ctlRepo == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		ctlRepo = cwd
-	}
-	wm, err := worktree.NewManager(ctlRepo)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +426,7 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	}
 	return reconcile.New(reconcile.Options{
 		Root:         root,
-		Worktrees:    wm,
+		DefaultRepo:  ctlRepo,
 		Adapters:     claudeAdapters,
 		Actor:        resolveActor(),
 		ContextLimit: contextLimit,
@@ -473,7 +468,7 @@ func claudeAdapters(name string) (func() agent.Adapter, error) {
 }
 
 func init() {
-	ctlCmd.PersistentFlags().StringVar(&ctlRepo, "repo", "", "path to the repo agents work in (default: cwd)")
+	ctlCmd.PersistentFlags().StringVar(&ctlRepo, "repo", "", "fallback local repo path for tickets that record none (optional; repo is normally per-ticket)")
 	ctlCmd.PersistentFlags().StringVar(&ctlModel, "model", "", "default model for spawned sessions (overridden per attempt)")
 	ctlCmd.PersistentFlags().StringVar(&ctlConfigPath, "config", "", "supervisor config file (default $DRAIVER_CONFIG or ~/.draiver/config.json)")
 	// context-window (gauge capacity) and context-limit (auto-stop threshold) both

@@ -20,6 +20,7 @@ var (
 	newSpecFile string
 	newTool     string
 	newModel    string
+	newRepo     string
 )
 
 var newCmd = &cobra.Command{
@@ -63,6 +64,7 @@ the imported frontmatter do (ambiguous). A rejected new writes nothing.`,
 		m, err := attempt.Create(root, id, attempt.New{
 			Tool:  newTool,
 			Model: newModel,
+			Repo:  newRepo,
 			Actor: resolveActor(),
 		})
 		if err != nil {
@@ -208,5 +210,6 @@ func init() {
 	newCmd.Flags().StringVar(&newSpecFile, "spec", "", "import spec.md from this file instead of scaffolding one; --title supplies the title if the file's frontmatter lacks one (supplying both errors)")
 	newCmd.Flags().StringVar(&newTool, "tool", "", "coding-agent tool for the first attempt (e.g. claude-code)")
 	newCmd.Flags().StringVar(&newModel, "model", "", "model for the first attempt (e.g. opus-4.8)")
+	newCmd.Flags().StringVar(&newRepo, "repo", "", "local path to the git working tree this ticket's attempts target (the supervisor cuts each session's worktree from it)")
 	rootCmd.AddCommand(newCmd)
 }

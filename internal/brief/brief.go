@@ -46,6 +46,9 @@ func Build(root store.Root, ticket, id string) (string, error) {
 	if a.Model != "" {
 		fmt.Fprintf(&b, " | Model: %s", a.Model)
 	}
+	if a.Repo != "" {
+		fmt.Fprintf(&b, " | Repo: %s", a.Repo)
+	}
 	if a.Assignee != "" {
 		fmt.Fprintf(&b, " | Assignee: %s", a.Assignee)
 	}

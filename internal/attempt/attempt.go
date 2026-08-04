@@ -25,8 +25,9 @@ import (
 type Meta struct {
 	ID      string    `yaml:"id"`
 	Ticket  string    `yaml:"ticket"`
-	Tool    string    `yaml:"tool"`  // coding-agent adapter, e.g. claude-code
-	Model   string    `yaml:"model"` // e.g. opus-4.8 (optional)
+	Tool    string    `yaml:"tool"`           // coding-agent adapter, e.g. claude-code
+	Model   string    `yaml:"model"`          // e.g. opus-4.8 (optional)
+	Repo    string    `yaml:"repo,omitempty"` // local path to the git working tree the attempt targets (drvctl-015)
 	Actor   string    `yaml:"actor"`
 	Started time.Time `yaml:"started"`
 	From    string    `yaml:"from,omitempty"` // provenance: branched from this attempt
@@ -36,6 +37,7 @@ type Meta struct {
 type New struct {
 	Tool  string
 	Model string
+	Repo  string
 	Actor string
 	From  string
 	TS    time.Time // zero → now
@@ -75,7 +77,7 @@ func Create(root store.Root, ticket string, n New) (Meta, error) {
 			return Meta{}, err
 		}
 		m := Meta{
-			ID: id, Ticket: ticket, Tool: n.Tool, Model: n.Model,
+			ID: id, Ticket: ticket, Tool: n.Tool, Model: n.Model, Repo: n.Repo,
 			Actor: n.Actor, Started: ts, From: n.From,
 		}
 		if err := writeMeta(root, m); err != nil {
