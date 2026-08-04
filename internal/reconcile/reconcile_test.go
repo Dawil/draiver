@@ -130,6 +130,15 @@ func (a *fakeAdapter) wasKilled() bool {
 	return a.killed
 }
 
+// resumedWith returns the session id this adapter was Resumed on (empty if it was
+// Spawned fresh). It is lock-guarded so a test can read it while a background
+// driver goroutine (e.g. Restart) is still writing it.
+func (a *fakeAdapter) resumedWith() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.resumeID
+}
+
 // factory mints one fresh fakeAdapter per Spawn/Resume and records them so a test
 // can drive the live one.
 type factory struct {

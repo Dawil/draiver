@@ -38,6 +38,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sync"
 	"time"
 
@@ -277,27 +278,41 @@ func (r *Reconciler) stateOf(key worktree.Key) project.State {
 	return a.State
 }
 
-// admit brings up a session for a desired attempt: open its session store, bind a
-// manage.Handle, Spawn a fresh session (or Resume the recorded cattle handle),
-// snapshot the protocol-gate baseline, attach the ingest goroutine to the live
-// stream, and inject the cold-start brief. On any failure before the goroutine is
-// attached it unwinds cleanly (reap + close) so a failed admit leaves nothing
-// half-live in the table.
-func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
-	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
+// wired is a brought-up live session with the ingest machinery bound to its
+// stream: the handle owning the process, the session store, and the two gates
+// plus the watcher each of its events is dispatched through. Both admit (the
+// daemon, streaming in a background goroutine) and Start (the client, streaming
+// in the foreground) obtain one from bringUp — the single place the session and
+// its watch/gate/protocol pipeline are wired, so the two entry points cannot
+// drift apart.
+type wired struct {
+	handle    *manage.Handle
+	sess      *session.Store
+	protoGate *protocol.Gate
+	permGate  *gate.Gate
+	watcher   *watch.Watcher
+}
 
+// bringUp opens an attempt's session store, binds a manage.Handle, Spawns a
+// fresh session (or Resumes the recorded cattle handle when one is on file),
+// snapshots the protocol-gate baseline, and constructs the permission gate and
+// watcher — everything needed to consume the live stream, but not yet consuming
+// it. On any failure it unwinds cleanly (reap + close) so a failed bring-up
+// leaves nothing half-live. The caller injects the cold-start brief once it is
+// ready to consume the stream.
+func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, error) {
 	adapterName := a.Tool
 	if adapterName == "" {
 		adapterName = defaultAdapter
 	}
 	newAdapter, err := r.opt.Adapters(adapterName)
 	if err != nil {
-		return fmt.Errorf("resolve adapter %q: %w", adapterName, err)
+		return nil, fmt.Errorf("resolve adapter %q: %w", adapterName, err)
 	}
 
 	sess, err := session.Open(r.opt.Root, a.Ticket, a.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	handle, err := manage.New(sess, r.opt.Worktrees, newAdapter, manage.Config{
@@ -309,7 +324,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	})
 	if err != nil {
 		_ = sess.Close()
-		return err
+		return nil, err
 	}
 
 	// A recorded session id means this attempt already ran: reuse the cattle
@@ -325,7 +340,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	}
 	if err != nil {
 		_ = sess.Close()
-		return err
+		return nil, err
 	}
 
 	// The protocol gate's baseline is the log tail *at session start*, so a
@@ -335,25 +350,40 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	if err != nil {
 		_ = handle.Kill()
 		_ = sess.Close()
-		return fmt.Errorf("protocol gate: %w", err)
+		return nil, fmt.Errorf("protocol gate: %w", err)
 	}
 	permGate := gate.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.PermPolicy, handle, handle.Kill)
 	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
 
-	stream := handle.Stream()
+	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, watcher: watcher}, nil
+}
+
+// admit brings up a session for a desired attempt and attaches the ingest
+// goroutine to its live stream, then injects the cold-start brief — the daemon's
+// background path. bringUp does the wiring (and its clean unwind on failure); a
+// successful admit records the run so the next tick sees it as running.
+func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
+	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
+
+	w, err := r.bringUp(ctx, a)
+	if err != nil {
+		return err
+	}
+
+	stream := w.handle.Stream()
 	ictx, cancel := context.WithCancel(ctx)
-	rn := &run{handle: handle, sess: sess, cancel: cancel, done: make(chan struct{})}
+	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{})}
 
 	r.mu.Lock()
 	r.runs[key] = rn
 	r.mu.Unlock()
 
-	go r.ingest(ictx, key, rn, protoGate, permGate, watcher, stream)
+	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.watcher, stream)
 
 	// Inject the cold-start brief last, so the stream is already being consumed
 	// when the agent starts producing. A brief that fails to build/deliver does
 	// not tear the live session down — it is logged and the session works on.
-	if err := protocol.InjectBrief(ctx, r.opt.Root, a.Ticket, a.ID, handle); err != nil {
+	if err := protocol.InjectBrief(ctx, r.opt.Root, a.Ticket, a.ID, w.handle); err != nil {
 		r.opt.Logf("reconcile: inject brief %s/%s: %v", a.Ticket, a.ID, err)
 	}
 	return nil
@@ -592,4 +622,128 @@ func (r *Reconciler) Snapshot() ([]Status, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// --- client verbs (act directly on one session) ----------------------------
+//
+// Start/Stop/Restart are the imperative overrides the `draiver ctl` client
+// exposes — the "systemctl" verbs to the reconcile loop's "PID 1". They act
+// directly on a single attempt's session rather than through the desired/actual
+// diff, which is what makes a hand-driven session possible without a running
+// daemon (the doc's "act directly on a session for early dev"). They are not the
+// scheduler: Start does not touch the run table, and none of them consult the
+// desired set. Do not point them at an attempt a live daemon is already
+// supervising — Tier 0 has no daemon IPC to coordinate the two.
+
+// Start brings up a single attempt's session and blocks in the foreground,
+// dispatching its stream through the very same watch+gate+protocol pipeline the
+// daemon's admit uses, until the session exits on its own or ctx is cancelled.
+// It is a faithful single-session daemon: the cold-start brief is injected, tool
+// use is gated, and the stream is metered and promoted to the durable log — the
+// "hand-driven handle to test the lower layers against."
+//
+// observe, if non-nil, receives every event before it is dispatched, so a caller
+// can render the live stream (the CLI prints it). On return — whether the session
+// exited or ctx was cancelled — the session is reaped but its id is kept on disk,
+// so a later Start Resumes the same cattle handle from a fresh brief (that is what
+// Restart is). Start does not register the session in the run table; it is a
+// standalone driver, not part of the reconcile diff.
+func (r *Reconciler) Start(ctx context.Context, ticket, attempt string, observe func(agent.Event)) error {
+	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+	if err != nil {
+		return err
+	}
+	key := worktree.Key{Ticket: ticket, Attempt: attempt}
+
+	w, err := r.bringUp(ctx, a)
+	if err != nil {
+		return err
+	}
+	// Reap (clearing the now-stale pid) then release the store on any exit path —
+	// a clean session end, a gate halt, or a ctx cancellation. Kill is idempotent,
+	// so a session a gate already halted is a no-op here.
+	defer w.sess.Close()
+	defer func() { _ = w.handle.Kill() }()
+
+	if err := protocol.InjectBrief(ctx, r.opt.Root, ticket, attempt, w.handle); err != nil {
+		r.opt.Logf("reconcile: inject brief %s/%s: %v", ticket, attempt, err)
+	}
+
+	stream := w.handle.Stream()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev, ok := <-stream:
+			if !ok {
+				return nil
+			}
+			if observe != nil {
+				observe(ev)
+			}
+			r.dispatch(ctx, key, w.protoGate, w.permGate, w.watcher, ev)
+		}
+	}
+}
+
+// StopResult reports what Stop did, so the client can print a truthful message.
+type StopResult struct {
+	// PID is the process Stop found on record (0 if none / already cleared).
+	PID int
+	// Signaled is true when a live process was told to stop.
+	Signaled bool
+	// AlreadyStopped is true when there was no live process to signal.
+	AlreadyStopped bool
+}
+
+// Stop reaps an attempt's recorded session by signalling its process, then clears
+// the now-stale pid from session.json while keeping the session id, worktree, and
+// log intact — the cattle handle survives for a later Start/Restart to Resume.
+// It works on any recorded session regardless of who started it (a foreground
+// Start, the daemon, or a re-adopted foreign process), because all it needs is
+// the pid on disk. Stopping an attempt with no session, or one already stopped,
+// is not an error: the goal state (not running) already holds.
+func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
+	sess, err := session.Open(r.opt.Root, ticket, attempt)
+	if err != nil {
+		return StopResult{}, err
+	}
+	defer sess.Close()
+
+	id, err := sess.ReadIdentity()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return StopResult{AlreadyStopped: true}, nil // never had a session
+		}
+		return StopResult{}, err
+	}
+
+	res := StopResult{PID: id.PID}
+	if id.PID != 0 && r.opt.Proc.Alive(id.PID) {
+		if err := r.opt.Proc.Terminate(id.PID); err != nil {
+			return res, fmt.Errorf("reconcile: stop %s/%s (pid %d): %w", ticket, attempt, id.PID, err)
+		}
+		res.Signaled = true
+	} else {
+		res.AlreadyStopped = true
+	}
+
+	if id.PID != 0 {
+		id.PID = 0
+		if err := sess.WriteIdentity(id); err != nil {
+			return res, fmt.Errorf("reconcile: clear pid %s/%s: %w", ticket, attempt, err)
+		}
+	}
+	return res, nil
+}
+
+// Restart reaps the current session and brings it back up fresh from a new brief
+// — the doc's "context refresh" (kill + resume the same cattle handle,
+// re-injecting the cold-start). It is Stop followed by Start, so it blocks in the
+// foreground exactly like Start.
+func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, observe func(agent.Event)) error {
+	if _, err := r.Stop(ticket, attempt); err != nil {
+		return err
+	}
+	return r.Start(ctx, ticket, attempt, observe)
 }
