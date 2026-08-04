@@ -243,9 +243,22 @@ func newWorld(t *testing.T) world {
 	return world{root: store.Root{Dir: t.TempDir()}, repo: newRepo(t)}
 }
 
-// newTicket creates a ticket with one Running attempt (its genesis "created"
-// event derives to Running) and returns the attempt id.
+// newTicket creates a ticket with one Running, enabled attempt (its genesis
+// "created" event derives to Running; an enable event opts it into supervision so
+// the reconcile loop admits it) and returns the attempt id. Tests exercising the
+// enable gate itself create a disabled attempt with newDisabledTicket.
 func (w world) newTicket(t *testing.T, ticket string) string {
+	t.Helper()
+	att := w.newDisabledTicket(t, ticket)
+	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "enable", Actor: "agent:x", Body: "enabled"}); err != nil {
+		t.Fatalf("enable attempt: %v", err)
+	}
+	return att
+}
+
+// newDisabledTicket creates a ticket with one Running attempt that has NOT been
+// enabled — the default. The reconcile loop should leave it alone.
+func (w world) newDisabledTicket(t *testing.T, ticket string) string {
 	t.Helper()
 	if err := w.root.EnsureTicketDir(ticket); err != nil {
 		t.Fatal(err)
@@ -402,6 +415,108 @@ func TestTickAdmitsWatchesAndMeters(t *testing.T) {
 		m, err := sess.ReadMeter()
 		return err == nil && m.Usage.ContextTokens == 4242
 	})
+}
+
+// TestTickIgnoresDisabledRunning: a Running attempt that has NOT been enabled is
+// not admitted — being in Running is not consent to spawn an agent. The default is
+// disabled, so an idle repo full of Running tickets stays quiet.
+func TestTickIgnoresDisabledRunning(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	// No adapter was ever spawned, and no session id was recorded.
+	if n := f.count(); n != 0 {
+		t.Fatalf("disabled Running attempt was admitted: %d adapters spawned", n)
+	}
+	sess, err := session.Open(w.root, ticket, att)
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	if id, err := sess.ReadIdentity(); err == nil && id.SessionID != "" {
+		t.Fatalf("disabled attempt brought a session up: %+v", id)
+	}
+}
+
+// TestTickAdmitsAfterEnable: a disabled Running attempt is parked; once `enable`
+// is logged the very next tick admits it — the enable gate is the only thing that
+// was holding it back.
+func TestTickAdmitsAfterEnable(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	// Parked while disabled.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("pre-enable tick: %v", err)
+	}
+	if n := f.count(); n != 0 {
+		t.Fatalf("admitted before enable: %d adapters spawned", n)
+	}
+
+	// Enable → next tick brings a session up.
+	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "enable", Actor: "human:dave", Body: "ship it"}); err != nil {
+		t.Fatalf("append enable: %v", err)
+	}
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("post-enable tick: %v", err)
+	}
+	sess, err := session.Open(w.root, ticket, att)
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	waitFor(t, "session brought up after enable", func() bool {
+		id, err := sess.ReadIdentity()
+		return err == nil && id.SessionID != "" && id.PID != 0
+	})
+}
+
+// TestRetireOnDisable: an enabled, supervised attempt that is later disabled
+// leaves the desired set; the tick reaps its live session (the attempt itself
+// stays Running — a human can still work it by hand or re-enable it).
+func TestRetireOnDisable(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	waitFor(t, "session admitted", func() bool { return f.count() == 1 })
+
+	// Disable → the attempt leaves the desired set though it is still Running.
+	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "disable", Actor: "human:dave", Body: "park it"}); err != nil {
+		t.Fatalf("append disable: %v", err)
+	}
+	if a, err := project.LoadAttempt(w.root, ticket, att); err != nil || a.State != project.Running || a.Enabled {
+		t.Fatalf("expected Running+disabled after disable, got state=%v enabled=%v err=%v", a.State, a.Enabled, err)
+	}
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("retire tick: %v", err)
+	}
+	if !f.at(0).wasKilled() {
+		t.Fatal("session was not reaped on disable")
+	}
 }
 
 // TestTickIsIdempotent: a second tick with a session already live does not spawn a

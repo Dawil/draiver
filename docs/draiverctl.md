@@ -185,7 +185,7 @@ Global flags mirror `draiver` (`--data`, `--actor`, `--attempt`).
 | `draiverctl restart <ticket[@attempt]>` | Reap + respawn fresh from `brief` (context refresh). |
 | `draiverctl status [<ticket>]` | Live view: control state, session PID, model, tokens/$, **context-window %**, worktree, last event, watchdog health. |
 | `draiverctl logs [-f] <ticket[@attempt]>` | Tail the session's stream (durable events + raw stream-json). |
-| `draiverctl enable / disable / mask <ticket>` | In-fleet / parked / never-auto-pick. |
+| `draiverctl enable / disable <ticket[@attempt]>` | In-fleet / parked. Stored as an `enable`/`disable` log event (in the hash chain, replayed by `brief`). **Default is disabled**: `up` reconciles only attempts that are both `Running` *and* enabled, so a repo full of `Running` tickets never auto-spawns until each is opted in. (`mask` = never-auto-pick, deferred with the tournament.) |
 | `draiverctl race <ticket> --tool a,b [--model …]` | Launch N competing attempts; later `draiverctl pick <ticket@attempt>` selects the winner. |
 | `draiverctl focus <milestone>` | `isolate` — run only this target, pause the rest. |
 | `draiverctl budget <scope> --tokens … --cost …` | Set a slice budget (ticket/project/team). |
@@ -215,14 +215,15 @@ true.
 
 1. **Tier 0 — Manage mode is real.** `draiverctld` reconcile loop (one adapter,
    no scheduler), worktree-per-session, stream-json ingest, the two hooks,
-   `start/stop/restart/status/logs`.
+   `start/stop/restart/status/logs`, and the `enable`/`disable` supervision gate
+   (default disabled — `up` admits only `Running` *and* enabled attempts).
 2. **Tier 1 — earns the systemd name.** Respawn policy + **progress watchdog** +
    **StartLimit ceiling → auto-escalate**; path-activation on `resolution`;
    concurrency cap + token/cost budgets metered mid-run and written to
    `attempt.md`.
 3. **Tier 2 — fleet.** Dependency DAG gating admission; attempt **tournament**
-   (`race`/`pick`); Aider/Codex adapters; milestones/targets, `enable`/`mask`,
-   `focus`.
+   (`race`/`pick`); Aider/Codex adapters; milestones/targets, `mask`
+   (never-auto-pick), `focus`. (`enable`/`disable` pulled forward into Tier 0.)
 4. **Tier 3 — the UI half.** Fold all of it into `webui` Manage mode over
    WebSocket/SSE: one-click **start / stop / refresh / new attempt** on each
    card, a live context-window gauge, and side-by-side parallel attempts —

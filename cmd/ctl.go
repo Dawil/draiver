@@ -183,8 +183,8 @@ var ctlStatusCmd = &cobra.Command{
 			if model == "" {
 				model = "-"
 			}
-			fmt.Fprintf(out, "%-14s %-9s desired=%-5t %-18s model=%-10s %s  $%.4f\n",
-				s.Key.Ticket+"/"+s.Key.Attempt, s.State, s.Desired, sessionCol, model,
+			fmt.Fprintf(out, "%-14s %-9s enabled=%-5t desired=%-5t %-18s model=%-10s %s  $%.4f\n",
+				s.Key.Ticket+"/"+s.Key.Attempt, s.State, s.Enabled, s.Desired, sessionCol, model,
 				contextGauge(s.Meter.Usage.ContextTokens, ctlContextWindow), s.Meter.Usage.CostUSD)
 		}
 		return nil

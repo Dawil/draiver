@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 func TestResolveCtlTarget(t *testing.T) {
@@ -50,6 +52,57 @@ func TestResolveCtlTarget(t *testing.T) {
 			t.Fatal("expected an error for an unknown attempt")
 		}
 	})
+}
+
+// TestCtlEnableDisable drives the enable/disable verbs end to end: each appends a
+// log event that flips the derived Enabled bit, the default is disabled, and the
+// bit is a separate axis that leaves the control state on Running.
+func TestCtlEnableDisable(t *testing.T) {
+	dir := newTicket(t) // ticket PROJ-1, attempt 0001
+
+	// Default: disabled.
+	if a, err := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-1", "0001"); err != nil || a.Enabled {
+		t.Fatalf("fresh attempt should be disabled by default (enabled=%v err=%v)", a.Enabled, err)
+	}
+
+	// enable → Enabled, still Running.
+	out, code := run(t, "--data", dir, "--actor", "human:dave", "ctl", "enable", "PROJ-1@0001")
+	if code != 0 {
+		t.Fatalf("ctl enable exited %d: %s", code, out)
+	}
+	a, err := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-1", "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.Enabled {
+		t.Fatal("attempt should be enabled after ctl enable")
+	}
+	if a.State != project.Running {
+		t.Fatalf("enable must not change control state: got %q", a.State)
+	}
+
+	// disable → back to disabled.
+	if out, code := run(t, "--data", dir, "--actor", "human:dave", "ctl", "disable", "PROJ-1@0001"); code != 0 {
+		t.Fatalf("ctl disable exited %d: %s", code, out)
+	}
+	if a, err := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-1", "0001"); err != nil || a.Enabled {
+		t.Fatalf("attempt should be disabled after ctl disable (enabled=%v err=%v)", a.Enabled, err)
+	}
+
+	// The two events are in the hash chain like every other.
+	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
+	var kinds []string
+	for _, e := range events {
+		kinds = append(kinds, e.Type)
+	}
+	if strings.Join(kinds, ",") != "created,enable,disable" {
+		t.Fatalf("unexpected log types: %v", kinds)
+	}
+
+	// An unknown target is an error, not a silent no-op.
+	if _, code := run(t, "--data", dir, "ctl", "enable", "NOPE-9"); code == 0 {
+		t.Fatal("expected nonzero exit enabling an unknown ticket")
+	}
 }
 
 func TestContextGauge(t *testing.T) {
