@@ -1,0 +1,239 @@
+# draiverctl — the supervisor for AI coding sessions
+
+> systemd is two things bolted together: a declarative state store (units +
+> journal) and a reconciling supervisor (PID 1 + `systemctl`). Draiver built the
+> first. `draiverctl` is the second. Agents are cattle; this is the thing that
+> raises and culls the herd.
+
+## The split
+
+Draiver today is systemd's *inert* half. The append-only, hash-chained log is
+`journald`. `spec.md` + `attempt.md` are the unit file. The four control states
+are unit states. `draiver webui` is a read-only `systemctl list-units`. What
+`docs/mvp.md` explicitly deferred — "Manage mode: spinning up agents,
+stream-json over stdio, WebSocket/SSE relay, worktree isolation, concurrent
+re-attempts" — is systemd's *active* half: **PID 1 itself**, plus its client.
+
+That daemon plus its client is `draiverctl`. The seam is clean because the
+README already put it there: **the log is the source of truth, so the supervisor
+holds no precious state and can itself be restarted** — the same reason systemd
+survives `daemon-reexec`. `draiverctld` is cattle too.
+
+```
+draiver     = units + journal   (declarative state; already built; read-only)
+draiverctl  = PID 1 + systemctl (the reconciling supervisor; this document)
+```
+
+## Why it's worth a supervisor (core benefits)
+
+The onboarding skill teaches an agent the protocol; it cannot *enforce* it — a
+drifting agent simply stops logging, and no one notices until the next cold-start
+finds a thin log. `draiverctl` sits **inside the stdio loop**, a privileged seat
+the skill never has, and that changes what's possible:
+
+1. **Enforce the log by process control, not goodwill.** Because the supervisor
+   relays the model's turns, it can *hijack the prompt and the response*: inject
+   the `brief` on cold-start, and **withhold a tool call until the required log
+   event is written** — refuse to forward the edit until the `decision`/`gotcha`
+   is on disk. This is the same move `escalate` already makes (exit-3 gate
+   "enforced by process control, not agent goodwill"), generalized to the whole
+   protocol. The log stops being aspirational.
+2. **Surface context usage live.** The supervisor sees every token in and out, so
+   context-window consumption (and cost) becomes a live gauge in the UI — the
+   human can see an agent approaching context exhaustion *before* it derails and
+   pre-empt a refresh, rather than discovering a blown context after the fact.
+3. **One-click session control.** With the daemon in place, the board's buttons
+   become real: **start**, **stop**, **refresh** (kill + respawn from a fresh
+   `brief`), and **new attempt** — the interactive `systemctl` the read-only
+   board only gestures at today.
+4. **Parallel sessions for comparison.** Isolated dev environments (worktree, or
+   a container) per session let you run the same ticket under **different models
+   or coding tools at once** and compare the resulting attempts — the tournament
+   primitive below.
+
+Everything else in this document is machinery in service of these four.
+
+## Analogy table
+
+| systemd | draiverctl | Meaning |
+| --- | --- | --- |
+| PID 1 / the manager | **`draiverctld`** — the supervisor daemon | Spawns sessions in worktrees, monitors, reaps, respawns. Holds no truth; rebuildable from the log. |
+| `systemctl` | **`draiverctl`** (client verbs) | `start`/`stop`/`restart`/`status`/`enable`/`reload`, for tickets and attempts. |
+| Unit file (`.service`) | `spec.md` + `attempt.md` + a **session spec** (adapter, model, permissions, env) | The declarative "what should run." `attempt.md` already carries tool/model — that is `ExecStart=`. |
+| Template + instance (`getty@tty1`) | **ticket = template, attempt = instance** | `draiverctl start PROJ-123@0002`. The instance unit already exists. |
+| Unit states (active / failed / …) | the four **control states** + session substates | Running↔active(running); Needs-me↔blocked; Review↔the claim; Done↔inactive(success). |
+| journald / `journalctl` | the append-only hash-chained **log** | Built. Add `draiverctl logs -f` to tail live stream-json, promoting semantic events into the durable log. |
+| `Restart=on-failure`, `RestartSec` | **respawn policy** — the "agents are cattle" core | Context full / crash / derail → kill, `--resume` a fresh session from `brief`. Maps 1:1 to the premise. |
+| `WatchdogSec`, `sd_notify` | **liveness + progress watchdog** | No log event in N min, or looping/thrashing → reap and respawn. Heartbeat = log events. |
+| `StartLimitBurst`, `reset-failed` | **respawn ceiling → escalate** | After K respawns/escalations in a window, stop looping and flip to Needs-me. The anti-runaway brake. |
+| `Requires=` / `After=` / `Wants=` | **ticket dependency DAG** | Don't spawn B until A is Done/merged. Gate admission on deps. |
+| Targets (runlevels) | **milestones / epics** | "Bring up all tickets for release X"; reached when constituents are Done. |
+| Slices + cgroups (`CPUQuota`, `MemoryMax`) | **budget slices** (tokens/$ per ticket/project/team) + **concurrency cap** | Cost is the scarce resource. `TokenMax=`, `CostQuota=`, max-parallel. Enforced mid-run, not just at admission. |
+| Socket / path activation | **on-demand + resolution activation** | The log dir *is* a `.path` unit: a new `resolution` event fires a resume session. |
+| Timers (`OnCalendar`) | **scheduled re-attempts / nightly retries / periodic audit** | |
+| `enable` / `disable` / `mask` | **in-fleet / parked / quarantined** | Whether the supervisor keeps a session on it; `mask` = never auto-pick (needs design first). |
+| `isolate <target>` | **focus mode** | Run only this milestone; pause the rest to free budget/concurrency. |
+| `daemon-reload` | **context refresh** | `spec.md` edited → respawn with a fresh `brief` (README's "kill + reload with same context"). |
+| `ExecStartPre/Post`, `ExecStopPost` | **lifecycle hooks** | Pre: create worktree, run brief. Post-stop: run tests, open PR on `review`, clean worktree. |
+| Scopes (adopt external procs) | **attach to a hand-started session** | A dev's manual `claude-code` run, adopted under supervision. |
+| `systemctl --user` | **per-dev fleet vs shared team fleet** | Multi-tenant slices. |
+| Drop-ins (`.d/`), `EnvironmentFile` | **layered agent config** | global → project → ticket overrides (model, tools, permission policy). |
+
+## Where systemd's model doesn't reach (AI-native additions)
+
+These have no clean systemd equivalent and are what make `draiverctl` more than a
+rebrand.
+
+1. **Progress ≠ liveness.** Processes don't drift; agents do. The watchdog can't
+   just ask "is it alive," it must ask "is it moving *toward the ticket*."
+   Detecting loops, thrash, and off-task wandering is a new subsystem — cheapest
+   signal is log-event cadence and repetition; richer is a judge over the stream.
+2. **Human attention is the constrained resource, not CPU.** systemd schedules
+   against CPU/mem/IO. Here the objective is to *minimize enqueues to the
+   "Needs me" column* — management by exception. The inbox is the human's
+   run-queue; the supervisor's job is to keep it short. A genuinely different
+   scheduler goal.
+3. **Success is a claim a human ratifies, not exit 0.** `review` is
+   `sd_notify READY=1` that a human must countersign. The supervisor never
+   self-certifies Done. `ExecStopPost` can open the PR; the terminal transition
+   is external.
+4. **Instances race; they don't just scale.** Two attempts on one ticket are
+   *competitors* (claude-code vs aider vs a re-try), not replicas. `draiverctl`
+   needs a **tournament/selection** primitive — run N, pick the winning attempt,
+   discard the rest — which systemd has no notion of.
+5. **Cost enforcement is mid-flight.** cgroups meter continuously; you must be
+   able to kill a session *at* its token budget, not merely refuse admission —
+   and report the burn back into `attempt.md` (which reserves room for metrics).
+
+## Decisions (locked)
+
+| Area | Decision |
+| --- | --- |
+| Language | Go 1.26 (same module, `github.com/Dawil/draiver`) |
+| Shape | One daemon `draiverctld` + one client `draiverctl`; ship as subcommands of the same binary (`draiver ctl …`) or a sibling binary sharing `internal/`. **Default: sibling verbs under the existing binary**; say the word to split. |
+| Supervisor model | **Declarative reconciler**, not imperative spawn/kill. Desired state (which tickets should have a live, in-budget, progressing session) vs actual (what's running); the loop closes the gap. k8s-flavoured systemd. |
+| Source of truth | The append-only log — unchanged. The daemon persists *no* authoritative state; a `draiverctld` restart rebuilds its view from disk + a scan of live processes it can re-adopt by session id. |
+| Agent transport | Headless stream-json over stdio (`--input-format/--output-format stream-json`), one process per session, one git worktree per session. |
+| The two hooks | **session id = the cattle handle** (kill freely, keep id + log, `--resume`); **tool-permission callback = the escalation seam** (route "may I?" to `escalate`, don't auto-approve). |
+| Adapters | Thin per-agent interface (`Spawn`, `Resume`, `Kill`, `Stream`, `Interrupt`); Claude Code first, Aider/Codex behind the same seam. |
+| Safety brake | Respawn ceiling (`StartLimitBurst` analog) is **on by default** — a runaway agent escalates to a human instead of looping. Non-negotiable. |
+
+## Session lifecycle (the state machine draiverctld drives)
+
+Control state (per attempt, derived from the log) is unchanged. `draiverctl`
+adds *session* substates beneath `Running`:
+
+```
+        spawn                 brief loaded            watchdog trip
+inactive ───▶ spawning ───▶ briefing ───▶ working ───────────────▶ reaping
+   ▲                                          │  │                     │
+   │ done(human)                    review    │  │ escalate            │ respawn
+   │                                          ▼  ▼                     ▼
+ Done ◀──────────────── Review          Needs-me                  respawning
+                       (claim)         (blocked; human)               │
+                                          ▲                           │
+                          resolution ─────┘        StartLimit hit ────┘
+                                                    → Needs-me (give up looping)
+```
+
+- `working → reaping` fires on crash, context exhaustion, budget hit, or a
+  **progress** watchdog trip (no log event in N min / detected loop), never on a
+  plain "still thinking."
+- `reaping → respawning` unless the respawn ceiling is hit, in which case the
+  attempt lands in **Needs-me** with a synthetic escalation ("gave up after K
+  respawns — human needed").
+- `Needs-me → working` is **path-activated** by a `resolution` event: the human
+  resolves, the daemon wakes a `--resume` session. No polling on either side.
+- `Review` and `Done` are the same load-bearing human gates draiver already
+  defines; the daemon can open the PR on `review` but cannot self-transition to
+  `Done`.
+
+## draiverctld responsibilities (the reconcile loop)
+
+Each tick: read desired set (enabled tickets, their deps satisfied, within
+slice budgets, honoring the concurrency cap), diff against the live process
+table, and act:
+
+1. **Admit** — for a desired-but-not-running attempt with deps met and budget
+   left: create a worktree, run `brief`, spawn the adapter, record the session
+   id.
+2. **Watch** — consume each session's stream-json; promote semantic events
+   (gotcha/decision/escalation/review) into the durable log; meter tokens, cost,
+   and **context-window usage** (surfaced live to the UI); run the progress
+   watchdog.
+3. **Gate** — two enforcement seams, both by process control:
+   - *Permission gate:* on a tool-permission callback, append `escalate` and halt
+     the session (exit-3 semantics), moving the attempt to Needs-me.
+   - *Protocol gate:* inject `brief` on cold-start, and **withhold a tool call
+     until its required log event is written** — the "enforce the log" benefit.
+     A decision/gotcha reaches disk before the edit it justifies does.
+4. **Reap & respawn** — per policy, subject to the `StartLimit` ceiling.
+5. **Activate** — on a filesystem `resolution` event, wake a resume session.
+6. **Retire** — on `review`, run `ExecStopPost` hooks (tests, open PR); leave
+   the human to `done`. Clean the worktree.
+
+## Command surface (client)
+
+Global flags mirror `draiver` (`--data`, `--actor`, `--attempt`).
+
+| Verb | Purpose |
+| --- | --- |
+| `draiverctl up [--concurrency N] [--budget …]` | Start `draiverctld` and begin reconciling the enabled fleet. |
+| `draiverctl down` | Drain: stop admitting, let live sessions checkpoint to the log, exit. |
+| `draiverctl start <ticket[@attempt]>` | Spawn (or resume) a session for one attempt. |
+| `draiverctl stop <ticket[@attempt]>` | Kill the session; keep id + log for later `--resume`. |
+| `draiverctl restart <ticket[@attempt]>` | Reap + respawn fresh from `brief` (context refresh). |
+| `draiverctl status [<ticket>]` | Live view: control state, session PID, model, tokens/$, **context-window %**, worktree, last event, watchdog health. |
+| `draiverctl logs [-f] <ticket[@attempt]>` | Tail the session's stream (durable events + raw stream-json). |
+| `draiverctl enable / disable / mask <ticket>` | In-fleet / parked / never-auto-pick. |
+| `draiverctl race <ticket> --tool a,b [--model …]` | Launch N competing attempts; later `draiverctl pick <ticket@attempt>` selects the winner. |
+| `draiverctl focus <milestone>` | `isolate` — run only this target, pause the rest. |
+| `draiverctl budget <scope> --tokens … --cost …` | Set a slice budget (ticket/project/team). |
+
+## Storage additions
+
+The log stays canonical. The daemon needs only *rebuildable* runtime state, kept
+out of the hash chain:
+
+```
+<data-root>/
+  PROJ-123/attempts/0002/
+    session/                 # NOT in the hash chain — runtime, rebuildable
+      session.json           # adapter, model, session-id, pid, worktree, started
+      stream.jsonl           # raw stream-json tee (the "journal"); semantic events promoted to log/
+      meter.json             # tokens, cost, context-window usage, watchdog counters (fold into attempt.md metrics on retire)
+```
+
+`attempt.md` already reserves room for metrics — the meter's final tally lands
+there on retire, so a completed attempt carries its own cost/latency record.
+
+## Implementation order
+
+The MVP of `draiverctl` is **Tier 0 + the Tier-1 watchdog trio**. Everything
+past it is scheduling sugar; the trio is what makes "walk away from N sessions"
+true.
+
+1. **Tier 0 — Manage mode is real.** `draiverctld` reconcile loop (one adapter,
+   no scheduler), worktree-per-session, stream-json ingest, the two hooks,
+   `start/stop/restart/status/logs`.
+2. **Tier 1 — earns the systemd name.** Respawn policy + **progress watchdog** +
+   **StartLimit ceiling → auto-escalate**; path-activation on `resolution`;
+   concurrency cap + token/cost budgets metered mid-run and written to
+   `attempt.md`.
+3. **Tier 2 — fleet.** Dependency DAG gating admission; attempt **tournament**
+   (`race`/`pick`); Aider/Codex adapters; milestones/targets, `enable`/`mask`,
+   `focus`.
+4. **Tier 3 — the UI half.** Fold all of it into `webui` Manage mode over
+   WebSocket/SSE: one-click **start / stop / refresh / new attempt** on each
+   card, a live context-window gauge, and side-by-side parallel attempts —
+   turning the read-only board into an interactive `systemctl`.
+
+## Open defaults (flag if you disagree)
+
+- **Sibling verbs** under the existing `draiver` binary (`draiver ctl up`),
+  sharing `internal/`, over a separate `draiverctl` binary.
+- Respawn ceiling **on by default** (e.g. 3 respawns / 1h → escalate).
+- Progress watchdog default: no log event in **10 min** → suspect; loop
+  detection on repeated identical tool calls.
+- Worktree per session under the repo's `.git/worktrees`; cleaned on retire.
+- Claude Code is the first and reference adapter.
