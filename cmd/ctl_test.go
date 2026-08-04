@@ -137,23 +137,110 @@ func TestTailStreamNoFollow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stream.jsonl")
 
+	// A missing stream is not an error, and the not-yet-started notice is printed
+	// in both the raw (--json) and rendered modes.
+	for _, render := range []bool{false, true} {
+		var out bytes.Buffer
+		if err := tailStream(context.Background(), &out, path, false, render); err != nil {
+			t.Fatalf("missing stream should not error (render=%v): %v", render, err)
+		}
+		if !strings.Contains(out.String(), "no session stream yet") {
+			t.Fatalf("expected the not-yet-started notice (render=%v), got %q", render, out.String())
+		}
+	}
+
 	var out bytes.Buffer
-	if err := tailStream(context.Background(), &out, path, false); err != nil {
-		t.Fatalf("missing stream should not error: %v", err)
-	}
-	if out.Len() == 0 {
-		t.Fatal("expected an informative line for a missing stream")
-	}
 
 	if err := os.WriteFile(path, []byte(`{"a":1}`+"\n"+`{"b":2}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := tailStream(context.Background(), &out, path, false); err != nil {
+	if err := tailStream(context.Background(), &out, path, false, false); err != nil {
 		t.Fatalf("tail: %v", err)
 	}
 	if !strings.Contains(out.String(), `{"a":1}`) || !strings.Contains(out.String(), `{"b":2}`) {
 		t.Fatalf("stream not printed:\n%s", out.String())
+	}
+}
+
+// TestTailStreamRender renders the recorded stream for a human: assistant prose
+// reads as prose (not an escaped JSON string), a tool call shows its name plus a
+// meaningful argument snippet, and the stream-json transport fields (the session
+// id, the envelope) do not leak into the output.
+func TestTailStreamRender(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.jsonl")
+	lines := strings.Join([]string{
+		`{"type":"system","subtype":"init","session_id":"sess-secret-uuid","cwd":"/x","model":"opus"}`,
+		`{"type":"assistant","session_id":"sess-secret-uuid","message":{"role":"assistant","content":[{"type":"text","text":"Looking at the code now."}]}}`,
+		`{"type":"assistant","session_id":"sess-secret-uuid","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls internal/agent"}}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"DONE.","total_cost_usd":0.01,"session_id":"sess-secret-uuid"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := tailStream(context.Background(), &out, path, false, true); err != nil {
+		t.Fatalf("render tail: %v", err)
+	}
+	got := out.String()
+
+	// Assistant prose is rendered as prose, and it is not the raw JSON line.
+	if !strings.Contains(got, "Looking at the code now.") {
+		t.Errorf("assistant prose not rendered:\n%s", got)
+	}
+	if strings.Contains(got, `"type":"assistant"`) {
+		t.Errorf("raw JSON leaked into rendered output:\n%s", got)
+	}
+	// Tool call shows name and a meaningful argument snippet.
+	if !strings.Contains(got, "> Bash: ls internal/agent") {
+		t.Errorf("tool call not rendered with arguments:\n%s", got)
+	}
+	// Turn boundary is surfaced.
+	if !strings.Contains(got, "turn end (success)") {
+		t.Errorf("turn end not rendered:\n%s", got)
+	}
+	// Transport fields never appear.
+	if strings.Contains(got, "sess-secret-uuid") || strings.Contains(got, "session_id") {
+		t.Errorf("transport session id leaked into rendered output:\n%s", got)
+	}
+}
+
+// TestCtlLogsRenderAndJSON drives `ctl logs` end to end in both modes: the
+// default renders a human-readable line, while --json reproduces the raw
+// stream.jsonl verbatim for `| jq` pipelines.
+func TestCtlLogsRenderAndJSON(t *testing.T) {
+	dir := newTicket(t) // ticket PROJ-1, attempt 0001
+	root := store.Root{Dir: dir}
+	streamPath := root.SessionStreamPath("PROJ-1", "0001")
+	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rawLine := `{"type":"assistant","session_id":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":"Hello from the session."}]}}`
+	if err := os.WriteFile(streamPath, []byte(rawLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: human-readable, prose not raw JSON, session id dropped.
+	out, code := run(t, "--data", dir, "ctl", "logs", "PROJ-1@0001")
+	if code != 0 {
+		t.Fatalf("ctl logs exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "Hello from the session.") {
+		t.Errorf("rendered output missing assistant prose:\n%s", out)
+	}
+	if strings.Contains(out, `"session_id"`) || strings.Contains(out, `"type":"assistant"`) {
+		t.Errorf("rendered output leaked raw stream-json:\n%s", out)
+	}
+
+	// --json: byte-for-byte passthrough of the recorded line.
+	out, code = run(t, "--data", dir, "ctl", "logs", "PROJ-1@0001", "--json")
+	if code != 0 {
+		t.Fatalf("ctl logs --json exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, rawLine) {
+		t.Errorf("--json did not reproduce the raw stream line:\n%s", out)
 	}
 }
 
@@ -171,7 +258,7 @@ func TestTailStreamFollow(t *testing.T) {
 
 	var mu safeBuf
 	done := make(chan error, 1)
-	go func() { done <- tailStream(ctx, &mu, path, true) }()
+	go func() { done <- tailStream(ctx, &mu, path, true, false) }()
 
 	waitUntil(t, "first line", func() bool { return strings.Contains(mu.String(), `{"first":1}`) })
 
@@ -185,6 +272,52 @@ func TestTailStreamFollow(t *testing.T) {
 	f.Close()
 
 	waitUntil(t, "appended line", func() bool { return strings.Contains(mu.String(), `{"second":2}`) })
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tailStream returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("tailStream did not return after cancel")
+	}
+}
+
+// TestTailStreamRenderFollow follows a stream in render mode: it renders what is
+// already on disk and picks up an appended line, proving -f works in the
+// human-readable mode too (not just raw --json).
+func TestTailStreamRenderFollow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.jsonl")
+	first := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"first line here"}]}}`
+	if err := os.WriteFile(path, []byte(first+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu safeBuf
+	done := make(chan error, 1)
+	go func() { done <- tailStream(ctx, &mu, path, true, true) }()
+
+	waitUntil(t, "first rendered line", func() bool { return strings.Contains(mu.String(), "first line here") })
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"second line here"}]}}`
+	if _, err := f.WriteString(second + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	waitUntil(t, "appended rendered line", func() bool { return strings.Contains(mu.String(), "second line here") })
+	if strings.Contains(mu.String(), "session_id") {
+		t.Errorf("transport fields leaked in render-follow output:\n%s", mu.String())
+	}
 
 	cancel()
 	select {

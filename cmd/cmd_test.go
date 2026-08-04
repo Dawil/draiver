@@ -25,6 +25,7 @@ func run(t *testing.T, args ...string) (string, int) {
 	newTool, newModel = "", ""
 	attemptTool, attemptModel, attemptFrom = "", "", ""
 	inboxMine = false
+	ctlLogsFollow, ctlLogsJSON = false, false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 
 	var out bytes.Buffer

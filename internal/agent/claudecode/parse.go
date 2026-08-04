@@ -65,6 +65,12 @@ type wireResult struct {
 	Usage        *wireUsage `json:"usage"`
 }
 
+// Normalize decodes one recorded stream-json line back into the normalized
+// events it was teed from, so a reader of the raw stream.jsonl (e.g. `ctl logs`)
+// can render it with the same event vocabulary the live session produced. It is
+// the exported seam over the per-line decoder used while a session runs.
+func Normalize(line []byte) []agent.Event { return normalize(line) }
+
 // normalize decodes one stream-json line into zero or more normalized events.
 // A single assistant line fans out into one event per content block; lines the
 // adapter does not model (thinking_tokens ticks, rate_limit_event, control

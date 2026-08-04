@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ var (
 	ctlContextWindow int // -1 sentinel: resolve from config
 	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
+	ctlLogsJSON      bool
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
 )
 
@@ -195,8 +197,14 @@ var ctlStatusCmd = &cobra.Command{
 
 var ctlLogsCmd = &cobra.Command{
 	Use:   "logs <ticket[@attempt]>",
-	Short: "Tail an attempt's raw session stream (stream.jsonl); -f follows",
-	Args:  cobra.ExactArgs(1),
+	Short: "Read an attempt's session stream — human-readable by default, raw stream-json with --json; -f follows",
+	Long: "logs renders an attempt's recorded session stream for a human by default: " +
+		"assistant prose, tool calls, tool errors, permission prompts, usage/cost and " +
+		"turn boundaries — the same one-liners the live start/restart view prints — with " +
+		"the stream-json envelope (event uuids, session id) dropped.\n\n" +
+		"--json emits the raw stream.jsonl lines verbatim, byte-for-byte: the machine " +
+		"form for `| jq` and replay. -f/--follow works in both modes.",
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()
 		if err != nil {
@@ -208,7 +216,7 @@ var ctlLogsCmd = &cobra.Command{
 		}
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return tailStream(ctx, cmd.OutOrStdout(), root.SessionStreamPath(ticket, att), ctlLogsFollow)
+		return tailStream(ctx, cmd.OutOrStdout(), root.SessionStreamPath(ticket, att), ctlLogsFollow, !ctlLogsJSON)
 	},
 }
 
@@ -255,43 +263,101 @@ func resolveCtlTarget(root store.Root, arg string) (string, string, error) {
 	return ticket, att, nil
 }
 
-// streamPrinter renders a live session's normalized events as concise one-liners
-// for a foreground start/restart. It is presentation only; the durable log and
+// streamPrinter renders a live session's normalized events for a foreground
+// start/restart. It is a thin adapter over renderEvent — the one shared renderer
+// `ctl logs` also reads the recorded stream back through — so live and replayed
+// output speak the same vocabulary. It is presentation only; the durable log and
 // meter are written by the dispatch pipeline underneath.
 func streamPrinter(out io.Writer) func(agent.Event) {
-	return func(ev agent.Event) {
-		switch ev.Kind {
-		case agent.EventSystem:
-			fmt.Fprintf(out, "  -- session %s online\n", ev.SessionID)
-		case agent.EventAssistant:
-			if ev.Thinking {
-				return
-			}
-			if s := strings.TrimSpace(ev.Text); s != "" {
-				fmt.Fprintf(out, "  %s\n", s)
-			}
-		case agent.EventToolCall:
-			if ev.Tool != nil {
+	return func(ev agent.Event) { renderEvent(out, ev) }
+}
+
+// renderEvent writes one normalized event as a concise, human-readable one-liner:
+// assistant prose, `> tool` calls (with a short argument snippet), tool errors,
+// permission prompts, usage/cost + context-window fill, and turn boundaries. It
+// deliberately drops transport fields — event uuids, the session id, envelope
+// wrappers — that a machine needs but a human reading the session does not. This
+// is the single renderer shared by the live start/restart view (streamPrinter)
+// and `ctl logs` reading the recorded stream.jsonl back off disk.
+func renderEvent(out io.Writer, ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventSystem:
+		// The session id is a transport handle, not something a human reading the
+		// stream needs; note only that the session came online.
+		fmt.Fprintln(out, "  -- session online")
+	case agent.EventAssistant:
+		if ev.Thinking {
+			return
+		}
+		if s := strings.TrimSpace(ev.Text); s != "" {
+			fmt.Fprintf(out, "  %s\n", s)
+		}
+	case agent.EventToolCall:
+		if ev.Tool != nil {
+			if s := toolSummary(ev.Tool.Input); s != "" {
+				fmt.Fprintf(out, "  > %s: %s\n", ev.Tool.Name, s)
+			} else {
 				fmt.Fprintf(out, "  > %s\n", ev.Tool.Name)
 			}
-		case agent.EventToolResult:
-			if ev.Tool != nil && ev.Tool.IsError {
-				fmt.Fprintf(out, "  ! %s failed\n", ev.Tool.Name)
-			}
-		case agent.EventPermission:
-			if ev.Permission != nil {
-				fmt.Fprintf(out, "  ? permission: %s\n", ev.Permission.Tool)
-			}
-		case agent.EventUsage:
-			if ev.Usage != nil {
-				fmt.Fprintf(out, "  -- %s, $%.4f\n", contextGauge(ev.Usage.ContextTokens, ctlContextWindow), ev.Usage.CostUSD)
-			}
-		case agent.EventTurnEnd:
-			fmt.Fprintf(out, "  -- turn end (%s)\n", ev.Turn)
-		case agent.EventError:
-			fmt.Fprintf(out, "  ! %s\n", ev.Err)
+		}
+	case agent.EventToolResult:
+		if ev.Tool != nil && ev.Tool.IsError {
+			fmt.Fprintf(out, "  ! %s failed\n", ev.Tool.Name)
+		}
+	case agent.EventPermission:
+		if ev.Permission != nil {
+			fmt.Fprintf(out, "  ? permission: %s\n", ev.Permission.Tool)
+		}
+	case agent.EventUsage:
+		if ev.Usage != nil {
+			fmt.Fprintf(out, "  -- %s, $%.4f\n", contextGauge(ev.Usage.ContextTokens, ctlContextWindow), ev.Usage.CostUSD)
+		}
+	case agent.EventTurnEnd:
+		fmt.Fprintf(out, "  -- turn end (%s)\n", ev.Turn)
+	case agent.EventError:
+		fmt.Fprintf(out, "  ! %s\n", ev.Err)
+	}
+}
+
+// toolSummary pulls a short, human-meaningful snippet out of a tool call's raw
+// input — the primary field most tools key on (a command, a path, a pattern) —
+// so a rendered `> tool` line shows what the call is doing, not just its name. It
+// stays a single short line; input it cannot read as one of those fields yields
+// "" and the caller prints the bare tool name.
+func toolSummary(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(input, &m) != nil {
+		return ""
+	}
+	for _, k := range []string{"command", "file_path", "path", "pattern", "url", "query", "description"} {
+		if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
+			return truncateOneLine(v, 72)
 		}
 	}
+	return ""
+}
+
+// truncateOneLine collapses a value to a single short line for a one-liner
+// render: it keeps only the first line and caps the length (rune-safe), marking
+// with an ellipsis whenever it dropped anything.
+func truncateOneLine(s string, max int) string {
+	s = strings.TrimSpace(s)
+	truncated := false
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+		truncated = true
+	}
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+		truncated = true
+	}
+	if truncated {
+		s += "…"
+	}
+	return s
 }
 
 // contextGauge renders the live context-window fill: an absolute token count and,
@@ -328,11 +394,15 @@ func commas(n int) string {
 	return b.String()
 }
 
-// tailStream prints a session's raw stream-json tee (stream.jsonl). Without
-// follow it prints what is on disk and returns; with follow it keeps printing
-// appended lines until ctx is cancelled (Ctrl-C), waiting for the file to appear
-// if the session has not been started yet.
-func tailStream(ctx context.Context, out io.Writer, path string, follow bool) error {
+// tailStream prints a session's recorded stream (stream.jsonl). In render mode —
+// the human-readable default — each raw stream-json line is normalized back into
+// events and printed through renderEvent, the same vocabulary the live view uses,
+// with transport noise dropped; in raw mode (--json) the lines are emitted
+// verbatim, byte-for-byte, so `| jq` pipelines keep working. Without follow it
+// prints what is on disk and returns; with follow it keeps emitting appended
+// lines until ctx is cancelled (Ctrl-C), waiting for the file to appear if the
+// session has not been started yet.
+func tailStream(ctx context.Context, out io.Writer, path string, follow, render bool) error {
 	f, err := openStream(ctx, path, follow)
 	if err != nil {
 		return err
@@ -348,10 +418,21 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow bool) er
 	defer f.Close()
 
 	r := bufio.NewReader(f)
+	var pending string // render mode only: bytes read past the last newline
 	for {
 		line, err := r.ReadString('\n')
 		if len(line) > 0 {
-			_, _ = io.WriteString(out, line)
+			switch {
+			case !render:
+				_, _ = io.WriteString(out, line)
+			case strings.HasSuffix(line, "\n"):
+				renderStreamLine(out, pending+line)
+				pending = ""
+			default:
+				// A partial trailing line (EOF before a newline): hold it until its
+				// newline arrives so we never try to parse half a JSON object.
+				pending += line
+			}
 		}
 		if err == nil {
 			continue
@@ -360,6 +441,9 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow bool) er
 			return err
 		}
 		if !follow {
+			if render && pending != "" {
+				renderStreamLine(out, pending)
+			}
 			return nil
 		}
 		select {
@@ -367,6 +451,15 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow bool) er
 			return nil
 		case <-time.After(300 * time.Millisecond):
 		}
+	}
+}
+
+// renderStreamLine normalizes one recorded stream-json line and renders the
+// events it yields; lines that carry only transport noise normalize to nothing
+// and print nothing.
+func renderStreamLine(out io.Writer, line string) {
+	for _, ev := range claudecode.Normalize([]byte(line)) {
+		renderEvent(out, ev)
 	}
 }
 
@@ -500,6 +593,7 @@ func init() {
 		c.Flags().StringToStringVar(&ctlPermRules, "permission", nil, "per-tool permission-gate override, e.g. --permission Bash=escalate (allow|escalate); layers over config")
 	}
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
+	ctlLogsCmd.Flags().BoolVar(&ctlLogsJSON, "json", false, "print the raw stream.jsonl lines verbatim (machine form for | jq / replay) instead of the human-readable rendering")
 	ctlCmd.AddCommand(ctlUpCmd, ctlStartCmd, ctlStopCmd, ctlRestartCmd, ctlStatusCmd, ctlLogsCmd)
 	rootCmd.AddCommand(ctlCmd)
 }
