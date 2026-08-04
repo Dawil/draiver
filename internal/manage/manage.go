@@ -251,6 +251,28 @@ func (h *Handle) Interrupt(ctx context.Context) error {
 	return a.Interrupt(ctx)
 }
 
+// Decide answers a pending tool-permission request back to the live session's
+// adapter, correlating by request id. It is the seam the reconcile loop's two
+// gates (internal/gate and internal/protocol, which both hold a Decider) use to
+// allow, withhold, or deny a call — the live adapter is the only thing that can
+// reach the agent's permission callback, and manage owns the adapter, so it
+// exposes this passthrough rather than leaking the adapter out.
+//
+// It errors if no session is live, or if the live adapter's agent has no
+// permission callback (it does not implement agent.Permissioner — e.g. one that
+// pre-authorizes tools via flags), in which case there is nothing to answer.
+func (h *Handle) Decide(ctx context.Context, requestID string, d agent.Decision) error {
+	a := h.live()
+	if a == nil {
+		return errors.New("manage: no live session to decide")
+	}
+	p, ok := a.(agent.Permissioner)
+	if !ok {
+		return errors.New("manage: live adapter has no permission callback")
+	}
+	return p.Decide(ctx, requestID, d)
+}
+
 // Identity returns the persisted session identity from session.json. It is
 // available even after Kill — reading the surviving cattle handle is the point.
 func (h *Handle) Identity() (session.Identity, error) {
