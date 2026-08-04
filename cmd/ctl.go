@@ -19,6 +19,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/agent/claudecode"
 	"github.com/Dawil/draiver/internal/config"
+	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -33,6 +34,7 @@ var (
 	ctlContextWindow int // -1 sentinel: resolve from config
 	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
+	ctlPermRules     map[string]string // --permission tool=rule, layered over config
 )
 
 // ctlCmd is the draiverctld client surface — the reconciling supervisor half of
@@ -423,17 +425,40 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	if ctlContextLimit >= 0 {
 		contextLimit = ctlContextLimit
 	}
+	permPolicy, err := resolvePermPolicy(cfg, ctlPermRules)
+	if err != nil {
+		return nil, err
+	}
 	return reconcile.New(reconcile.Options{
 		Root:         root,
 		Worktrees:    wm,
 		Adapters:     claudeAdapters,
 		Actor:        resolveActor(),
 		ContextLimit: contextLimit,
+		PermPolicy:   permPolicy,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
 		},
 	})
+}
+
+// resolvePermPolicy layers the permission gate's policy lowest→highest: the
+// allow-all base (auto mode) under the config file's overrides under the
+// --permission flag's one-offs. An empty config and no flag leave AllowAll —
+// Claude in auto mode, the local default — while either layer can escalate
+// specific tools or reset the default. An invalid rule string in either source is
+// surfaced as an error rather than silently defaulted.
+func resolvePermPolicy(cfg config.Config, flagRules map[string]string) (gate.Policy, error) {
+	cfgPolicy, err := gate.PolicyFromMap(cfg.PermissionsDefault, cfg.Permissions)
+	if err != nil {
+		return gate.Policy{}, fmt.Errorf("ctl: config permissions: %w", err)
+	}
+	flagPolicy, err := gate.PolicyFromMap("", flagRules)
+	if err != nil {
+		return gate.Policy{}, fmt.Errorf("ctl: --permission: %w", err)
+	}
+	return gate.Layer(gate.AllowAll(), cfgPolicy, flagPolicy), nil
 }
 
 // claudeAdapters resolves adapter names to factories. Tier 0 knows only Claude
@@ -470,6 +495,9 @@ func init() {
 	// start, restart. 0 disables it; -1 defers to the config (default 150000).
 	for _, c := range []*cobra.Command{ctlUpCmd, ctlStartCmd, ctlRestartCmd} {
 		c.Flags().IntVar(&ctlContextLimit, "context-limit", -1, "context-window auto-stop threshold (tokens); 0 disables (default from config, 150000)")
+		// --permission tool=rule (allow|escalate) is the one-off layer over the
+		// config file's permissions, itself over the allow-all auto-mode base.
+		c.Flags().StringToStringVar(&ctlPermRules, "permission", nil, "per-tool permission-gate override, e.g. --permission Bash=escalate (allow|escalate); layers over config")
 	}
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlCmd.AddCommand(ctlUpCmd, ctlStartCmd, ctlStopCmd, ctlRestartCmd, ctlStatusCmd, ctlLogsCmd)
