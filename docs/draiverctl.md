@@ -237,3 +237,91 @@ true.
   detection on repeated identical tool calls.
 - Worktree per session under the repo's `.git/worktrees`; cleaned on retire.
 - Claude Code is the first and reference adapter.
+
+## Future direction (tentative): runtimes & distribution
+
+> **Speculative — not part of the tiered plan above and not committed.** This
+> sketches *where the seams might go* if sessions ever need to run somewhere
+> other than the local machine (e.g. dev environments and agents in AWS). Tier 0
+> stays local; the only reason to write it down now is so the early interfaces
+> don't accidentally foreclose it. Everything here is provisional and may be
+> dropped.
+
+The open question: could a session's dev environment and agent run remotely
+(Fargate/EC2) instead of as a local subprocess, without rewriting the control
+plane? If so, there seem to be **two orthogonal seams** worth keeping distinct —
+adding only the first does *not* get you remote execution.
+
+- **Seam A — client ↔ control plane.** The webui and `draiverctl` CLI would stop
+  touching the filesystem/process table directly and instead hit an HTTP/gRPC API
+  mirroring the verbs. A **local** implementation embeds `draiverctld` in-process
+  (`draiverctl up` → webui hits localhost); a **remote** implementation points
+  the same clients at a hosted control plane. (Cf. `kube-apiserver`: one contract,
+  many clients.)
+- **Seam B — control plane ↔ runtime.** The reconcile loop wouldn't know *how* a
+  session is realized — local subprocess in a worktree, or a Fargate task with an
+  EBS volume. That would be a pluggable **Runtime driver**, distinct from the
+  **Agent adapter** (drvctl-001); the two axes compose ("Claude Code on Fargate"
+  vs "Aider locally"), with the adapter running *inside* the runtime. The nearest
+  prior art is Nomad's task drivers, not systemd.
+
+Tentative layering:
+
+```
+webui  /  draiverctl CLI            pure clients
+        │  Seam A: control-plane API (HTTP/gRPC)
+draiverctld  (reconcile loop, gates, watchdog)
+        │  Seam B: Runtime driver
+   ┌────┴─────┐
+ local        aws          × Agent adapter { claude-code | aider | codex }
+subprocess  Fargate/EC2
++ worktree  + EBS/EFS
+        │
+Data plane: append-only log   { fs | S3 }   the shared source of truth
+```
+
+Two interfaces would carry it (sketches, not signatures):
+
+```go
+// Seam B — where/how a session runs. Env is separate from Session on purpose:
+// the Env (VM/container/worktree) can outlive the agent (cattle), so a warm
+// respawn need not reprovision the box.
+type Runtime interface {
+    Provision(ctx, EnvSpec) (Env, error)          // worktree locally; container/EC2 remotely
+    Spawn(ctx, Env, AgentSpec) (Session, error)   // start the adapter inside that Env
+    Attach(ctx, SessionRef) (Stream, error)       // re-adopt a live session after a ctld restart
+    Signal(ctx, SessionRef, Sig) error            // interrupt / kill
+    Teardown(ctx, Env) error
+}
+
+// Seam A — the verbs as a network contract. local impl embeds draiverctld;
+// remote impl is an RPC client. webui + CLI depend only on this.
+type ControlPlane interface { /* Start/Stop/Restart/Status/Logs/Enable ... */ }
+```
+
+**Why this might stay cheap:** because the log is already the portable source of
+truth, *reads* never need the control plane — only *mutations* do. The webui can
+render a live board straight from the log backend (that is today's read-only
+`draiver webui`; pointed at an S3 root it would work remotely with no server-side
+execution). Seam A's API is only on the write path.
+
+If it were ever built, two consequences look load-bearing:
+
+1. **Single writer per attempt.** Remote executors should *relay* their
+   stream-json to the control plane and let it own the log append — one writer, a
+   coherent hash chain, and no data-backend credentials at the untrusted edge.
+2. **The cattle boundary sits below the Env.** Separating `Provision` (env) from
+   `Spawn` (agent) lets an agent be killed and `--resume`d into a *warm* remote
+   env without paying to reprovision — the same "agents are cattle, envs are
+   longer-lived" split, whether the env is a cheap worktree or an expensive VM.
+
+Open worries if this is ever picked up: the cost meter gains an infra dimension
+(compute hours alongside tokens); remote executors need repo credentials and
+egress (a real security boundary the local runtime lacks); and the whole thing is
+only worth it if local-first has already proven the model.
+
+**The one cheap hedge**, even while shipping local-only: consider writing
+drvctl-001/003/005 as *the local implementation of a `Runtime` driver* rather than
+as the runtime itself, so "run in AWS" could later be "add an `aws` driver" rather
+than a rewrite. Whether to pay even that small abstraction tax up front is
+undecided.

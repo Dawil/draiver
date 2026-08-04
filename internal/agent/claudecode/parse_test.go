@@ -1,0 +1,166 @@
+package claudecode
+
+import (
+	"testing"
+
+	"github.com/Dawil/draiver/internal/agent"
+)
+
+func TestNormalize_SingleLines(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []agent.Event
+	}{
+		{
+			name: "init frame becomes system event with session id",
+			line: `{"type":"system","subtype":"init","session_id":"sess-1","cwd":"/x","model":"opus"}`,
+			want: []agent.Event{{Kind: agent.EventSystem, SessionID: "sess-1"}},
+		},
+		{
+			name: "thinking_tokens system subtype is dropped",
+			line: `{"type":"system","subtype":"thinking_tokens","estimated_tokens":9,"session_id":"sess-1"}`,
+			want: nil,
+		},
+		{
+			name: "rate_limit_event is dropped",
+			line: `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"sess-1"}`,
+			want: nil,
+		},
+		{
+			name: "assistant text",
+			line: `{"type":"assistant","session_id":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":"OK"}]}}`,
+			want: []agent.Event{{Kind: agent.EventAssistant, SessionID: "sess-1", Text: "OK"}},
+		},
+		{
+			name: "assistant thinking sets the flag",
+			line: `{"type":"assistant","session_id":"sess-1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}]}}`,
+			want: []agent.Event{{Kind: agent.EventAssistant, SessionID: "sess-1", Text: "hmm", Thinking: true}},
+		},
+		{
+			name: "empty text block is skipped",
+			line: `{"type":"assistant","session_id":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":""}]}}`,
+			want: nil,
+		},
+		{
+			name: "tool_use becomes a tool_call carrying raw input",
+			line: `{"type":"assistant","session_id":"sess-1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"echo hi"}}]}}`,
+			want: []agent.Event{{
+				Kind: agent.EventToolCall, SessionID: "sess-1",
+				Tool: &agent.ToolEvent{ID: "toolu_1", Name: "Bash", Input: []byte(`{"command":"echo hi"}`)},
+			}},
+		},
+		{
+			name: "tool_result string content flattens to text",
+			line: `{"type":"user","session_id":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false,"content":"hi"}]}}`,
+			want: []agent.Event{{
+				Kind: agent.EventToolResult, SessionID: "sess-1",
+				Tool: &agent.ToolEvent{ID: "toolu_1", Result: "hi"},
+			}},
+		},
+		{
+			name: "tool_result array content concatenates text blocks",
+			line: `{"type":"user","session_id":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":[{"type":"text","text":"line1\n"},{"type":"text","text":"line2"}]}]}}`,
+			want: []agent.Event{{
+				Kind: agent.EventToolResult, SessionID: "sess-1",
+				Tool: &agent.ToolEvent{ID: "toolu_2", Result: "line1\nline2", IsError: true},
+			}},
+		},
+		{
+			name: "result closes the turn with status and cost",
+			line: `{"type":"result","subtype":"success","is_error":false,"result":"DONE.","total_cost_usd":0.01,"session_id":"sess-1"}`,
+			want: []agent.Event{{
+				Kind: agent.EventTurnEnd, SessionID: "sess-1", Result: "DONE.", Turn: "success",
+				Usage: &agent.Usage{CostUSD: 0.01},
+			}},
+		},
+		{
+			name: "malformed json becomes one error event",
+			line: `{not json`,
+			want: []agent.Event{{Kind: agent.EventError, Err: "decode stream-json: invalid character 'n' looking for beginning of object key string"}},
+		},
+		{
+			name: "blank line yields nothing",
+			line: "   ",
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalize([]byte(tt.line))
+			assertEvents(t, got, tt.want)
+		})
+	}
+}
+
+func TestNormalize_AssistantWithUsage(t *testing.T) {
+	line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}}`
+	got := normalize([]byte(line))
+	if len(got) != 2 {
+		t.Fatalf("want text + usage events, got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != agent.EventAssistant || got[0].Text != "hi" {
+		t.Errorf("first event = %+v, want assistant text", got[0])
+	}
+	u := got[1].Usage
+	if got[1].Kind != agent.EventUsage || u == nil {
+		t.Fatalf("second event = %+v, want usage", got[1])
+	}
+	if u.InputTokens != 10 || u.OutputTokens != 3 || u.CacheReadTokens != 100 || u.CacheCreationTokens != 50 {
+		t.Errorf("usage tokens = %+v", u)
+	}
+	if want := 10 + 100 + 50; u.ContextTokens != want {
+		t.Errorf("ContextTokens = %d, want %d", u.ContextTokens, want)
+	}
+}
+
+// assertEvents compares normalized events field-by-field, ignoring Raw (which
+// is just the untouched input line).
+func assertEvents(t *testing.T, got, want []agent.Event) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d events, want %d\n got=%+v\nwant=%+v", len(got), len(want), got, want)
+	}
+	for i := range want {
+		g, w := got[i], want[i]
+		g.Raw = nil
+		if g.Kind != w.Kind || g.SessionID != w.SessionID || g.Text != w.Text ||
+			g.Thinking != w.Thinking || g.Result != w.Result || g.Turn != w.Turn || g.Err != w.Err {
+			t.Errorf("event[%d] scalar mismatch:\n got=%+v\nwant=%+v", i, g, w)
+		}
+		assertTool(t, i, g.Tool, w.Tool)
+		assertUsage(t, i, g.Usage, w.Usage)
+	}
+}
+
+func assertTool(t *testing.T, i int, got, want *agent.ToolEvent) {
+	t.Helper()
+	if (got == nil) != (want == nil) {
+		t.Errorf("event[%d] tool presence: got=%v want=%v", i, got, want)
+		return
+	}
+	if want == nil {
+		return
+	}
+	if got.ID != want.ID || got.Name != want.Name || got.Result != want.Result || got.IsError != want.IsError {
+		t.Errorf("event[%d] tool = %+v, want %+v", i, got, want)
+	}
+	if string(got.Input) != string(want.Input) {
+		t.Errorf("event[%d] tool input = %s, want %s", i, got.Input, want.Input)
+	}
+}
+
+func assertUsage(t *testing.T, i int, got, want *agent.Usage) {
+	t.Helper()
+	if (got == nil) != (want == nil) {
+		t.Errorf("event[%d] usage presence: got=%v want=%v", i, got, want)
+		return
+	}
+	if want == nil {
+		return
+	}
+	if *got != *want {
+		t.Errorf("event[%d] usage = %+v, want %+v", i, *got, *want)
+	}
+}
