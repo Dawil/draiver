@@ -56,6 +56,30 @@ type Adapter interface {
 	Kill() error
 }
 
+// Permissioner is the optional capability of an adapter whose agent surfaces a
+// tool-permission callback: the agent asks "may I use this tool?" as an
+// EventPermission on Stream, and the supervisor answers it here by request id.
+// It is discovered by type-assertion, like the PID and SessionID accessors, so
+// the core Adapter stays the five control verbs — an agent without an
+// interactive permission callback (e.g. one that pre-authorizes via flags) need
+// not implement it.
+type Permissioner interface {
+	// Decide answers the pending PermissionRequest with the given id. Allowing
+	// lets the call proceed; denying stops it with Decision.Message as the reason
+	// the agent sees. It returns once the answer is handed to the agent.
+	Decide(ctx context.Context, requestID string, d Decision) error
+}
+
+// Decision answers a PermissionRequest. Allow lets the tool call proceed;
+// otherwise it is denied and Message is the reason surfaced to the agent. Input,
+// when non-nil on an allow, is the (possibly rewritten) call input to run — the
+// gate echoes the original request's input unchanged.
+type Decision struct {
+	Allow   bool
+	Message string
+	Input   json.RawMessage
+}
+
 // SessionSpec is the declarative description of a session to bring up — the
 // "unit file" fields the adapter needs. Everything is optional except WorkDir;
 // zero values mean "use the agent's default."
@@ -113,6 +137,11 @@ const (
 	// EventError reports a transport, decode, or process failure. Err is the
 	// message; it is not necessarily terminal (the channel closing is).
 	EventError EventKind = "error"
+	// EventPermission is the agent asking to use a tool its own policy will not
+	// auto-approve — the tool-permission callback surfaced as a stream event.
+	// Permission carries the ask; the supervisor's gate answers it (allow, or
+	// escalate-and-halt) via Permissioner.Decide, correlating by Permission.ID.
+	EventPermission EventKind = "permission"
 )
 
 // Event is one normalized item on a session's stream. It is a tagged union:
@@ -130,6 +159,9 @@ type Event struct {
 
 	// Tool (EventToolCall / EventToolResult).
 	Tool *ToolEvent `json:"tool,omitempty"`
+
+	// Permission (EventPermission): the tool-permission ask awaiting a Decision.
+	Permission *PermissionRequest `json:"permission,omitempty"`
 
 	// Usage (EventUsage), also attached to EventTurnEnd when the agent reports a
 	// final tally.
@@ -159,6 +191,15 @@ type ToolEvent struct {
 	// flattened to text.
 	Result  string `json:"result,omitempty"`
 	IsError bool   `json:"is_error,omitempty"`
+}
+
+// PermissionRequest is a pending tool-permission ask, carried by an
+// EventPermission. ID correlates the eventual Decision back to the agent; Tool
+// is the tool name the policy keys on, and Input is the call awaiting approval.
+type PermissionRequest struct {
+	ID    string          `json:"id"`
+	Tool  string          `json:"tool,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 // Usage is a normalized token/cost snapshot. ContextTokens is the size of the

@@ -80,6 +80,54 @@ func TestInterrupt(t *testing.T) {
 	}
 }
 
+// TestPermissionRequestAndDecide drives the tool-permission callback both ways:
+// the fake agent asks can_use_tool, the adapter surfaces it as an
+// EventPermission, and Decide writes a control_response the agent acts on.
+func TestPermissionRequestAndDecide(t *testing.T) {
+	a := helperAdapter()
+	ctx := context.Background()
+	if _, err := a.Spawn(ctx, agent.SessionSpec{WorkDir: t.TempDir()}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	_ = next(t, a) // system
+
+	if err := a.Prompt(ctx, "please run a gated tool"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	perm := next(t, a)
+	if perm.Kind != agent.EventPermission || perm.Permission == nil {
+		t.Fatalf("want a permission event, got %+v", perm)
+	}
+	if perm.Permission.ID != "perm-1" || perm.Permission.Tool != "Bash" {
+		t.Fatalf("permission = %+v, want id perm-1 tool Bash", perm.Permission)
+	}
+
+	// Adapter satisfies the optional Permissioner capability.
+	var p agent.Permissioner = a
+	if err := p.Decide(ctx, perm.Permission.ID, agent.Decision{Allow: true, Input: perm.Permission.Input}); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	asst := next(t, a)
+	if asst.Kind != agent.EventAssistant || asst.Text != "perm:allow" {
+		t.Fatalf("want assistant perm:allow after the decision, got %+v", asst)
+	}
+	if err := a.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+}
+
+func TestDecideNeedsRequestID(t *testing.T) {
+	a := helperAdapter()
+	if _, err := a.Spawn(context.Background(), agent.SessionSpec{WorkDir: t.TempDir()}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer a.Kill()
+	if err := a.Decide(context.Background(), "", agent.Decision{Allow: true}); err == nil {
+		t.Fatal("Decide with an empty request id should error")
+	}
+}
+
 func TestResumeEchoesID(t *testing.T) {
 	a := helperAdapter()
 	if err := a.Resume(context.Background(), "prior-session", agent.SessionSpec{WorkDir: t.TempDir()}); err != nil {
@@ -215,6 +263,18 @@ func TestHelperProcess(t *testing.T) {
 		switch {
 		case strings.Contains(line, `"control_request"`) && strings.Contains(line, `"interrupt"`):
 			fmt.Fprintf(out, `{"type":"result","subtype":"interrupted","is_error":false,"result":"","session_id":%q}`+"\n", sessionID)
+		case strings.Contains(line, `"control_response"`):
+			// The client answered our can_use_tool callback: echo the behavior back
+			// as assistant text so the adapter test can observe the round-trip.
+			behavior := "deny"
+			if strings.Contains(line, `"allow"`) {
+				behavior = "allow"
+			}
+			fmt.Fprintf(out, `{"type":"assistant","session_id":%q,"message":{"role":"assistant","content":[{"type":"text","text":"perm:%s"}]}}`+"\n", sessionID, behavior)
+			fmt.Fprintf(out, `{"type":"result","subtype":"success","is_error":false,"result":"perm:%s","session_id":%q}`+"\n", behavior, sessionID)
+		case strings.Contains(line, `"type":"user"`) && strings.Contains(line, "gated"):
+			// Ask permission for a gated tool instead of answering directly.
+			fmt.Fprintf(out, `{"type":"control_request","request_id":"perm-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}`+"\n")
 		case strings.Contains(line, `"type":"user"`):
 			fmt.Fprintf(out, `{"type":"assistant","session_id":%q,"message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}`+"\n", sessionID)
 			fmt.Fprintf(out, `{"type":"result","subtype":"success","is_error":false,"result":"pong","total_cost_usd":0.001,"session_id":%q}`+"\n", sessionID)
