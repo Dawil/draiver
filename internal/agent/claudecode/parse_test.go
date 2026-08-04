@@ -115,6 +115,39 @@ func TestNormalize_AssistantWithUsage(t *testing.T) {
 	}
 }
 
+func TestNormalize_CanUseToolBecomesPermission(t *testing.T) {
+	line := `{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"}}}`
+	got := normalize([]byte(line))
+	if len(got) != 1 {
+		t.Fatalf("want 1 permission event, got %d: %+v", len(got), got)
+	}
+	ev := got[0]
+	if ev.Kind != agent.EventPermission {
+		t.Fatalf("kind = %q, want permission", ev.Kind)
+	}
+	if ev.Permission == nil {
+		t.Fatal("permission payload is nil")
+	}
+	if ev.Permission.ID != "req-1" || ev.Permission.Tool != "Bash" {
+		t.Errorf("permission = %+v, want id req-1 tool Bash", ev.Permission)
+	}
+	if string(ev.Permission.Input) != `{"command":"rm -rf /"}` {
+		t.Errorf("permission input = %s", ev.Permission.Input)
+	}
+	if len(ev.Raw) == 0 {
+		t.Error("permission event dropped its raw line")
+	}
+}
+
+func TestNormalize_OtherControlRequestsDropped(t *testing.T) {
+	// A control_request the adapter does not model (not can_use_tool) yields
+	// nothing, like other unmodeled frames.
+	line := `{"type":"control_request","request_id":"r2","request":{"subtype":"mcp_message","server":"x"}}`
+	if got := normalize([]byte(line)); got != nil {
+		t.Fatalf("want nil for an unmodeled control_request, got %+v", got)
+	}
+}
+
 // assertEvents compares normalized events field-by-field, ignoring Raw (which
 // is just the untouched input line).
 func assertEvents(t *testing.T, got, want []agent.Event) {

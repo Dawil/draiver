@@ -198,6 +198,40 @@ func (a *Adapter) Interrupt(ctx context.Context) error {
 	return a.writeLine(line)
 }
 
+// Decide answers a tool-permission callback (an EventPermission carrying the
+// request id) by writing a control_response frame back to the session. Allowing
+// echoes the (possibly rewritten) input as updatedInput; denying carries the
+// reason the agent sees. It satisfies agent.Permissioner.
+func (a *Adapter) Decide(ctx context.Context, requestID string, d agent.Decision) error {
+	if requestID == "" {
+		return errors.New("claudecode: decide needs a request id")
+	}
+	var pd permissionDecision
+	if d.Allow {
+		pd.Behavior = "allow"
+		pd.UpdatedInput = d.Input
+	} else {
+		pd.Behavior = "deny"
+		pd.Message = d.Message
+	}
+	payload, err := json.Marshal(pd)
+	if err != nil {
+		return fmt.Errorf("claudecode: encode permission decision: %w", err)
+	}
+	line, err := json.Marshal(controlResponse{
+		Type: "control_response",
+		Response: controlResponseBody{
+			Subtype:   "success",
+			RequestID: requestID,
+			Response:  payload,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("claudecode: encode control_response: %w", err)
+	}
+	return a.writeLine(line)
+}
+
 // writeLine appends a newline and writes one stream-json frame to stdin under
 // the lock, so Prompt and Interrupt never interleave partial lines.
 func (a *Adapter) writeLine(line []byte) error {
@@ -338,6 +372,29 @@ type controlRequest struct {
 
 type controlBody struct {
 	Subtype string `json:"subtype"`
+}
+
+// controlResponse answers an inbound control_request (e.g. the can_use_tool
+// permission callback). Response.Response carries the subtype-specific payload —
+// for a permission callback, a marshalled permissionDecision.
+type controlResponse struct {
+	Type     string              `json:"type"`
+	Response controlResponseBody `json:"response"`
+}
+
+type controlResponseBody struct {
+	Subtype   string          `json:"subtype"` // "success"
+	RequestID string          `json:"request_id"`
+	Response  json.RawMessage `json:"response"`
+}
+
+// permissionDecision is the can_use_tool response payload. Behavior is "allow"
+// or "deny"; UpdatedInput is the call input to run on allow, Message the reason
+// on deny.
+type permissionDecision struct {
+	Behavior     string          `json:"behavior"`
+	UpdatedInput json.RawMessage `json:"updatedInput,omitempty"`
+	Message      string          `json:"message,omitempty"`
 }
 
 // newUUID returns a random RFC-4122 v4 UUID string without pulling in a

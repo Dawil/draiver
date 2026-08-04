@@ -96,10 +96,46 @@ func normalize(line []byte) []agent.Event {
 	case "result":
 		return normalizeResult(line, raw)
 
+	case "control_request":
+		// The only inbound control request we model is the tool-permission
+		// callback (can_use_tool); other control subtypes are not modeled.
+		return normalizeControlRequest(line, raw)
+
 	default:
 		// rate_limit_event, control_response, and anything future: not modeled.
 		return nil
 	}
+}
+
+// wireControlRequest is the inbound control frame Claude sends to ask the client
+// something mid-turn. Only the can_use_tool subtype — the permission callback —
+// is modeled; it carries the tool name and the input awaiting approval.
+type wireControlRequest struct {
+	RequestID string `json:"request_id"`
+	Request   struct {
+		Subtype  string          `json:"subtype"`
+		ToolName string          `json:"tool_name"`
+		Input    json.RawMessage `json:"input"`
+	} `json:"request"`
+}
+
+func normalizeControlRequest(line []byte, raw json.RawMessage) []agent.Event {
+	var cr wireControlRequest
+	if err := json.Unmarshal(line, &cr); err != nil {
+		return []agent.Event{{Kind: agent.EventError, Err: "decode control_request: " + err.Error(), Raw: raw}}
+	}
+	if cr.Request.Subtype != "can_use_tool" {
+		return nil
+	}
+	return []agent.Event{{
+		Kind: agent.EventPermission,
+		Raw:  raw,
+		Permission: &agent.PermissionRequest{
+			ID:    cr.RequestID,
+			Tool:  cr.Request.ToolName,
+			Input: cr.Request.Input,
+		},
+	}}
 }
 
 func normalizeMessage(env wireEnvelope, raw json.RawMessage) []agent.Event {
