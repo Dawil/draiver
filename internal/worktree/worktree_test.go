@@ -16,6 +16,9 @@ func newRepo(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	// The default managed base lives under the user cache dir; point it at a temp
+	// dir so tests never write into the real ~/.cache.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -293,15 +296,35 @@ func TestCreateRejectsUnsafeKeys(t *testing.T) {
 	}
 }
 
-func TestBaseDefaultsUnderGitDir(t *testing.T) {
-	m := newManager(t)
-	want := filepath.Join("draiver", "worktrees")
-	if !strings.HasSuffix(m.Base(), want) {
-		t.Errorf("base %q does not end in %q", m.Base(), want)
+func TestBaseDefaultsOutsideRepoAndGit(t *testing.T) {
+	repo := newRepo(t) // sets XDG_CACHE_HOME to a temp dir
+	m, err := NewManager(repo)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
 	}
-	// It lives under the repo's .git.
-	if !strings.Contains(m.Base(), string(filepath.Separator)+".git"+string(filepath.Separator)) {
-		t.Errorf("base %q not under .git", m.Base())
+	want := filepath.Join("draiver", "worktrees")
+	if !strings.Contains(m.Base(), want) {
+		t.Errorf("base %q does not contain %q", m.Base(), want)
+	}
+	// The base must NOT sit under .git — a coding agent's auto-mode classifier
+	// refuses to write there (drvctl-010).
+	if strings.Contains(m.Base(), string(filepath.Separator)+".git"+string(filepath.Separator)) {
+		t.Errorf("base %q is under .git", m.Base())
+	}
+	// Nor inside the repository's working tree, so checkouts never risk an
+	// accidental commit and need no .gitignore.
+	repoAbs, err := filepath.Abs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(m.Base(), repoAbs+string(filepath.Separator)) {
+		t.Errorf("base %q is inside the repo working tree %q", m.Base(), repoAbs)
+	}
+	// It lives under the (temp-redirected) user cache dir.
+	if cache, err := os.UserCacheDir(); err == nil {
+		if !strings.HasPrefix(m.Base(), filepath.Join(cache, "draiver", "worktrees")+string(filepath.Separator)) {
+			t.Errorf("base %q not under %q", m.Base(), filepath.Join(cache, "draiver", "worktrees"))
+		}
 	}
 }
 

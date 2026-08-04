@@ -3,11 +3,16 @@
 // competing attempts stay comparable. It is the isolation primitive the
 // supervisor's Admit (spawn) and Retire steps depend on.
 //
-// A session's worktree checkout lives under a repo-local managed base —
-// <git-common-dir>/draiver/worktrees/<ticket>/<attempt> — on a branch named
-// draiver/<ticket>/<attempt>. Placing checkouts under .git keeps them out of the
-// working tree (no .gitignore, no accidental commits) without colliding with
-// git's own per-worktree admin area at .git/worktrees/<name>.
+// A session's worktree checkout lives under a per-user, per-repo managed base —
+// <user-cache-dir>/draiver/worktrees/<repo-label>-<hash>/<ticket>/<attempt> — on
+// a branch named draiver/<ticket>/<attempt>. The base sits *outside* the
+// repository: that keeps checkouts out of the tracked working tree (no
+// .gitignore, no accidental commits) while also keeping them out of .git, which a
+// coding agent's auto-mode permission classifier treats as protected and refuses
+// to write into (drvctl-010). The base is derived deterministically from the
+// repo's git-common-dir, so the stateless Manager re-computes the same location
+// after a restart; the per-attempt branch lives in the repo's refs, so a checkout
+// swept from the cache is recreated by re-attaching to it.
 //
 // The three verbs mirror the reconcile loop: Create on Admit, Remove on Retire,
 // and Reconcile on a daemon restart to clean worktrees left behind by a crash.
@@ -20,6 +25,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -91,7 +98,8 @@ type Manager struct {
 type Option func(*Manager)
 
 // WithBase overrides the managed base directory (absolute or relative to the
-// repo). The default is <git-common-dir>/draiver/worktrees.
+// repo). The default is the per-repo directory defaultBase derives under the user
+// cache dir.
 func WithBase(dir string) Option { return func(m *Manager) { m.base = dir } }
 
 // NewManager resolves the managed base for repo (any path inside the target
@@ -113,12 +121,37 @@ func NewManager(repo string, opts ...Option) (*Manager, error) {
 		return nil, fmt.Errorf("worktree: %s is not a git repository: %w", repo, err)
 	}
 	if m.base == "" {
-		m.base = filepath.Join(strings.TrimSpace(commonDir), "draiver", "worktrees")
+		base, err := defaultBase(strings.TrimSpace(commonDir))
+		if err != nil {
+			return nil, err
+		}
+		m.base = base
 	} else if !filepath.IsAbs(m.base) {
 		m.base = filepath.Join(abs, m.base)
 	}
 	m.base = filepath.Clean(m.base)
 	return m, nil
+}
+
+// defaultBase derives the managed base for a repo whose (absolute) git-common-dir
+// is commonDir. It lives under the user cache dir, keyed by a hash of commonDir,
+// so it is deterministic per repo yet unique across repos and clones that share
+// the cache. Being outside the repository keeps checkouts out of both the tracked
+// working tree and .git — the latter matters because a coding agent's auto-mode
+// permission classifier refuses to write under .git (drvctl-010). A human-legible
+// repo label is prepended for debuggability; the hash is what guarantees
+// uniqueness.
+func defaultBase(commonDir string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("worktree: locate user cache dir: %w", err)
+	}
+	sum := sha256.Sum256([]byte(commonDir))
+	// filepath.Dir of a standard ".../<repo>/.git" is the repo root; its base is a
+	// friendly label. It is only cosmetic — the hash disambiguates.
+	label := filepath.Base(filepath.Dir(commonDir))
+	id := label + "-" + hex.EncodeToString(sum[:])[:12]
+	return filepath.Join(cache, "draiver", "worktrees", id), nil
 }
 
 // Base is the managed base directory under which every checkout lives.

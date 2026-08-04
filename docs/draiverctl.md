@@ -235,7 +235,9 @@ true.
 - Respawn ceiling **on by default** (e.g. 3 respawns / 1h → escalate).
 - Progress watchdog default: no log event in **10 min** → suspect; loop
   detection on repeated identical tool calls.
-- Worktree per session under the repo's `.git/worktrees`; cleaned on retire.
+- Worktree per session under a per-repo base in the user cache dir (outside the
+  repo, so it is neither in the working tree nor under `.git` — the latter trips a
+  coding agent's auto-mode permission classifier); cleaned on retire.
 - Claude Code is the first and reference adapter.
 
 ## Future direction (tentative): runtimes & distribution
