@@ -154,6 +154,38 @@ func TestReviewAndDone(t *testing.T) {
 	}
 }
 
+// A decision logged against a Review attempt reopens it: Review -> Running,
+// with the decision body as the recorded reason. This is the first-class
+// Review -> Running transition — no escalate/resolve workaround.
+func TestDecisionAfterReviewReopensToRunning(t *testing.T) {
+	dir := newTicket(t)
+	root := store.Root{Dir: dir}
+
+	if _, code := run(t, "--data", dir, "--actor", "agent:x", "review", "PROJ-1", "claims done"); code != 0 {
+		t.Fatalf("review exited %d", code)
+	}
+	if m, _ := project.LoadAttempt(root, "PROJ-1", "0001"); m.State != project.Review {
+		t.Fatalf("state after review = %q want Review", m.State)
+	}
+
+	reason := "verification surfaced missing scope; back to work"
+	if out, code := run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", reason, "--type", "decision"); code != 0 {
+		t.Fatalf("log decision exited %d: %s", code, out)
+	}
+
+	m, err := project.LoadAttempt(root, "PROJ-1", "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.State != project.Running {
+		t.Errorf("state after reopening decision = %q want Running", m.State)
+	}
+	last := m.Events[len(m.Events)-1]
+	if last.Type != "decision" || last.Body != reason {
+		t.Errorf("reopen reason not recorded on the log: %+v", last)
+	}
+}
+
 // specTitle returns the title project derives from a written ticket's spec.md,
 // the same value the board shows.
 func specTitle(t *testing.T, dir, id string) string {

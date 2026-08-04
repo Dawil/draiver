@@ -83,7 +83,7 @@ The dashboard columns are the human's relationship to the ticket, weighted asymm
 
 * `Running` — agent working, no action. Rendered as a count.
 * `Needs me` — unresolved escalation. This is the board.
-* `Review` — agent claims done; a claim, not a fact. Load-bearing.
+* `Review` — agent claims done; a claim, not a fact. Load-bearing. Reversible: logging a `decision` against a `Review` attempt reopens it to `Running` (a first-class Review→Running transition), the decision text recording why — no escalate/resolve workaround.
 * `Done.`
 
 ## Auditability: hash-chained log
