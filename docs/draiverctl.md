@@ -147,6 +147,11 @@ inactive ───▶ spawning ───▶ briefing ───▶ working ──
 - `Review` and `Done` are the same load-bearing human gates draiver already
   defines; the daemon can open the PR on `review` but cannot self-transition to
   `Done`.
+- `Review → Running` is a first-class **reopen**: logging a `decision` against a
+  Review attempt sends it back to Running (the decision text is the recorded
+  reason), and the reconciler re-admits it like any Running+enabled attempt — no
+  escalate/resolve workaround. The reopen is human-initiated, so it is not a
+  daemon self-transition.
 
 ## draiverctld responsibilities (the reconcile loop)
 

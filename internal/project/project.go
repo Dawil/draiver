@@ -53,9 +53,19 @@ type Attempt struct {
 	OpenEscalations []event.Event // escalations with no later resolution
 }
 
+// isLifecycle reports whether an event type moves the control state: the last
+// such event (subject to the open-escalation override) decides the derived
+// state. `decision` is a lifecycle event so that logging one against a Review
+// attempt reopens it — as the latest lifecycle marker a `decision` displaces the
+// prior `review`, and since it is neither `done` nor `review` Derive falls
+// through to Running. That is the first-class Review → Running transition: a
+// human (or a resumed agent) revising a "done" claim writes a decision whose
+// text is the recorded reason, with no escalate/resolve workaround. Decisions
+// logged during ordinary work keep an already-Running attempt Running, so the
+// rule is invisible except when it reopens.
 func isLifecycle(t string) bool {
 	switch t {
-	case "escalation", "review", "done":
+	case "escalation", "review", "decision", "done":
 		return true
 	}
 	return false
@@ -63,7 +73,9 @@ func isLifecycle(t string) bool {
 
 // Derive computes the control state and the set of unresolved escalations from
 // an attempt's events (which must be in seq order). Precedence, first match
-// wins: Done > Needs me (open escalation) > Review > Running.
+// wins: Done > Needs me (open escalation) > Review > Running. A `decision`
+// logged after a `review` becomes the latest lifecycle marker and lands in the
+// default Running branch, returning a reviewed attempt to active work.
 func Derive(events []event.Event) (State, []event.Event) {
 	resolved := map[int]bool{}
 	for _, e := range events {

@@ -28,6 +28,11 @@ func TestDerive(t *testing.T) {
 		{"review claim", []event.Event{ev(1, "created"), ev(2, "review")}, Review, 0},
 		{"done is terminal", []event.Event{ev(1, "created"), ev(2, "review"), ev(3, "done")}, Done, 0},
 		{"open escalation outranks review", []event.Event{ev(1, "created"), ev(2, "review"), ev(3, "escalation")}, NeedsMe, 1},
+		// A decision logged after a review reopens the attempt: Review -> Running.
+		{"decision after review reopens to running", []event.Event{ev(1, "created"), ev(2, "review"), ev(3, "decision")}, Running, 0},
+		{"decision before review still reaches review", []event.Event{ev(1, "created"), ev(2, "decision"), ev(3, "review")}, Review, 0},
+		{"re-review after a reopening decision", []event.Event{ev(1, "created"), ev(2, "review"), ev(3, "decision"), ev(4, "review")}, Review, 0},
+		{"open escalation outranks a reopening decision", []event.Event{ev(1, "created"), ev(2, "review"), ev(3, "decision"), ev(4, "escalation")}, NeedsMe, 1},
 		{"reopened after resolution", []event.Event{ev(1, "created"), ev(2, "escalation"), ev(3, "resolution", 2), ev(4, "escalation")}, NeedsMe, 1},
 		{"two escalations one resolved", []event.Event{ev(1, "escalation"), ev(2, "escalation"), ev(3, "resolution", 1)}, NeedsMe, 1},
 	}

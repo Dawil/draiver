@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **First-class Review → Running reopen (drv-002).** A reviewed attempt can be
+  sent back to active work directly: logging a **`decision`** against an attempt
+  in **Review** reopens it to **Running**, the decision's own text recording why.
+  `decision` is now a lifecycle event in `project.Derive` — as the latest
+  lifecycle marker it displaces the prior `review`, so the state falls through to
+  Running; decisions logged during ordinary work keep an already-Running attempt
+  Running, so the rule is invisible except when it reopens. This removes the old
+  escalate-then-resolve workaround (which abused the human-question channel just
+  to nudge the state) — the reopen is now a named action, recorded with a reason a
+  fresh `brief` can read, and the board and per-attempt state projection show
+  Running afterward.
+
 - **Context-window auto-stop — a backstop that halts a runaway session
   (`draiverctl`, drvctl-012).** A session that grows its context window without
   bound keeps burning tokens (and money) until a human notices; `internal/limit`
