@@ -36,6 +36,66 @@ func TestReadOnlyAllowsReadsEscalatesRest(t *testing.T) {
 	}
 }
 
+func TestAllowAllApprovesEverything(t *testing.T) {
+	p := gate.AllowAll()
+	for _, tool := range []string{"Bash", "Edit", "Write", "WebFetch", "Read", "SomethingNew"} {
+		if got := p.Decide(tool); got != gate.Allow {
+			t.Errorf("AllowAll Decide(%s) = %q, want allow", tool, got)
+		}
+	}
+}
+
+func TestParseRule(t *testing.T) {
+	for _, s := range []string{"allow", "escalate"} {
+		if _, err := gate.ParseRule(s); err != nil {
+			t.Errorf("ParseRule(%q) errored: %v", s, err)
+		}
+	}
+	for _, s := range []string{"", "ALLOW", "deny", "yes"} {
+		if _, err := gate.ParseRule(s); err == nil {
+			t.Errorf("ParseRule(%q) = nil error, want rejection", s)
+		}
+	}
+}
+
+func TestPolicyFromMap(t *testing.T) {
+	p, err := gate.PolicyFromMap("escalate", map[string]string{"Read": "allow", "Bash": "escalate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Decide("Read"); got != gate.Allow {
+		t.Errorf("Decide(Read) = %q, want allow", got)
+	}
+	if got := p.Decide("Bash"); got != gate.Escalate {
+		t.Errorf("Decide(Bash) = %q, want escalate", got)
+	}
+	if got := p.Decide("Unlisted"); got != gate.Escalate {
+		t.Errorf("default lost: Decide(Unlisted) = %q, want escalate", got)
+	}
+
+	// Empty default leaves Default unset so a lower Layer shows through — layered
+	// under AllowAll, an unlisted tool is allowed, but a named escalate wins.
+	over, err := gate.PolicyFromMap("", map[string]string{"WebFetch": "escalate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	layered := gate.Layer(gate.AllowAll(), over)
+	if got := layered.Decide("Bash"); got != gate.Allow {
+		t.Errorf("auto-mode base lost: Decide(Bash) = %q, want allow", got)
+	}
+	if got := layered.Decide("WebFetch"); got != gate.Escalate {
+		t.Errorf("override lost: Decide(WebFetch) = %q, want escalate", got)
+	}
+
+	// An invalid rule (in the default or a tool) is a surfaced error.
+	if _, err := gate.PolicyFromMap("nope", nil); err == nil {
+		t.Error("PolicyFromMap accepted an invalid default rule")
+	}
+	if _, err := gate.PolicyFromMap("", map[string]string{"Bash": "sometimes"}); err == nil {
+		t.Error("PolicyFromMap accepted an invalid tool rule")
+	}
+}
+
 func TestLayerPrecedence(t *testing.T) {
 	global := gate.ReadOnly()                                              // Bash escalates
 	project := gate.Policy{Tools: map[string]gate.Rule{"Bash": gate.Allow}} // project trusts Bash

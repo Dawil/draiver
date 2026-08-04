@@ -38,6 +38,17 @@ type Config struct {
 	// fill crosses it is halted and the stop recorded as an escalation. 0 disables
 	// the auto-stop.
 	ContextLimit int `json:"context_limit"`
+
+	// PermissionsDefault is the permission-gate default rule ("allow" | "escalate")
+	// for any tool not named in Permissions. Empty leaves the gate's base default
+	// (auto-mode allow-all) in place. Validated into a gate.Policy by the caller.
+	PermissionsDefault string `json:"permissions_default"`
+
+	// Permissions is the per-tool permission-gate override: tool name → rule
+	// ("allow" | "escalate"). It layers over the allow-all base, so the common use
+	// is escalating a few sensitive tools (e.g. {"WebFetch": "escalate"}) while the
+	// rest stay auto-approved. Validated into a gate.Policy by the caller.
+	Permissions map[string]string `json:"permissions"`
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -54,8 +65,10 @@ func Default() Config {
 // context_limit: 0 to disable the auto-stop). A plain-int decode cannot make that
 // distinction, which is what makes "0 disables" expressible in the file at all.
 type file struct {
-	ContextWindow *int `json:"context_window"`
-	ContextLimit  *int `json:"context_limit"`
+	ContextWindow      *int              `json:"context_window"`
+	ContextLimit       *int              `json:"context_limit"`
+	PermissionsDefault *string           `json:"permissions_default"`
+	Permissions        map[string]string `json:"permissions"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -106,6 +119,12 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.ContextLimit != nil {
 		c.ContextLimit = *f.ContextLimit
+	}
+	if f.PermissionsDefault != nil {
+		c.PermissionsDefault = *f.PermissionsDefault
+	}
+	if f.Permissions != nil {
+		c.Permissions = f.Permissions
 	}
 	return c, nil
 }
