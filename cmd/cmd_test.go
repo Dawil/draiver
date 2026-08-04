@@ -222,6 +222,66 @@ func TestNewRequiresTitle(t *testing.T) {
 	}
 }
 
+// A title carrying YAML metacharacters (a colon, a quote) must survive
+// scaffolding into valid frontmatter and round-trip through the same read path
+// the board and brief use. Before the scaffolder quoted the value, an unquoted
+// `title: Foo: bar` produced invalid YAML and every later LoadAttempt died with
+// "mapping values are not allowed in this context".
+func TestNewTitleWithYAMLMetacharsRoundTrips(t *testing.T) {
+	cases := map[string]string{
+		"PROJ-COLON":  "Fix: the parser",
+		"PROJ-DQUOTE": `Handle "quoted" titles`,
+		"PROJ-SQUOTE": "It's a colon: really",
+		"PROJ-HASH":   "#leading-hash and: colon",
+	}
+	for id, title := range cases {
+		dir := t.TempDir()
+		if _, code := run(t, "--data", dir, "new", id, "--title", title); code != 0 {
+			t.Fatalf("new %s exited %d", id, code)
+		}
+		// LoadAttempt parses the spec frontmatter — it must not choke, and the
+		// title must come back byte-identical.
+		if got := specTitle(t, dir, id); got != title {
+			t.Errorf("%s title = %q, want %q", id, got, title)
+		}
+	}
+}
+
+// The project/team/assignee scaffold flags are free-text too, so a colon- or
+// quote-bearing value must also yield parseable frontmatter that round-trips.
+func TestNewFlagFieldsWithYAMLMetacharsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	code := 0
+	_, code = run(t, "--data", dir, "new", "PROJ-FLAGS", "--title", "Plain",
+		"--project", "Team: A", "--team", `He said "go"`, "--assignee", "a:b")
+	if code != 0 {
+		t.Fatalf("new exited %d", code)
+	}
+	// An unquoted `project: Team: A` line would make the whole frontmatter block
+	// invalid, so LoadAttempt parsing at all proves every field encoded safely;
+	// Assignee (the one flag field on Attempt) additionally checks the round-trip.
+	m, err := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-FLAGS", "0001")
+	if err != nil {
+		t.Fatalf("LoadAttempt choked on flag metacharacters: %v", err)
+	}
+	if m.Assignee != "a:b" {
+		t.Errorf("assignee = %q, want %q", m.Assignee, "a:b")
+	}
+}
+
+// The `title` command shares injectTitle with `new --spec`, so a colon- or
+// quote-bearing retitle must also produce parseable frontmatter.
+func TestTitleCommandWithYAMLMetacharsRoundTrips(t *testing.T) {
+	dir := newTicket(t)
+	want := `Rename to "Board": v2`
+	if _, code := run(t, "--data", dir, "title", "PROJ-1", want); code != 0 {
+		t.Fatalf("title exited %d", code)
+	}
+	if got := specTitle(t, dir, "PROJ-1"); got != want {
+		t.Errorf("title = %q, want %q", got, want)
+	}
+}
+
 // Supplying a title from both sources is ambiguous and rejected.
 func TestNewRejectsDoubleTitle(t *testing.T) {
 	dir := t.TempDir()

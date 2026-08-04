@@ -112,15 +112,32 @@ func buildSpec(id string) ([]byte, error) {
 	return scaffoldSpec(id, flagTitle), nil
 }
 
+// yamlLine renders a single `key: value` frontmatter line with the value encoded
+// YAML-safely. It marshals via yaml.v3 rather than hand-formatting, so a value
+// carrying a colon, quote, leading `#`, or any other metacharacter can't produce
+// invalid frontmatter (which every later status/brief/webui would choke on).
+// Plain values marshal unquoted, so ordinary values stay verbatim.
+func yamlLine(key, val string) string {
+	out, err := yaml.Marshal(map[string]string{key: val})
+	if err != nil {
+		// Marshalling a string-valued map does not fail; guard defensively so a
+		// future change here can never silently drop the value.
+		return key + ": " + val
+	}
+	return strings.TrimRight(string(out), "\n")
+}
+
 // scaffoldSpec renders a fresh spec.md with identity frontmatter and a stub body.
 func scaffoldSpec(id, title string) []byte {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "id: %s\n", id)
-	fmt.Fprintf(&b, "title: %s\n", title)
-	fmt.Fprintf(&b, "project: %s\n", newProject)
-	fmt.Fprintf(&b, "team: %s\n", newTeam)
-	fmt.Fprintf(&b, "assignee: %s\n", newAssignee)
+	// title/project/team/assignee are free-text (title and the latter three are
+	// user-supplied flags), so each goes through yamlLine to stay valid YAML.
+	b.WriteString(yamlLine("title", title) + "\n")
+	b.WriteString(yamlLine("project", newProject) + "\n")
+	b.WriteString(yamlLine("team", newTeam) + "\n")
+	b.WriteString(yamlLine("assignee", newAssignee) + "\n")
 	fmt.Fprintf(&b, "created: %s\n", time.Now().UTC().Format(time.RFC3339))
 	b.WriteString("---\n\n")
 	fmt.Fprintf(&b, "# %s\n\n", title)
@@ -158,7 +175,7 @@ func frontmatterTitle(data []byte) string {
 // key. A file with no frontmatter gets a fresh block prepended.
 func injectTitle(data []byte, title string) []byte {
 	s := string(data)
-	titleLine := "title: " + title
+	titleLine := yamlLine("title", title)
 	if !strings.HasPrefix(s, "---\n") {
 		return []byte("---\n" + titleLine + "\n---\n\n" + s)
 	}
