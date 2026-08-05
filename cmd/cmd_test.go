@@ -22,10 +22,11 @@ func run(t *testing.T, args ...string) (string, int) {
 	logType = ""
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
-	newTool, newModel = "", ""
-	attemptTool, attemptModel, attemptFrom = "", "", ""
+	newTool, newModel, newRepo = "", "", ""
+	attemptTool, attemptModel, attemptFrom, attemptRepo = "", "", "", ""
 	inboxMine = false
 	ctlLogsFollow, ctlLogsJSON = false, false
+	ctlStatusAll = false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 
 	var out bytes.Buffer
@@ -46,11 +47,13 @@ func run(t *testing.T, args ...string) (string, int) {
 	return out.String(), code
 }
 
-// newTicket creates a data root and a ticket "PROJ-1", returning the root.
+// newTicket creates a data root and a ticket "PROJ-1", returning the root. The
+// repo path is a required attribute now (drvctl-017); the data dir doubles as a
+// placeholder since these tests never bring the attempt up.
 func newTicket(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-1", "--title", "Test"); code != 0 {
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-1", "--title", "Test", "--repo", dir); code != 0 {
 		t.Fatalf("new exited %d", code)
 	}
 	return dir
@@ -204,7 +207,7 @@ func TestSpecImportInjectsTitle(t *testing.T) {
 	dir := t.TempDir()
 	specFile := filepath.Join(dir, "imported.md")
 	os.WriteFile(specFile, []byte("# Imported design\n\nbody"), 0o644)
-	if _, code := run(t, "--data", dir, "new", "PROJ-2", "--spec", specFile, "--title", "Real Title"); code != 0 {
+	if _, code := run(t, "--data", dir, "new", "PROJ-2", "--spec", specFile, "--title", "Real Title", "--repo", dir); code != 0 {
 		t.Fatalf("new --spec --title exited %d", code)
 	}
 	got, _ := os.ReadFile(store.Root{Dir: dir}.SpecPath("PROJ-2"))
@@ -221,7 +224,7 @@ func TestSpecImportUsesFrontmatterTitle(t *testing.T) {
 	dir := t.TempDir()
 	specFile := filepath.Join(dir, "imported.md")
 	os.WriteFile(specFile, []byte("---\ntitle: From Frontmatter\n---\n\nbody"), 0o644)
-	if _, code := run(t, "--data", dir, "new", "PROJ-3", "--spec", specFile); code != 0 {
+	if _, code := run(t, "--data", dir, "new", "PROJ-3", "--spec", specFile, "--repo", dir); code != 0 {
 		t.Fatalf("new --spec exited %d", code)
 	}
 	if got := specTitle(t, dir, "PROJ-3"); got != "From Frontmatter" {
@@ -255,6 +258,26 @@ func TestNewRequiresTitle(t *testing.T) {
 	}
 }
 
+// A title but no --repo is rejected, and nothing is written — the repo is a
+// required attribute now (drvctl-017), refused up front with no orphan.
+func TestNewRequiresRepo(t *testing.T) {
+	dir := t.TempDir()
+	if _, code := run(t, "--data", dir, "new", "PROJ-6", "--title", "Has a title"); code == 0 {
+		t.Error("expected nonzero exit creating a repo-less ticket")
+	}
+	if (store.Root{Dir: dir}).Exists("PROJ-6") {
+		t.Error("rejected new left an orphan ticket dir")
+	}
+
+	// A whitespace-only --repo counts as unset.
+	if _, code := run(t, "--data", dir, "new", "PROJ-6", "--title", "Has a title", "--repo", "   "); code == 0 {
+		t.Error("expected nonzero exit for a whitespace-only repo")
+	}
+	if (store.Root{Dir: dir}).Exists("PROJ-6") {
+		t.Error("rejected new left an orphan ticket dir")
+	}
+}
+
 // A title carrying YAML metacharacters (a colon, a quote) must survive
 // scaffolding into valid frontmatter and round-trip through the same read path
 // the board and brief use. Before the scaffolder quoted the value, an unquoted
@@ -269,7 +292,7 @@ func TestNewTitleWithYAMLMetacharsRoundTrips(t *testing.T) {
 	}
 	for id, title := range cases {
 		dir := t.TempDir()
-		if _, code := run(t, "--data", dir, "new", id, "--title", title); code != 0 {
+		if _, code := run(t, "--data", dir, "new", id, "--title", title, "--repo", dir); code != 0 {
 			t.Fatalf("new %s exited %d", id, code)
 		}
 		// LoadAttempt parses the spec frontmatter — it must not choke, and the
@@ -285,7 +308,7 @@ func TestNewTitleWithYAMLMetacharsRoundTrips(t *testing.T) {
 func TestNewFlagFieldsWithYAMLMetacharsRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	code := 0
-	_, code = run(t, "--data", dir, "new", "PROJ-FLAGS", "--title", "Plain",
+	_, code = run(t, "--data", dir, "new", "PROJ-FLAGS", "--title", "Plain", "--repo", dir,
 		"--project", "Team: A", "--team", `He said "go"`, "--assignee", "a:b")
 	if code != 0 {
 		t.Fatalf("new exited %d", code)

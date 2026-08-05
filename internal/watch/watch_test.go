@@ -20,7 +20,7 @@ func newWatcher(t *testing.T) (*Watcher, store.Root, string, string, *session.St
 	if err := root.EnsureTicketDir(ticket); err != nil {
 		t.Fatal(err)
 	}
-	m, err := attempt.Create(root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Actor: "human:x"})
+	m, err := attempt.Create(root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Repo: "/repo", Actor: "human:x"})
 	if err != nil {
 		t.Fatal(err)
 	}

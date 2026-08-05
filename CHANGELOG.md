@@ -7,6 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Session lifecycle verbs recast around a state-stack "degree axis", and the
+  imperative verbs now hand off to the daemon (`draiverctl`, drvctl-016).**
+  `start`/`stop`/`restart` were an ad-hoc foreground driver: the resume path blindly
+  `--resume`'d any recorded session id — so an id that could no longer be resumed
+  was retried forever with no exit but a manual `rm -rf …/session/` — while
+  `restart` resumed the same id yet force-fed a fresh brief, neither a clean
+  continue nor a clean fresh start. Bring-up is now one **self-heal cascade** that
+  climbs from the highest surviving layer: a recorded session is Resumed and
+  **confirmed online** (the first `system`/init frame, via a new adapter-agnostic
+  `agent.Onliner` seam); an id that no longer resumes has its dead process reaped
+  and falls through to a fresh `Spawn` on the same worktree. **Brief-on-reset** is
+  coupled to that: a fresh spawn is cold-started from the brief, a resume continues
+  without a re-brief — so the "restart re-briefs a resume" incoherence is gone.
+- **`restart` is now flush-to-depth + that same climb, with the reset depth named
+  explicitly (`draiverctl`, drvctl-016).** A single ordinal flush runs before the
+  cascade climbs back, so all points on the axis share one path: `--new-session`
+  (clear the session id → respawn fresh on the same worktree, cold-started),
+  `--new-worktree` (also rebuild the checkout from HEAD, discarding uncommitted
+  work by design), and `--new-attempt` (fork a child attempt via
+  `attempt.Create{From}`, inheriting tool/model/repo, the parent log preserved
+  immutably with a fork note). Deepest flag wins; every destructive reset records a
+  durable note so it is never silent. The old "context refresh" framing is dropped.
+- **`start`/`restart`/`enable --now` are imperative-transient control-plane actions
+  that hand an attempt to a running `ctl up` (`draiverctl`, drvctl-016).** The
+  self-heal cascade and brief-on-reset coupling now live only in the daemon-shared
+  bring-up path, so the client verbs cannot drift from the fleet. `ctl up` claims a
+  **controller pidfile** (`controller.json` — pid, boot nonce, started; removed on
+  clean exit, liveness-probed so a stale record never passes for a running daemon)
+  and prints its pid on startup. `start`/`restart` **require a live controller**
+  (they error if none is up, and `restart` never reaps a session it cannot hand
+  back), then stamp a per-attempt **desired-marker** with the daemon's boot nonce —
+  transient by construction, swept when the daemon restarts, so they never leave an
+  unsupervised orphan; the verb prints a handoff and returns (watch via `ctl logs
+  -f`). `stop` reaps and removes the marker, leaving the imperative fleet, while a
+  spent-but-still-desired run is re-admitted by the daemon. `start --new-attempt`
+  forks a parallel branch and leaves the parent running; `restart --new-attempt`
+  parks the parent so only the fork runs.
+
+## [0.2.2] - 2026-08-06
+
+### Added
+
+- **`draiver --version`, single-sourced from the changelog (drv-006).** The CLI
+  could not report its version — `rootCmd` set no cobra `Version` — and the two
+  version records that existed (this changelog and the git tags) had already
+  drifted. `internal/version.FromChangelog` now parses the topmost
+  non-`[Unreleased]` `## [x.y.z]` header, `main` embeds `CHANGELOG.md` (the
+  `//go:embed` must live in the repo-root package, as it cannot reach a parent
+  dir from `cmd/` or `internal/`) and hands it to `cmd.SetVersion`. That sets
+  `rootCmd.Version` — cobra gives `--version` for free — and the value the
+  long-running banners prefix their startup line with, so `ctl up` and `webui`
+  now report `draiverctld 0.2.2 up — …` / `draiver 0.2.2 webui …` from the same
+  source. The reported version *is* the changelog's latest released section; the
+  two cannot drift by construction.
+
+- **Session-liveness dot on dashboard cards (`draiver webui`, drvweb-001).** Each
+  attempt card gains a coloured runtime-liveness dot: eucalypt green (agent
+  running — live pid), wattle gold (stopped — session exists, dead pid, still
+  enabled), ghost-gum grey (disabled — dead pid, not enabled). A never-run or a
+  Stuck attempt shows no dot (its rust-red signals already carry it). The
+  read-only web server does its own signal-0 pid probe (mirroring
+  `reconcile.OSProc.Alive`) and reads `session.json` directly — never
+  `session.Open`, which would `MkdirAll` a session dir per attempt. The
+  Australian-bush colours are centralised in `internal/web/palette.go`: favicon
+  SVGs stay static behind a drift test, and the dot colours reach the browser as
+  `:root --dot-*` custom properties rendered from the constants, so `style.css`
+  carries no dot hex.
+
+### Changed
+
+- **Attempt-log timestamps render as relative age, full stamp on hover
+  (`draiver webui`, drvweb-002).** The attempt timeline showed each event's
+  timestamp as a raw minute-precision UTC string (`2006-01-02 15:04Z`), forcing
+  readers to mentally diff wall-clock strings and discarding sub-minute ordering.
+  Each entry now renders a relative age instead — "just now", "3 minutes ago",
+  "yesterday", … — inside a `<time>` element whose native `title` tooltip carries
+  the precise second-precision UTC stamp alongside the operator's local time.
+  `static/reltime.js` recomputes the age from the `datetime` attribute on load,
+  after every htmx log-swap, and on a 30s tick, so the age stays live even on a
+  Done attempt whose log region never polls. The Go `relativeAge` and the JS
+  share one set of bucket boundaries, each pinned by a test
+  (`TestRelativeAgeBuckets`, `TestTimelineShowsRelativeTimestamps`).
+
+- **`ctl status` hides Done attempts by default; `--all`/`-a` includes them
+  (`draiverctl`, drvctl-018).** The live view printed one row per attempt,
+  terminal Done ones included, so as closed tickets pile up they drown the
+  Running/Stuck/Review attempts an operator actually cares about. The default
+  list now shows only non-Done attempts; `--all`/`-a` restores the full list, and
+  an explicitly named target (`status <ticket[@attempt]>`) still prints its match
+  regardless of state. When the default filters everything away, a one-line hint
+  reports the hidden Done count and the `--all` opt-in instead of blank output.
+  Scope is `ctl status` only; the web board (`draiver status`) is untouched.
+
+- **`--repo` is required at attempt creation; a repo-less admit escalates instead
+  of silently stalling (`draiverctl`, drvctl-017).** Two gaps around a missing
+  repo, closed at both ends. **At creation:** `attempt.Create` trims and rejects
+  an empty repo — the one chokepoint every creation path funnels through — so no
+  path can mint a repo-less attempt; `new` and `attempt new` validate up front
+  (before any side effect, no orphan dir), while `attempt new --from` still
+  inherits its parent's repo (drvctl-015), so `--repo` is required only when it
+  can't be inherited. **At admit:** a repo-less admit now appends an `escalation`
+  event, flipping the attempt to Needs-me so it lands on the board with an
+  actionable ask, rather than staying Running+enabled and stalling silently in the
+  operational log. The tick never fails as a whole — siblings keep admitting — and
+  every other admit failure stays log-only.
+
+## [0.2.1] - 2026-08-05
+
+### Added
+
+- **`ctl logs` reads for a human by default; raw stream-json moves behind
+  `--json` (`draiverctl`, drv-003).** `ctl logs` used to dump the raw
+  `stream.jsonl` tee — one dense JSON object per line, the assistant's prose
+  buried as an escaped Markdown string amid event uuids and the session id. It now
+  renders the recorded stream the way the live `start`/`restart` view does:
+  assistant prose as prose, `> tool` calls with a short argument snippet, tool
+  errors, permission prompts, usage/cost + context-window fill, and turn
+  boundaries — with the transport envelope dropped. The live printer and `logs`
+  share one renderer (`renderEvent` in `cmd/ctl.go`), reached by normalizing each
+  recorded line back through the adapter's exported `claudecode.Normalize`, so the
+  two speak the same vocabulary. The raw byte-for-byte tee is still one flag away —
+  `ctl logs <target> --json` — so `| jq` pipelines and replay keep working, and
+  `-f`/`--follow` works in both modes.
+
+## [0.2.0] - 2026-08-05
+
 ### Added
 
 - **First-class Review → Running reopen (drv-002).** A reviewed attempt can be
@@ -163,19 +291,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records are replaced atomically (temp-file + fsync + rename) and `stream.jsonl`
   is append-only and safe for concurrent appends (`internal/session`, with paths
   in `internal/store`).
-- **`ctl logs` reads for a human by default; raw stream-json moves behind
-  `--json` (`draiverctl`, drv-003).** `ctl logs` used to dump the raw
-  `stream.jsonl` tee — one dense JSON object per line, the assistant's prose
-  buried as an escaped Markdown string amid event uuids and the session id. It now
-  renders the recorded stream the way the live `start`/`restart` view does:
-  assistant prose as prose, `> tool` calls with a short argument snippet, tool
-  errors, permission prompts, usage/cost + context-window fill, and turn
-  boundaries — with the transport envelope dropped. The live printer and `logs`
-  share one renderer (`renderEvent` in `cmd/ctl.go`), reached by normalizing each
-  recorded line back through the adapter's exported `claudecode.Normalize`, so the
-  two speak the same vocabulary. The raw byte-for-byte tee is still one flag away —
-  `ctl logs <target> --json` — so `| jq` pipelines and replay keep working, and
-  `-f`/`--follow` works in both modes.
 
 ### Fixed
 

@@ -24,7 +24,7 @@ func newAttempt(t *testing.T) (store.Root, string, string, *Store) {
 	if err := root.EnsureTicketDir(ticket); err != nil {
 		t.Fatal(err)
 	}
-	m, err := attempt.Create(root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Actor: "agent:x"})
+	m, err := attempt.Create(root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Repo: "/repo", Actor: "agent:x"})
 	if err != nil {
 		t.Fatal(err)
 	}

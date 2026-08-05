@@ -21,6 +21,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent/claudecode"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/gate"
+	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/store"
 )
@@ -35,6 +36,7 @@ var (
 	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
 	ctlLogsJSON      bool
+	ctlStatusAll     bool // include terminal Done attempts in the list view
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
 
 	// restart depth flags — the cumulative degree axis (drvctl-016). The deepest
@@ -91,7 +93,7 @@ var ctlUpCmd = &cobra.Command{
 			return err
 		}
 		ctrl := reconcile.Controller{PID: os.Getpid(), Nonce: nonce, Started: time.Now()}
-		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld up (pid %d) — %s, tick every %s (Ctrl-C to drain)\n", ctrl.PID, repoNote, ctlInterval)
+		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld %s up (pid %d) — %s, tick every %s (Ctrl-C to drain)\n", version, ctrl.PID, repoNote, ctlInterval)
 		return r.Run(ctx, ctlInterval, ctrl)
 	},
 }
@@ -228,8 +230,14 @@ func restartLevel() reconcile.FlushLevel {
 
 var ctlStatusCmd = &cobra.Command{
 	Use:   "status [ticket[@attempt]]",
-	Short: "Live view per attempt: control state, session pid, model, tokens/$ and context-window %",
-	Args:  cobra.RangeArgs(0, 1),
+	Short: "Live view per attempt (Done hidden by default; --all shows them): control state, session pid, model, tokens/$ and context-window %",
+	Long: "status prints one row per attempt from the reconciler snapshot — control " +
+		"state, session pid, enabled/desired, model, context-window fill and cost.\n\n" +
+		"By default it omits terminal Done attempts so the live view stays focused on " +
+		"the Running / Needs-me / Review attempts that still want attention; --all/-a " +
+		"restores the full list. Naming an attempt explicitly (`status ticket[@attempt]`) " +
+		"always prints it regardless of state.",
+	Args: cobra.RangeArgs(0, 1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, err := newReconciler()
 		if err != nil {
@@ -257,10 +265,19 @@ var ctlStatusCmd = &cobra.Command{
 		}
 
 		out := cmd.OutOrStdout()
+		// The Done filter applies only to the unfiltered list view; an explicit
+		// target arg named the attempt by hand, so it prints regardless of state.
+		explicit := wantTicket != ""
+		var printed, hiddenDone int
 		for _, s := range snap {
-			if wantTicket != "" && (s.Key.Ticket != wantTicket || s.Key.Attempt != wantAtt) {
+			if explicit && (s.Key.Ticket != wantTicket || s.Key.Attempt != wantAtt) {
 				continue
 			}
+			if !explicit && !ctlStatusAll && s.State == project.Done {
+				hiddenDone++
+				continue
+			}
+			printed++
 			sessionCol := "-"
 			switch {
 			case s.Adopted:
@@ -275,6 +292,11 @@ var ctlStatusCmd = &cobra.Command{
 			fmt.Fprintf(out, "%-14s %-9s enabled=%-5t desired=%-5t %-18s model=%-10s %s  $%.4f\n",
 				s.Key.Ticket+"/"+s.Key.Attempt, s.State, s.Enabled, s.Desired, sessionCol, model,
 				contextGauge(s.Meter.Usage.ContextTokens, ctlContextWindow), s.Meter.Usage.CostUSD)
+		}
+		// A blank list view reads as "nothing running" when the truth may be
+		// "everything is Done and hidden"; say so, with the count and the opt-in.
+		if printed == 0 && hiddenDone > 0 {
+			fmt.Fprintf(out, "no active attempts — %d Done hidden; --all to show\n", hiddenDone)
 		}
 		return nil
 	},
@@ -666,6 +688,7 @@ func init() {
 	ctlStartCmd.Flags().BoolVar(&ctlStartNewAttempt, "new-attempt", false, "fork a new attempt (new id, provenance to this one) and start the fork, leaving the parent running — a parallel branch")
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlLogsCmd.Flags().BoolVar(&ctlLogsJSON, "json", false, "print the raw stream.jsonl lines verbatim (machine form for | jq / replay) instead of the human-readable rendering")
+	ctlStatusCmd.Flags().BoolVarP(&ctlStatusAll, "all", "a", false, "include terminal Done attempts (hidden by default in the list view)")
 	ctlCmd.AddCommand(ctlUpCmd, ctlStartCmd, ctlStopCmd, ctlRestartCmd, ctlStatusCmd, ctlLogsCmd)
 	rootCmd.AddCommand(ctlCmd)
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -48,6 +49,12 @@ var attemptNewCmd = &cobra.Command{
 				return err
 			}
 			repo = parent.Repo
+		}
+		// --repo is required unless --from supplies it by inheritance; refuse a
+		// repo-less attempt up front rather than defer the failure to the daemon
+		// (drvctl-017). attempt.Create is the belt; this is the friendlier message.
+		if strings.TrimSpace(repo) == "" {
+			return fmt.Errorf("a repo path is required: pass --repo <local git working tree>, or --from an attempt that records one")
 		}
 		m, err := attempt.Create(root, id, attempt.New{
 			Tool:  attemptTool,
@@ -108,7 +115,7 @@ func dash(s string) string {
 func init() {
 	attemptNewCmd.Flags().StringVar(&attemptTool, "tool", "", "coding-agent tool (e.g. claude-code, aider, codex)")
 	attemptNewCmd.Flags().StringVar(&attemptModel, "model", "", "model (e.g. opus-4.8)")
-	attemptNewCmd.Flags().StringVar(&attemptRepo, "repo", "", "local path to the git working tree this attempt targets (defaults to --from's repo)")
+	attemptNewCmd.Flags().StringVar(&attemptRepo, "repo", "", "required (unless inherited via --from): local path to the git working tree this attempt targets")
 	attemptNewCmd.Flags().StringVar(&attemptFrom, "from", "", "record provenance: this attempt branches from attempt <id>")
 	attemptCmd.AddCommand(attemptNewCmd)
 	attemptCmd.AddCommand(attemptLsCmd)

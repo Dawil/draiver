@@ -21,7 +21,7 @@ func newFixture(t *testing.T) (store.Root, string, string) {
 	if err := root.EnsureTicketDir(ticket); err != nil {
 		t.Fatal(err)
 	}
-	m, err := attempt.Create(root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Actor: "human:x"})
+	m, err := attempt.Create(root, ticket, attempt.New{Tool: "claude-code", Model: "opus-4.8", Repo: "/repo", Actor: "human:x"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1157,6 +1157,113 @@ func TestBadRepoSkipsAttemptButSiblingRuns(t *testing.T) {
 	}
 }
 
+// stripRepo blanks an attempt's recorded repo path in attempt.md, simulating a
+// legacy or hand-edited attempt (drvctl-017): attempt.Create refuses to mint one
+// with no repo, so the only way an attempt reaches admit repo-less is a file that
+// predates the mandatory-repo rule or was edited by hand. The log (created +
+// enable) is untouched, so the attempt still derives Running + enabled.
+func stripRepo(t *testing.T, root store.Root, ticket, att string) {
+	t.Helper()
+	path := root.AttemptMetaPath(ticket, att)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read attempt.md: %v", err)
+	}
+	var kept []string
+	for _, ln := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "repo:") {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatalf("rewrite attempt.md: %v", err)
+	}
+	if a, err := project.LoadAttempt(root, ticket, att); err != nil || a.Repo != "" {
+		t.Fatalf("repo not stripped: repo=%q err=%v", a.Repo, err)
+	}
+}
+
+// TestNoRepoAttemptEscalatesAndParks is the drvctl-017 safety net: an enabled
+// Running attempt that records no repo (and has no --repo fallback) is not
+// silently stalled. Its failed admit appends a durable escalation that flips it
+// to Needs-me, so it lands on the board with an actionable ask — and the tick
+// neither errors nor spawns a session. A second tick does not pile on a duplicate
+// escalation.
+func TestNoRepoAttemptEscalatesAndParks(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	att := w.newTicketOnRepo(t, "PROJ-NOREPO", w.repo)
+	stripRepo(t, w.root, "PROJ-NOREPO", att)
+
+	f := &factory{}
+	sink := &logCapture{}
+	// No DefaultRepo: nothing resolves the missing repo, so admit must escalate.
+	r := w.reconcilerLog(t, f, newProc(), sink.logf)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("a repo-less attempt must not fail the tick: %v", err)
+	}
+
+	// No session was brought up.
+	if n := f.count(); n != 0 {
+		t.Fatalf("a repo-less attempt must not be admitted: %d adapters spawned", n)
+	}
+
+	// An escalation was recorded and it carries the actionable ask.
+	events, err := ticketlog.Read(w.root, "PROJ-NOREPO", att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	esc := escalationsIn(events)
+	if len(esc) != 1 {
+		t.Fatalf("want exactly 1 escalation, got %d: %v", len(esc), logTypes(t, w.root, "PROJ-NOREPO", att))
+	}
+	if !strings.Contains(esc[0].Body, "attempt.md") || !strings.Contains(esc[0].Body, "ctl up --repo") {
+		t.Errorf("escalation body is not actionable: %q", esc[0].Body)
+	}
+
+	// The open escalation parks the attempt at Needs-me.
+	a, err := project.LoadAttempt(w.root, "PROJ-NOREPO", att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.State != project.NeedsMe {
+		t.Fatalf("state = %v, want NeedsMe", a.State)
+	}
+
+	// A second tick must not pile on a duplicate escalation (Needs-me is not
+	// desired, so admit stops re-running it — the de-dup requirement, drvctl-017).
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if esc := escalationsIn(mustRead(t, w.root, "PROJ-NOREPO", att)); len(esc) != 1 {
+		t.Fatalf("a second tick duplicated the escalation: now %d", len(esc))
+	}
+}
+
+// escalationsIn returns just the escalation events, for counting.
+func escalationsIn(events []event.Event) []event.Event {
+	var out []event.Event
+	for _, e := range events {
+		if e.Type == "escalation" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// mustRead reads an attempt's log or fails the test.
+func mustRead(t *testing.T, root store.Root, ticket, att string) []event.Event {
+	t.Helper()
+	events, err := ticketlog.Read(root, ticket, att)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	return events
+}
+
 // mustBase returns the managed worktree base a repo derives (via a throwaway
 // Manager), for asserting where an attempt's checkout landed.
 func mustBase(t *testing.T, repo string) string {

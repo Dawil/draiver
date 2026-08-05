@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -231,17 +232,26 @@ func New(opt Options) (*Reconciler, error) {
 	return &Reconciler{opt: opt, runs: map[worktree.Key]*run{}, wtCache: map[string]*worktree.Manager{}}, nil
 }
 
+// errNoRepoBound marks the one admit failure that is turned into a durable
+// escalation rather than only logged (drvctl-017): the attempt records no repo
+// and no --repo fallback resolves. repoFor wraps it so admit → Tick can recognize
+// the case with errors.Is; every other admit failure (e.g. a bad git tree) still
+// only Logf-s. Routing all admit failures through one escalate path is a trivial
+// extension from here, deliberately left out of this ticket's scope.
+var errNoRepoBound = errors.New("attempt records no repo path and no --repo fallback is set")
+
 // repoFor resolves the local repo path an attempt's worktree is cut from: its
 // own recorded path, else the DefaultRepo fallback. An attempt with neither is
 // an error — surfaced to the caller (admit/Adopt) as a per-attempt failure, so
-// it fails just that attempt rather than the whole tick.
+// it fails just that attempt rather than the whole tick. The error wraps
+// errNoRepoBound so admit can escalate this specific case (drvctl-017).
 func (r *Reconciler) repoFor(a project.Attempt) (string, error) {
 	repo := a.Repo
 	if repo == "" {
 		repo = r.opt.DefaultRepo
 	}
 	if repo == "" {
-		return "", fmt.Errorf("attempt %s/%s records no repo path and no --repo fallback is set", a.Ticket, a.ID)
+		return "", fmt.Errorf("attempt %s/%s: %w", a.Ticket, a.ID, errNoRepoBound)
 	}
 	return repo, nil
 }
@@ -346,7 +356,15 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 			r.reapSpentRun(key)
 		}
 		if err := r.admit(ctx, a); err != nil {
-			r.opt.Logf("reconcile: admit %s/%s: %v", key.Ticket, key.Attempt, err)
+			// A missing repo is a human-actionable block, not a transient hiccup:
+			// surface it on the board as an escalation instead of only logging it,
+			// where it would silently stall (drvctl-017). Every other admit failure
+			// stays operational-log-only.
+			if errors.Is(err, errNoRepoBound) {
+				r.escalateNoRepo(a)
+			} else {
+				r.opt.Logf("reconcile: admit %s/%s: %v", key.Ticket, key.Attempt, err)
+			}
 		}
 	}
 
@@ -614,6 +632,49 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 		}
 	}
 	return nil
+}
+
+// noRepoMarker is the stable phrase embedded in the no-repo escalation body; it
+// doubles as the de-dup key so admit — which runs every tick — never appends a
+// second escalation while one is already open (mirroring how the gates check the
+// log tail before acting).
+const noRepoMarker = "no repo path is bound to this attempt"
+
+// noRepoEscalationBody renders the human-facing escalation for an attempt that
+// records no repo and resolves no --repo fallback. It names the two ways to
+// unblock it — either sanctioned by drvctl-015 — and always contains noRepoMarker.
+func noRepoEscalationBody() string {
+	return fmt.Sprintf("Supervisor could not start this attempt: %s, so no worktree can be cut for it.\n\n"+
+		"Set `repo:` in the attempt's `attempt.md` to the local git working tree it targets, "+
+		"or restart the daemon with a `ctl up --repo <path>` fallback. "+
+		"Once a repo resolves, the attempt resumes from the log.", noRepoMarker)
+}
+
+// escalateNoRepo turns a repo-less attempt's failed admit into a durable
+// escalation, flipping it to Needs-me so it lands on the board with an actionable
+// ask instead of silently stalling Running+enabled (drvctl-017). It is
+// idempotent: if an unresolved no-repo escalation is already open it only logs,
+// so a resolve that does not actually bind a repo (which returns the attempt to
+// Running and re-admits it) can re-escalate, but a still-open one is never
+// duplicated. Best-effort — a write failure is logged, never failing the tick.
+func (r *Reconciler) escalateNoRepo(a project.Attempt) {
+	if att, err := project.LoadAttempt(r.opt.Root, a.Ticket, a.ID); err == nil {
+		for _, e := range att.OpenEscalations {
+			if strings.Contains(e.Body, noRepoMarker) {
+				r.opt.Logf("reconcile: admit %s/%s: no repo bound (escalation already open)", a.Ticket, a.ID)
+				return
+			}
+		}
+	}
+	if _, err := ticketlog.Append(r.opt.Root, a.Ticket, a.ID, event.Event{
+		Type:  "escalation",
+		Actor: r.opt.Actor,
+		Body:  noRepoEscalationBody(),
+	}); err != nil {
+		r.opt.Logf("reconcile: record no-repo escalation %s/%s: %v", a.Ticket, a.ID, err)
+		return
+	}
+	r.opt.Logf("reconcile: escalated %s/%s: no repo bound", a.Ticket, a.ID)
 }
 
 // ingest is the Watch+Gate goroutine for one live session: it ranges the session
