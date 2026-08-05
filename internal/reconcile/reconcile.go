@@ -1143,6 +1143,50 @@ func (r *Reconciler) StartNewAttempt(ticket, parent string) (StartResult, error)
 	return StartResult{ControllerPID: ctrl.PID, Attempt: newID, Forked: true, From: parent}, nil
 }
 
+// EnableResult reports an `enable --now` handoff: the attempt is now durably
+// enabled and the running supervisor will bring it up.
+type EnableResult struct {
+	// ControllerPID is the pid of the `ctl up` that will bring the attempt up.
+	ControllerPID int
+	// Seq is the enable event's sequence number in the attempt log.
+	Seq int
+}
+
+// EnableNow is the imperative half of `enable --now`: it couples the durable
+// enable opt-in with an immediate supervised start. Like start/restart it
+// requires a live `ctl up` (ErrNoController otherwise), checked UP FRONT so a
+// no-daemon invocation persists nothing — the caller can fall back to plain
+// `enable` to record the preference for a later daemon, or start one with
+// `ctl up`. With a controller present it appends the durable `enable` event;
+// the enable bit alone makes the attempt desired, so the daemon's next tick
+// brings it up through the same cascade the enabled fleet uses. No transient
+// marker is written: enable is the durable opt-in, and a redundant marker on an
+// enabled attempt would outlive a later `disable` (handOff skips it for the same
+// reason — decision #29). This makes enable --now the PERSISTENT counterpart of
+// `start`: start is transient (swept when the daemon restarts), enable --now
+// survives and drives auto-restart.
+func (r *Reconciler) EnableNow(ticket, attempt string) (EnableResult, error) {
+	if _, err := project.LoadAttempt(r.opt.Root, ticket, attempt); err != nil {
+		return EnableResult{}, err
+	}
+	ctrl, err := r.requireController()
+	if err != nil {
+		return EnableResult{}, err
+	}
+	// Same body as plain `enable` so the durable log is uniform regardless of
+	// which path recorded it — the --now is a CLI convenience, not a durable
+	// distinction.
+	e, err := ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
+		Type:  "enable",
+		Actor: r.opt.Actor,
+		Body:  fmt.Sprintf("Supervision enabled for %s/%s.", ticket, attempt),
+	})
+	if err != nil {
+		return EnableResult{}, err
+	}
+	return EnableResult{ControllerPID: ctrl.PID, Seq: e.Seq}, nil
+}
+
 // StopResult reports what Stop did, so the client can print a truthful message.
 type StopResult struct {
 	// PID is the process Stop found on record (0 if none / already cleared).

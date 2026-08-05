@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
@@ -124,6 +125,81 @@ func TestStartRequiresController(t *testing.T) {
 	if _, err := r.Start(ticket, att); !errors.Is(err, reconcile.ErrNoController) {
 		t.Fatalf("dead controller pid should not satisfy require-pid-1, got %v", err)
 	}
+}
+
+// TestEnableNowRequiresController: `enable --now` is an imperative handoff like
+// start/restart — it requires a live `ctl up` and checks the gate UP FRONT, so a
+// no-daemon invocation persists NOTHING (the attempt stays disabled; the user can
+// fall back to plain `enable`). A stale controller record (dead pid) does not
+// count as live.
+func TestEnableNowRequiresController(t *testing.T) {
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if _, err := r.EnableNow(ticket, att); !errors.Is(err, reconcile.ErrNoController) {
+		t.Fatalf("expected ErrNoController with no daemon, got %v", err)
+	}
+	// The gate is up front: no enable event was persisted.
+	if a, err := project.LoadAttempt(w.root, ticket, att); err != nil || a.Enabled {
+		t.Fatalf("enable --now must not persist without a daemon: enabled=%v err=%v", a.Enabled, err)
+	}
+
+	seedControllerPID(t, w.root, 424242) // a crashed daemon's stale record
+	if _, err := r.EnableNow(ticket, att); !errors.Is(err, reconcile.ErrNoController) {
+		t.Fatalf("dead controller pid should not satisfy require-pid-1, got %v", err)
+	}
+}
+
+// TestEnableNowEnablesDurablyAndBringsUp: with a live controller, enable --now
+// sets the DURABLE enable bit (unlike start's transient marker) and the daemon
+// brings the attempt up on that bit alone — no desired-marker is written, so a
+// later disable can park it without a stale marker keeping it stuck desired
+// (decision #29). This is the persistent counterpart of TestStartHandsOffToRunningDaemon.
+func TestEnableNowEnablesDurablyAndBringsUp(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	ctrl := seedController(t, w.root, proc)
+
+	res, err := r.EnableNow(ticket, att)
+	if err != nil {
+		t.Fatalf("EnableNow: %v", err)
+	}
+	if res.ControllerPID != ctrl.PID {
+		t.Fatalf("handed off to pid %d, want %d", res.ControllerPID, ctrl.PID)
+	}
+
+	// Durable: the enable bit is set (it survives a daemon restart; a marker would not).
+	if a, err := project.LoadAttempt(w.root, ticket, att); err != nil || !a.Enabled {
+		t.Fatalf("enable --now must set the durable enable bit: enabled=%v err=%v", a.Enabled, err)
+	}
+	// And NO transient marker was written — the enable bit alone makes it desired.
+	if _, err := os.Stat(w.root.DesiredMarkerPath(ticket, att)); !os.IsNotExist(err) {
+		t.Fatalf("enable --now must not write a desired-marker, stat err=%v", err)
+	}
+
+	// The daemon admits it on the enable bit and cold-starts it from the brief.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	waitFor(t, "daemon admits the enabled attempt", func() bool { return f.count() == 1 })
+	live := f.at(0)
+	waitFor(t, "brief on fresh spawn", func() bool {
+		p := live.prompted()
+		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
+	})
 }
 
 // TestDaemonSweepsStaleMarker: a desired-marker whose nonce does not match the
