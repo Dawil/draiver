@@ -185,7 +185,7 @@ Global flags mirror `draiver` (`--data`, `--actor`, `--attempt`).
 | --- | --- |
 | `draiverctl up [--concurrency N] [--budget …]` | Start `draiverctld` and begin reconciling the enabled fleet. |
 | `draiverctl down` | Drain: stop admitting, let live sessions checkpoint to the log, exit. |
-| `draiverctl start <ticket[@attempt]>` | Spawn (or resume) a session for one attempt. |
+| `draiverctl start <ticket[@attempt]>` | Hand one attempt to a running `ctl up` to bring up in the background (imperative + **transient**: a desired-marker stamped with the daemon's boot nonce, swept if it restarts). Requires `ctl up` (errors otherwise, never orphans); watch with `logs -f`. Contrast `enable` (declarative + persistent). |
 | `draiverctl stop <ticket[@attempt]>` | Kill the session; keep id + log for later `--resume`. |
 | `draiverctl restart <ticket[@attempt]>` | Reap + respawn fresh from `brief` (context refresh). |
 | `draiverctl status [<ticket>]` | Live view: control state, session PID, model, tokens/$, **context-window %**, worktree, last event, watchdog health. |

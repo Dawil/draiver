@@ -35,6 +35,17 @@ func Resolve(flagVal string) (Root, error) {
 	return Root{Dir: abs}, nil
 }
 
+// --- root-level runtime paths (draiverctld; rebuildable, out of the hash chain) ---
+
+// ControllerPath is the running controller's identity record: the pid and boot
+// nonce of the `ctl up` supervisor ("pid 1"), written on start and removed on
+// clean exit. It is the root-level "is the daemon up?" handle the imperative
+// client verbs probe before handing an attempt off, and the nonce that stamps
+// their transient desired-markers so a marker dies with the daemon that owns it
+// (drvctl-016). It is deliberately outside any ticket, since one controller
+// spans all of them.
+func (r Root) ControllerPath() string { return filepath.Join(r.Dir, "controller.json") }
+
 // --- ticket-level paths (shared across attempts) ---
 
 // TicketDir is the folder for a ticket id.
@@ -71,6 +82,16 @@ func (r Root) ArtefactsDir(id, attempt string) string {
 // StatePath is the generated projection for one attempt (never read as truth).
 func (r Root) StatePath(id, attempt string) string {
 	return filepath.Join(r.AttemptDir(id, attempt), "state.md")
+}
+
+// DesiredMarkerPath is an attempt's transient imperative desired-marker: the
+// stamped "the client asked the daemon to run this now" flag `ctl start` writes
+// and the reconcile loop unions into its desired set (drvctl-016). It is
+// rebuildable runtime state, not part of the hash chain, and lives at the
+// attempt root (alongside the generated state.md) so it survives a session
+// flush that clears the session/ dir.
+func (r Root) DesiredMarkerPath(id, attempt string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), "desired.json")
 }
 
 // --- session runtime paths (draiverctld; rebuildable, out of the hash chain) ---

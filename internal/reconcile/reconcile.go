@@ -277,7 +277,20 @@ func (r *Reconciler) managerFor(repo string) (*worktree.Manager, error) {
 // drains — the ingest goroutines stop but the sessions are left running, so a
 // later daemon start re-adopts them. It returns nil on a clean (cancelled)
 // shutdown, or the error from Adopt (the one failure fatal to starting up).
-func (r *Reconciler) Run(ctx context.Context, interval time.Duration) error {
+func (r *Reconciler) Run(ctx context.Context, interval time.Duration, ctrl Controller) error {
+	// Claim PID 1 for this data root: record the controller identity so the
+	// imperative client verbs can find (and hand off to) this daemon, and clear it
+	// on a clean exit. A crash leaves the record behind, but liveController probes
+	// the pid, so a stale record never passes for a running daemon (drvctl-016).
+	if err := WriteController(r.opt.Root, ctrl); err != nil {
+		return fmt.Errorf("reconcile: claim controller: %w", err)
+	}
+	defer func() {
+		if err := RemoveController(r.opt.Root); err != nil {
+			r.opt.Logf("reconcile: release controller: %v", err)
+		}
+	}()
+
 	if err := r.Adopt(ctx); err != nil {
 		return fmt.Errorf("reconcile: adopt on start: %w", err)
 	}
@@ -355,10 +368,40 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The imperative half of the desired set (drvctl-016): a `ctl start` writes a
+	// desired-marker stamped with the live controller's nonce. Read that nonce once
+	// so the loop can honour a matching marker and sweep any other — a marker left
+	// by a previous daemon boot (different nonce) or by a daemon that has since gone
+	// away is stale, which is what makes an imperative start transient.
+	ctrl, ctrlLive := r.liveController()
+
 	out := make(map[worktree.Key]project.Attempt)
 	for _, a := range all {
-		if a.State == project.Running && a.Enabled {
-			out[worktree.Key{Ticket: a.Ticket, Attempt: a.ID}] = a
+		if a.State != project.Running {
+			continue
+		}
+		key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
+		if a.Enabled {
+			// Declaratively desired — the durable enable bit needs no marker.
+			out[key] = a
+			continue
+		}
+		m, ok, err := readDesiredMarker(r.opt.Root, a.Ticket, a.ID)
+		if err != nil {
+			r.opt.Logf("reconcile: read desired marker %s/%s: %v", a.Ticket, a.ID, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if ctrlLive && m.Nonce == ctrl.Nonce {
+			out[key] = a
+			continue
+		}
+		// Stale marker (no live controller, or a different boot's nonce): sweep it so
+		// the imperative start does not outlive the daemon it was handed to.
+		if err := removeDesiredMarker(r.opt.Root, a.Ticket, a.ID); err != nil {
+			r.opt.Logf("reconcile: sweep desired marker %s/%s: %v", a.Ticket, a.ID, err)
 		}
 	}
 	return out, nil
@@ -645,6 +688,14 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 // agent can see whether the worktree was reclaimed or preserved. An adopted
 // (foreign) session is stopped by pid, the only handle Tier 0 has on it.
 func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.State) {
+	// A retired attempt is no longer desired, so any imperative desired-marker it
+	// carried has done its job — clear it so a later return to Running (a reopen)
+	// does not resurrect the same one-shot start under the still-live daemon
+	// (drvctl-016). Missing is fine.
+	if err := removeDesiredMarker(r.opt.Root, key.Ticket, key.Attempt); err != nil {
+		r.opt.Logf("reconcile: clear desired marker %s/%s: %v", key.Ticket, key.Attempt, err)
+	}
+
 	r.mu.Lock()
 	rn := r.runs[key]
 	delete(r.runs, key)
@@ -911,35 +962,68 @@ func (r *Reconciler) Snapshot() ([]Status, error) {
 	return out, nil
 }
 
-// --- client verbs (act directly on one session) ----------------------------
+// --- client verbs -----------------------------------------------------------
 //
 // Start/Stop/Restart are the imperative overrides the `draiver ctl` client
-// exposes — the "systemctl" verbs to the reconcile loop's "PID 1". They act
-// directly on a single attempt's session rather than through the desired/actual
-// diff, which is what makes a hand-driven session possible without a running
-// daemon (the doc's "act directly on a session for early dev"). They are not the
-// scheduler: Start does not touch the run table, and none of them consult the
-// desired set. Do not point them at an attempt a live daemon is already
-// supervising — Tier 0 has no daemon IPC to coordinate the two.
+// exposes — the "systemctl" verbs to the reconcile loop's "PID 1". Start is a
+// control-plane action: it does not bring a session up itself (an unsupervised
+// orphan that dies with the invoking shell), it hands the attempt off to a
+// running `ctl up` by writing the transient desired-marker the loop reconciles
+// — so the self-heal cascade and brief-on-reset coupling live in the one
+// daemon-shared bringUp and the client path cannot drift from it (drvctl-016).
+// Stop stays a direct reap (it only needs the recorded pid, and reaping a
+// process wants no supervisor). runForeground is the pre-daemon foreground
+// driver Restart still uses this phase.
 
-// Start brings up a single attempt's session and blocks in the foreground,
-// dispatching its stream through the very same watch+gate+protocol pipeline the
-// daemon's admit uses, until the session exits on its own or ctx is cancelled.
-// It is a faithful single-session daemon: the cold-start brief is injected, tool
-// use is gated, and the stream is metered and promoted to the durable log — the
-// "hand-driven handle to test the lower layers against."
-//
-// It climbs the same self-heal cascade admit does (bringUp): a resumable session
-// is Resumed and continued as-is; only a fresh spawn (no session on record, or a
-// recorded id that can no longer be resumed) is cold-started from the brief.
-//
-// observe, if non-nil, receives every event before it is dispatched, so a caller
-// can render the live stream (the CLI prints it). On return — whether the session
-// exited or ctx was cancelled — the session is reaped but its id is kept on disk,
-// so a later Start Resumes the same cattle handle (continuing the conversation,
-// no re-brief). Start does not register the session in the run table; it is a
-// standalone driver, not part of the reconcile diff.
-func (r *Reconciler) Start(ctx context.Context, ticket, attempt string, observe func(agent.Event)) error {
+// ErrNoController is returned by the imperative verbs when no `ctl up` is
+// running to hand the attempt off to — the "requires PID 1" gate that keeps a
+// backgrounded start from spawning an unsupervised orphan (drvctl-016).
+var ErrNoController = errors.New("no running `ctl up` (start the supervisor with `ctl up` first)")
+
+// StartResult reports how an imperative Start was handed off, so the client can
+// print a truthful message (which supervisor now owns the attempt).
+type StartResult struct {
+	// ControllerPID is the pid of the running `ctl up` the attempt was handed to.
+	ControllerPID int
+}
+
+// Start hands one attempt off to a running `ctl up` to bring up in the
+// background, rather than driving a session itself. It requires a live
+// controller (ErrNoController otherwise) and writes a transient desired-marker
+// stamped with that controller's nonce; the daemon's next tick unions the
+// marker into its desired set and admits the attempt through the same cascade
+// (resume the recorded session, else spawn fresh) and brief-on-reset coupling
+// its enabled fleet uses. The marker is transient: it is swept if the daemon
+// restarts (new nonce), so an imperative start dies with its supervisor —
+// distinct from `enable`, the durable, restart-surviving opt-in. Streaming is
+// no longer part of Start; watch the handed-off session with `ctl logs -f`.
+func (r *Reconciler) Start(ticket, attempt string) (StartResult, error) {
+	if _, err := project.LoadAttempt(r.opt.Root, ticket, attempt); err != nil {
+		return StartResult{}, err
+	}
+	ctrl, ok := r.liveController()
+	if !ok {
+		return StartResult{}, ErrNoController
+	}
+	m := desiredMarker{Nonce: ctrl.Nonce, Stamp: r.opt.Now()}
+	if err := writeDesiredMarker(r.opt.Root, ticket, attempt, m); err != nil {
+		return StartResult{}, err
+	}
+	return StartResult{ControllerPID: ctrl.PID}, nil
+}
+
+// runForeground brings up a single attempt's session and blocks in the
+// foreground, dispatching its stream through the very same watch+gate+protocol
+// pipeline the daemon's admit uses, until the session exits on its own or ctx is
+// cancelled. It climbs the same self-heal cascade admit does (bringUp): a
+// resumable session is Resumed and continued as-is; only a fresh spawn is
+// cold-started from the brief. observe, if non-nil, receives every event before
+// dispatch so a caller can render the live stream. On return the session is
+// reaped but its id kept on disk, so a later bring-up Resumes the same cattle
+// handle. It does not register the session in the run table — a standalone
+// driver, not part of the reconcile diff. Restart still uses it this phase;
+// Start has moved to the daemon-handoff above (drvctl-016).
+func (r *Reconciler) runForeground(ctx context.Context, ticket, attempt string, observe func(agent.Event)) error {
 	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
 	if err != nil {
 		return err
@@ -1070,16 +1154,21 @@ type RestartResult struct {
 }
 
 // Restart reaps the current session (Stop) then brings the attempt back up
-// (Start), blocking in the foreground exactly like Start. level selects how deep
-// the teardown flushes before the start cascade climbs back — the degree axis of
-// drvctl-016 (see FlushLevel). FlushNone is the clean "continue" the old hybrid
-// restart failed to be: it Resumes the same session and does not re-brief.
-// FlushAttempt is the one point on the axis where restart stops mutating in place
-// and instead forks a new attempt, bringing *that* one up fresh.
+// through the foreground driver (runForeground), blocking until it exits. level
+// selects how deep the teardown flushes before the start cascade climbs back —
+// the degree axis of drvctl-016 (see FlushLevel). FlushNone is the clean
+// "continue" the old hybrid restart failed to be: it Resumes the same session and
+// does not re-brief. FlushAttempt is the one point on the axis where restart
+// stops mutating in place and instead forks a new attempt, bringing *that* one up
+// fresh.
+//
+// Restart still drives its session in the foreground this phase; the imperative
+// Start verb has already moved to the daemon handoff (drvctl-016 Phase C1), and
+// Restart follows in C2.
 //
 // announce, if non-nil, is called once the target attempt is fixed (after any
-// flush/fork) but before Start blocks, so a caller can surface the plan — notably
-// a fork's new id — up front rather than only after the session exits.
+// flush/fork) but before the session blocks, so a caller can surface the plan —
+// notably a fork's new id — up front rather than only after the session exits.
 func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, level FlushLevel, announce func(RestartResult), observe func(agent.Event)) error {
 	// The shallowest teardown always happens: reap the running process, keeping the
 	// durable layers for the flush/cascade to act on.
@@ -1120,7 +1209,7 @@ func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, level 
 	if announce != nil {
 		announce(res)
 	}
-	return r.Start(ctx, res.Ticket, res.Attempt, observe)
+	return r.runForeground(ctx, res.Ticket, res.Attempt, observe)
 }
 
 // flushSession discards an attempt's session conversation (L0): it clears the

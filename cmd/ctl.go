@@ -78,32 +78,44 @@ var ctlUpCmd = &cobra.Command{
 		if ctlRepo != "" {
 			repoNote = "fallback repo " + ctlRepo
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld up — %s, tick every %s (Ctrl-C to drain)\n", repoNote, ctlInterval)
-		return r.Run(ctx, ctlInterval)
+		// Claim PID 1 for this data root with a fresh boot nonce, so imperative
+		// `ctl start`/`restart` can find this supervisor and stamp their transient
+		// desired-markers with a nonce that dies when this daemon does (drvctl-016).
+		nonce, err := reconcile.NewNonce()
+		if err != nil {
+			return err
+		}
+		ctrl := reconcile.Controller{PID: os.Getpid(), Nonce: nonce, Started: time.Now()}
+		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld up (pid %d) — %s, tick every %s (Ctrl-C to drain)\n", ctrl.PID, repoNote, ctlInterval)
+		return r.Run(ctx, ctlInterval, ctrl)
 	},
 }
 
 var ctlStartCmd = &cobra.Command{
 	Use:   "start <ticket[@attempt]>",
-	Short: "Bring up (or resume) a session for one attempt and stream it in the foreground",
-	Long: "start brings up a session for one attempt — spawning a fresh one, or " +
-		"resuming the recorded cattle handle if the attempt already ran — injects the " +
-		"cold-start brief, and streams it in the foreground with the full gate/protocol " +
-		"pipeline live. Ctrl-C reaps the session but keeps its id, so a later start (or " +
-		"restart) resumes it.\n\n" +
-		"Tier 0 has no background daemon channel, so start runs in the foreground; use " +
-		"`ctl up` to supervise the fleet in the background.",
+	Short: "Hand an attempt to a running `ctl up` to bring up in the background",
+	Long: "start hands one attempt off to a running `ctl up` supervisor, which brings " +
+		"it up in the background — resuming the recorded session, or spawning a fresh " +
+		"one (cold-started from the brief) if there is none — through the same self-heal " +
+		"cascade and gate/protocol pipeline the enabled fleet uses.\n\n" +
+		"It is imperative and transient: it does not persist like `enable` and is swept " +
+		"if the supervisor restarts, so it never leaves an unsupervised orphan. start " +
+		"requires a running `ctl up`; it errors if none is up. The session runs " +
+		"headless — watch it with `ctl logs -f <ticket[@attempt]>`.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, ticket, att, err := newCtlTarget(args[0])
 		if err != nil {
 			return err
 		}
-		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "draiverctl start %s/%s — Ctrl-C to stop (session stays resumable)\n", ticket, att)
-		return r.Start(ctx, ticket, att, streamPrinter(out))
+		res, err := r.Start(ticket, att)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"handed %s/%s to draiverctld (pid %d) — it will come up shortly; watch with `ctl logs -f %s@%s`\n",
+			ticket, att, res.ControllerPID, ticket, att)
+		return nil
 	},
 }
 

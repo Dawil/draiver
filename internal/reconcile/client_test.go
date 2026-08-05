@@ -2,7 +2,7 @@ package reconcile_test
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +14,51 @@ import (
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/session"
+	"github.com/Dawil/draiver/internal/store"
 )
+
+// --- Phase C helpers: seed a running controller / a raw desired-marker -------
+
+// seedController writes a controller.json for a live `ctl up` (an alive pid) and
+// returns it, so a test can exercise the require-pid-1 gate and marker union
+// without standing up a real daemon.
+func seedController(t *testing.T, root store.Root, proc *fakeProc) reconcile.Controller {
+	t.Helper()
+	nonce, err := reconcile.NewNonce()
+	if err != nil {
+		t.Fatalf("mint nonce: %v", err)
+	}
+	ctrl := reconcile.Controller{PID: 99001, Nonce: nonce}
+	if err := reconcile.WriteController(root, ctrl); err != nil {
+		t.Fatalf("seed controller: %v", err)
+	}
+	proc.setAlive(ctrl.PID, true)
+	return ctrl
+}
+
+// seedControllerPID writes a controller.json for the given pid without marking
+// it alive — a stale record left by a crashed daemon, which must not satisfy the
+// require-pid-1 gate.
+func seedControllerPID(t *testing.T, root store.Root, pid int) {
+	t.Helper()
+	nonce, err := reconcile.NewNonce()
+	if err != nil {
+		t.Fatalf("mint nonce: %v", err)
+	}
+	if err := reconcile.WriteController(root, reconcile.Controller{PID: pid, Nonce: nonce}); err != nil {
+		t.Fatalf("seed controller: %v", err)
+	}
+}
+
+// writeRawMarker writes a desired-marker with an arbitrary nonce directly (the
+// marker type is unexported), so a test can plant a stale-nonce marker.
+func writeRawMarker(t *testing.T, root store.Root, ticket, att, nonce string) {
+	t.Helper()
+	body := []byte(`{"nonce":"` + nonce + `","stamp":"2026-08-05T00:00:00Z"}`)
+	if err := os.WriteFile(root.DesiredMarkerPath(ticket, att), body, 0o644); err != nil {
+		t.Fatalf("write raw marker: %v", err)
+	}
+}
 
 // collector accumulates the events a foreground Start mirrors to its observer, so
 // a test can assert the stream was rendered.
@@ -37,13 +81,55 @@ func (c *collector) count(k agent.EventKind) int {
 	return c.kind[k]
 }
 
-// TestStartForegroundBringsUpAndDispatches: `ctl start` on one attempt spawns a
-// session, injects the cold-start brief, and runs the same watch+gate+protocol
-// pipeline the daemon does — a promoted gotcha lands in the durable log and a
-// usage frame is metered. Ctrl-C (ctx cancel) reaps the session but keeps its id
-// for a later resume.
-func TestStartForegroundBringsUpAndDispatches(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+// TestStartHandsOffToRunningDaemon: `ctl start` no longer drives a session
+// itself — it requires a live `ctl up` and writes a transient desired-marker
+// stamped with that controller's nonce. The daemon's next tick unions the marker
+// into its desired set and admits the attempt through the same bringUp cascade +
+// brief injection the enabled fleet uses. The attempt here is *disabled*, so the
+// marker is the only thing that makes it desired — proving the union, not enable.
+func TestStartHandsOffToRunningDaemon(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	ctrl := seedController(t, w.root, proc)
+
+	res, err := r.Start(ticket, att)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if res.ControllerPID != ctrl.PID {
+		t.Fatalf("handed off to pid %d, want %d", res.ControllerPID, ctrl.PID)
+	}
+
+	// A disabled attempt is admitted only because the marker unions into desired.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	waitFor(t, "daemon admits the marked attempt", func() bool { return f.count() == 1 })
+	live := f.at(0)
+	waitFor(t, "brief on fresh spawn", func() bool {
+		p := live.prompted()
+		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
+	})
+
+	// The full pipeline runs under the daemon: a promoted gotcha lands in the log.
+	live.emit(bashCall("t1", `draiver log PROJ-1 --type gotcha "handed-off session works"`))
+	waitFor(t, "promoted gotcha", func() bool {
+		return hasType(logTypes(t, w.root, ticket, att), "gotcha")
+	})
+}
+
+// TestStartRequiresController: with no running `ctl up`, start refuses rather
+// than spawning an unsupervised orphan (require-pid-1). A controller record whose
+// pid is dead does not count as live either.
+func TestStartRequiresController(t *testing.T) {
 	w := newWorld(t)
 	ticket := "PROJ-1"
 	att := w.newTicket(t, ticket)
@@ -52,97 +138,87 @@ func TestStartForegroundBringsUpAndDispatches(t *testing.T) {
 	r := w.reconciler(t, f, newProc())
 	t.Cleanup(r.Close)
 
-	col := newCollector()
-	done := make(chan error, 1)
-	go func() { done <- r.Start(ctx, ticket, att, col.observe) }()
-
-	// A session came up and the brief was injected as the first prompt.
-	waitFor(t, "spawn", func() bool { return f.count() == 1 })
-	live := f.at(0)
-	waitFor(t, "brief prompt", func() bool {
-		p := live.prompted()
-		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
-	})
-
-	// The agent's `draiver log` is promoted, and a usage frame is metered — the
-	// full pipeline is live under the foreground driver.
-	live.emit(bashCall("t1", `draiver log PROJ-1 --type gotcha "hand-driven session works"`))
-	waitFor(t, "promoted gotcha", func() bool {
-		return hasType(logTypes(t, w.root, ticket, att), "gotcha")
-	})
-	live.emit(agent.Event{Kind: agent.EventUsage, Usage: &agent.Usage{ContextTokens: 4242, CostUSD: 0.12}, Raw: json.RawMessage(`{"u":1}`)})
-
-	sess, err := session.Open(w.root, ticket, att)
-	if err != nil {
-		t.Fatalf("open session: %v", err)
-	}
-	t.Cleanup(func() { sess.Close() })
-	waitFor(t, "metered usage", func() bool {
-		m, err := sess.ReadMeter()
-		return err == nil && m.Usage.ContextTokens == 4242
-	})
-
-	// The observer saw the live stream rendered.
-	if col.count(agent.EventToolCall) == 0 {
-		t.Fatal("observer never saw the tool call")
+	if _, err := r.Start(ticket, att); !errors.Is(err, reconcile.ErrNoController) {
+		t.Fatalf("expected ErrNoController with no daemon, got %v", err)
 	}
 
-	// Ctrl-C stops the foreground session; Start returns and the pid is cleared,
-	// but the session id survives for a resume.
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Start returned %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Start did not return after ctx cancel")
-	}
-	id, err := sess.ReadIdentity()
-	if err != nil {
-		t.Fatalf("read identity: %v", err)
-	}
-	if id.PID != 0 {
-		t.Fatalf("pid should be cleared after a foreground stop, got %d", id.PID)
-	}
-	if id.SessionID == "" {
-		t.Fatal("session id must survive for a later resume")
-	}
-	if !live.wasKilled() {
-		t.Fatal("the session process should have been reaped")
+	// A stale record left by a crashed daemon (pid not alive) must not pass.
+	seedControllerPID(t, w.root, 424242)
+	if _, err := r.Start(ticket, att); !errors.Is(err, reconcile.ErrNoController) {
+		t.Fatalf("dead controller pid should not satisfy require-pid-1, got %v", err)
 	}
 }
 
-// TestStartExitsWhenSessionEnds: a session that exits on its own (its stream
-// closes) makes a foreground Start return without needing a cancel.
-func TestStartExitsWhenSessionEnds(t *testing.T) {
+// TestDaemonSweepsStaleMarker: a desired-marker whose nonce does not match the
+// live controller (e.g. left by a previous daemon boot) is ignored *and* swept
+// off disk by the reconcile loop — so an imperative start never outlives the
+// daemon it was handed to.
+func TestDaemonSweepsStaleMarker(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	// A live controller exists, but the marker carries a different boot's nonce.
+	seedController(t, w.root, proc)
+	writeRawMarker(t, w.root, ticket, att, "a-previous-boot")
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if n := f.count(); n != 0 {
+		t.Fatalf("a stale marker must not admit, but %d session(s) spawned", n)
+	}
+	if _, err := os.Stat(w.root.DesiredMarkerPath(ticket, att)); !os.IsNotExist(err) {
+		t.Fatalf("stale marker should have been swept, stat err=%v", err)
+	}
+}
+
+// TestRestartForegroundExitsWhenSessionEnds: restart still drives its session in
+// the foreground (this phase), so a resumed session that exits on its own — its
+// stream closes — makes Restart return without a cancel. This pins the
+// runForeground exit-on-close path that `start` used to cover.
+func TestRestartForegroundExitsWhenSessionEnds(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
 	att := w.newTicket(t, ticket)
 
 	f := &factory{}
-	r := w.reconciler(t, f, newProc())
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
 	t.Cleanup(r.Close)
 
+	// Admit once to record a session id + live pid, then detach the daemon ingest.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	orig, _ := sess.ReadIdentity()
+	proc.setAlive(orig.PID, true)
+	r.Close()
+
 	done := make(chan error, 1)
-	go func() { done <- r.Start(ctx, ticket, att, nil) }()
+	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushNone, nil, nil) }()
 
-	waitFor(t, "spawn", func() bool { return f.count() == 1 })
-	live := f.at(0)
-	waitFor(t, "brief prompt", func() bool { return len(live.prompted()) > 0 })
-
-	// The agent process exits — its stream closes.
-	if err := live.Kill(); err != nil {
+	waitFor(t, "resume", func() bool { return f.count() == 2 })
+	resumed := f.at(1)
+	if err := resumed.Kill(); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("Start returned %v", err)
+			t.Fatalf("Restart returned %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Start did not return after the session exited")
+		t.Fatal("Restart did not return after the session exited")
 	}
 }
 
@@ -500,8 +576,11 @@ func TestBringUpFallsThroughWhenResumeNeverComesOnline(t *testing.T) {
 	r := w.reconcilerConfirm(t, f, newProc(), 50*time.Millisecond)
 	t.Cleanup(r.Close)
 
-	done := make(chan error, 1)
-	go func() { done <- r.Start(ctx, ticket, att, nil) }()
+	// The attempt is enabled, so the daemon's admit drives bringUp: Resume the
+	// recorded id, confirm-online, and fall through to a fresh Spawn on no-show.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
 
 	// The recorded id is Resumed first (fake #0) but never comes online; the cascade
 	// reaps it and Spawns fresh (fake #1) on the same worktree.
@@ -525,7 +604,5 @@ func TestBringUpFallsThroughWhenResumeNeverComesOnline(t *testing.T) {
 		id, err := sess.ReadIdentity()
 		return err == nil && id.SessionID == "sess-live"
 	})
-
-	cancel()
-	<-done
+	// The admitted fresh run is drained by t.Cleanup(r.Close); defer cancel() ends ctx.
 }
