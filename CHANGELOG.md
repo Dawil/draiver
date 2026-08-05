@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-05
+
+### Added
+
+- **`ctl logs` reads for a human by default; raw stream-json moves behind
+  `--json` (`draiverctl`, drv-003).** `ctl logs` used to dump the raw
+  `stream.jsonl` tee — one dense JSON object per line, the assistant's prose
+  buried as an escaped Markdown string amid event uuids and the session id. It now
+  renders the recorded stream the way the live `start`/`restart` view does:
+  assistant prose as prose, `> tool` calls with a short argument snippet, tool
+  errors, permission prompts, usage/cost + context-window fill, and turn
+  boundaries — with the transport envelope dropped. The live printer and `logs`
+  share one renderer (`renderEvent` in `cmd/ctl.go`), reached by normalizing each
+  recorded line back through the adapter's exported `claudecode.Normalize`, so the
+  two speak the same vocabulary. The raw byte-for-byte tee is still one flag away —
+  `ctl logs <target> --json` — so `| jq` pipelines and replay keep working, and
+  `-f`/`--follow` works in both modes.
+
+## [0.2.0] - 2026-08-05
+
 ### Added
 
 - **First-class Review → Running reopen (drv-002).** A reviewed attempt can be
@@ -163,19 +183,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records are replaced atomically (temp-file + fsync + rename) and `stream.jsonl`
   is append-only and safe for concurrent appends (`internal/session`, with paths
   in `internal/store`).
-- **`ctl logs` reads for a human by default; raw stream-json moves behind
-  `--json` (`draiverctl`, drv-003).** `ctl logs` used to dump the raw
-  `stream.jsonl` tee — one dense JSON object per line, the assistant's prose
-  buried as an escaped Markdown string amid event uuids and the session id. It now
-  renders the recorded stream the way the live `start`/`restart` view does:
-  assistant prose as prose, `> tool` calls with a short argument snippet, tool
-  errors, permission prompts, usage/cost + context-window fill, and turn
-  boundaries — with the transport envelope dropped. The live printer and `logs`
-  share one renderer (`renderEvent` in `cmd/ctl.go`), reached by normalizing each
-  recorded line back through the adapter's exported `claudecode.Normalize`, so the
-  two speak the same vocabulary. The raw byte-for-byte tee is still one flag away —
-  `ctl logs <target> --json` — so `| jq` pipelines and replay keep working, and
-  `-f`/`--follow` works in both modes.
 
 ### Fixed
 
