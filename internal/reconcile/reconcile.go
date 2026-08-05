@@ -333,10 +333,17 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 		currentSet[k] = true
 	}
 
-	// Admit: desired but not running.
+	// Admit: desired but not running. A key already in the table is normally left
+	// alone; the exception is a spent run an intentional reap cleared while the
+	// attempt is still desired (readmittable) — the daemon reaps the spent entry
+	// and re-admits, the seam a client `restart` (and a bare `ctl stop` on a
+	// still-enabled attempt) rides on (drvctl-016).
 	for key, a := range desired {
 		if currentSet[key] {
-			continue
+			if !r.readmittable(key) {
+				continue
+			}
+			r.reapSpentRun(key)
 		}
 		if err := r.admit(ctx, a); err != nil {
 			r.opt.Logf("reconcile: admit %s/%s: %v", key.Ticket, key.Attempt, err)
@@ -419,11 +426,11 @@ func (r *Reconciler) stateOf(key worktree.Key) project.State {
 
 // wired is a brought-up live session with the ingest machinery bound to its
 // stream: the handle owning the process, the session store, and the two gates
-// plus the watcher each of its events is dispatched through. Both admit (the
-// daemon, streaming in a background goroutine) and Start (the client, streaming
-// in the foreground) obtain one from bringUp — the single place the session and
-// its watch/gate/protocol pipeline are wired, so the two entry points cannot
-// drift apart.
+// plus the watcher each of its events is dispatched through. admit obtains one
+// from bringUp — the single place the session and its watch/gate/protocol
+// pipeline are wired. Since the imperative verbs became daemon handoffs
+// (drvctl-016), admit is the only caller, so the client path cannot drift from
+// it: `start`/`restart` write a marker and the daemon does the bring-up.
 type wired struct {
 	handle    *manage.Handle
 	sess      *session.Store
@@ -446,9 +453,9 @@ type wired struct {
 // baseline, and constructs the permission gate and watcher — everything needed to
 // consume the live stream, but not yet consuming it. On any failure it unwinds
 // cleanly (reap + close) so a failed bring-up leaves nothing half-live. The
-// caller injects the cold-start brief once it is ready to consume the stream —
-// but only when bringUp spawned fresh (wired.spawned), the brief-on-reset
-// coupling.
+// caller (admit) injects the cold-start brief once it is ready to consume the
+// stream — but only when bringUp spawned fresh (wired.spawned), the
+// brief-on-reset coupling.
 //
 // The cascade climbs from the highest surviving layer: if a session id is on
 // record it Resumes and confirms the resume came online; a recorded id that can
@@ -783,6 +790,65 @@ func (r *Reconciler) recordRetire(key worktree.Key, st project.State, reclaimed 
 	}
 }
 
+// readmittable reports whether a run already in the table should be reaped and
+// admitted afresh this tick — the seam a client `restart` (and a bare `ctl stop`
+// on a still-desired attempt) rides on. It is called only for keys already in the
+// desired set, so desired-ness is a given; what it adds is telling an intentional
+// reap apart from a crash. Two conditions hold:
+//
+//   - the run is spent (its ingest goroutine has returned, so the session
+//     process is gone) — a live run is left strictly alone;
+//   - the on-disk pid is 0, the mark of an intentional reap (Stop/restart clear
+//     it). A crash or clean exit leaves the dead pid on record, so the Tier-0
+//     "no respawn on crash" invariant still holds. The other pid==0 path — a gate
+//     or context-limit auto-stop — moves the attempt out of desired, so it never
+//     reaches here (decision #29).
+//
+// No desired-marker check is needed: the desired() gate already filtered on it
+// (a `ctl stop` removes the marker, so a purely-imperative attempt leaves desired
+// and is not re-admitted; an enabled attempt is re-admitted on the enable bit
+// alone — a bare stop on it is transient by design). An adopted (foreign) run has
+// no ingest to spend and no handle to re-drive, so it is never re-admitted here.
+func (r *Reconciler) readmittable(key worktree.Key) bool {
+	r.mu.Lock()
+	rn := r.runs[key]
+	r.mu.Unlock()
+	if rn == nil || rn.adopted {
+		return false
+	}
+	select {
+	case <-rn.done:
+	default:
+		return false // still live
+	}
+	id, ok := r.readIdentity(key)
+	if !ok || id.PID != 0 {
+		return false
+	}
+	return true
+}
+
+// reapSpentRun removes a spent run from the table and releases its resources, so
+// the following admit brings the attempt up afresh. It is only called for a run
+// readmittable already confirmed spent (its done channel closed), so the receive
+// on done does not block. Kill is idempotent — the process is already gone — and
+// only clears the now-stale handle state.
+func (r *Reconciler) reapSpentRun(key worktree.Key) {
+	r.mu.Lock()
+	rn := r.runs[key]
+	delete(r.runs, key)
+	r.mu.Unlock()
+	if rn == nil {
+		return
+	}
+	rn.cancel()
+	if err := rn.handle.Kill(); err != nil {
+		r.opt.Logf("reconcile: reap spent %s/%s: %v", key.Ticket, key.Attempt, err)
+	}
+	<-rn.done
+	_ = rn.sess.Close()
+}
+
 // Adopt rebuilds the daemon's view from disk on start, so a restarted draiverctld
 // converges without disturbing what is still running. It is the crash/restart
 // recovery entry point Run calls before its first Tick:
@@ -965,26 +1031,66 @@ func (r *Reconciler) Snapshot() ([]Status, error) {
 // --- client verbs -----------------------------------------------------------
 //
 // Start/Stop/Restart are the imperative overrides the `draiver ctl` client
-// exposes — the "systemctl" verbs to the reconcile loop's "PID 1". Start is a
-// control-plane action: it does not bring a session up itself (an unsupervised
-// orphan that dies with the invoking shell), it hands the attempt off to a
-// running `ctl up` by writing the transient desired-marker the loop reconciles
-// — so the self-heal cascade and brief-on-reset coupling live in the one
-// daemon-shared bringUp and the client path cannot drift from it (drvctl-016).
-// Stop stays a direct reap (it only needs the recorded pid, and reaping a
-// process wants no supervisor). runForeground is the pre-daemon foreground
-// driver Restart still uses this phase.
+// exposes — the "systemctl" verbs to the reconcile loop's "PID 1". Start and
+// Restart are control-plane actions: they do not bring a session up themselves
+// (an unsupervised orphan that dies with the invoking shell), they hand the
+// attempt off to a running `ctl up` by writing the transient desired-marker the
+// loop reconciles — so the self-heal cascade and brief-on-reset coupling live in
+// the one daemon-shared bringUp and the client path cannot drift from it
+// (drvctl-016). Stop is a direct reap (it only needs the recorded pid, and
+// reaping a process wants no supervisor) that also clears the marker, so a
+// stopped attempt leaves the imperative fleet and stays stopped.
 
-// ErrNoController is returned by the imperative verbs when no `ctl up` is
+// ErrNoController is returned by the imperative handoff verbs when no `ctl up` is
 // running to hand the attempt off to — the "requires PID 1" gate that keeps a
-// backgrounded start from spawning an unsupervised orphan (drvctl-016).
+// backgrounded start/restart from spawning an unsupervised orphan (drvctl-016).
 var ErrNoController = errors.New("no running `ctl up` (start the supervisor with `ctl up` first)")
 
+// requireController returns the live controller or ErrNoController — the
+// require-pid-1 gate shared by the handoff verbs (start/restart). It refuses
+// rather than let a verb act with no supervisor to own the resulting session.
+func (r *Reconciler) requireController() (Controller, error) {
+	ctrl, ok := r.liveController()
+	if !ok {
+		return Controller{}, ErrNoController
+	}
+	return ctrl, nil
+}
+
+// handOff hands an attempt to the live controller so the daemon's next tick
+// brings it up (or back up) through the shared bringUp cascade. For a not-yet-
+// desired (disabled) attempt it writes the transient desired-marker stamped with
+// the controller's boot nonce — the stamp is what makes the handoff transient (a
+// restarted daemon has a new nonce and sweeps it). An already-enabled attempt is
+// left unmarked: the durable enable bit already makes it desired, and because
+// desired() short-circuits Enabled before reading the marker, a redundant marker
+// would outlive a later `disable` and leave the attempt stuck desired. Such a
+// target is re-admitted on the enable bit alone (reclaimSpent), so no marker is
+// needed — decision #29 (drvctl-016).
+func (r *Reconciler) handOff(ctrl Controller, ticket, attempt string) error {
+	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+	if err != nil {
+		return err
+	}
+	if a.Enabled {
+		return nil
+	}
+	return writeDesiredMarker(r.opt.Root, ticket, attempt, desiredMarker{Nonce: ctrl.Nonce, Stamp: r.opt.Now()})
+}
+
 // StartResult reports how an imperative Start was handed off, so the client can
-// print a truthful message (which supervisor now owns the attempt).
+// print a truthful message: which supervisor now owns the attempt, and — for
+// start --new-attempt — the forked id it created.
 type StartResult struct {
 	// ControllerPID is the pid of the running `ctl up` the attempt was handed to.
 	ControllerPID int
+	// Attempt is the attempt actually handed off: the target, or the fork's new id
+	// when Forked.
+	Attempt string
+	// Forked and From are set by start --new-attempt — a new attempt was created
+	// from From and handed off, leaving the parent as it was (drvctl-016).
+	Forked bool
+	From   string
 }
 
 // Start hands one attempt off to a running `ctl up` to bring up in the
@@ -1001,69 +1107,40 @@ func (r *Reconciler) Start(ticket, attempt string) (StartResult, error) {
 	if _, err := project.LoadAttempt(r.opt.Root, ticket, attempt); err != nil {
 		return StartResult{}, err
 	}
-	ctrl, ok := r.liveController()
-	if !ok {
-		return StartResult{}, ErrNoController
-	}
-	m := desiredMarker{Nonce: ctrl.Nonce, Stamp: r.opt.Now()}
-	if err := writeDesiredMarker(r.opt.Root, ticket, attempt, m); err != nil {
+	ctrl, err := r.requireController()
+	if err != nil {
 		return StartResult{}, err
 	}
-	return StartResult{ControllerPID: ctrl.PID}, nil
+	if err := r.handOff(ctrl, ticket, attempt); err != nil {
+		return StartResult{}, err
+	}
+	return StartResult{ControllerPID: ctrl.PID, Attempt: attempt}, nil
 }
 
-// runForeground brings up a single attempt's session and blocks in the
-// foreground, dispatching its stream through the very same watch+gate+protocol
-// pipeline the daemon's admit uses, until the session exits on its own or ctx is
-// cancelled. It climbs the same self-heal cascade admit does (bringUp): a
-// resumable session is Resumed and continued as-is; only a fresh spawn is
-// cold-started from the brief. observe, if non-nil, receives every event before
-// dispatch so a caller can render the live stream. On return the session is
-// reaped but its id kept on disk, so a later bring-up Resumes the same cattle
-// handle. It does not register the session in the run table — a standalone
-// driver, not part of the reconcile diff. Restart still uses it this phase;
-// Start has moved to the daemon-handoff above (drvctl-016).
-func (r *Reconciler) runForeground(ctx context.Context, ticket, attempt string, observe func(agent.Event)) error {
-	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+// StartNewAttempt forks a new attempt off the target and hands the *fork* to the
+// daemon, leaving the parent exactly as it was — a parallel branch, not a reset
+// (decision #23). Where `restart --new-attempt` abandons the current path (it
+// reaps and parks the parent), `start --new-attempt` opens a second path
+// alongside it: the parent keeps running if it was, the child starts fresh. It
+// requires pid 1 before forking, so a fork is never created with no supervisor
+// to run it.
+func (r *Reconciler) StartNewAttempt(ticket, parent string) (StartResult, error) {
+	if _, err := project.LoadAttempt(r.opt.Root, ticket, parent); err != nil {
+		return StartResult{}, err
+	}
+	ctrl, err := r.requireController()
 	if err != nil {
-		return err
+		return StartResult{}, err
 	}
-	key := worktree.Key{Ticket: ticket, Attempt: attempt}
-
-	w, err := r.bringUp(ctx, a)
+	newID, err := r.forkAttempt(ticket, parent)
 	if err != nil {
-		return err
+		return StartResult{}, err
 	}
-	// Reap (clearing the now-stale pid) then release the store on any exit path —
-	// a clean session end, a gate halt, or a ctx cancellation. Kill is idempotent,
-	// so a session a gate already halted is a no-op here.
-	defer w.sess.Close()
-	defer func() { _ = w.handle.Kill() }()
-
-	// Brief-on-reset: (re)inject the cold-start brief only when bringUp spawned a
-	// fresh session (L0 discarded). A resume continues its conversation without a
-	// re-brief (drvctl-016).
-	if w.spawned {
-		if err := protocol.InjectBrief(ctx, r.opt.Root, ticket, attempt, w.handle); err != nil {
-			r.opt.Logf("reconcile: inject brief %s/%s: %v", ticket, attempt, err)
-		}
+	r.recordStartFork(ticket, parent, newID)
+	if err := r.handOff(ctrl, ticket, newID); err != nil {
+		return StartResult{}, err
 	}
-
-	stream := w.handle.Stream()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case ev, ok := <-stream:
-			if !ok {
-				return nil
-			}
-			if observe != nil {
-				observe(ev)
-			}
-			r.dispatch(ctx, key, w.protoGate, w.permGate, w.limitGate, w.watcher, ev)
-		}
-	}
+	return StartResult{ControllerPID: ctrl.PID, Attempt: newID, Forked: true, From: parent}, nil
 }
 
 // StopResult reports what Stop did, so the client can print a truthful message.
@@ -1076,14 +1153,16 @@ type StopResult struct {
 	AlreadyStopped bool
 }
 
-// Stop reaps an attempt's recorded session by signalling its process, then clears
-// the now-stale pid from session.json while keeping the session id, worktree, and
-// log intact — the cattle handle survives for a later Start/Restart to Resume.
-// It works on any recorded session regardless of who started it (a foreground
-// Start, the daemon, or a re-adopted foreign process), because all it needs is
-// the pid on disk. Stopping an attempt with no session, or one already stopped,
-// is not an error: the goal state (not running) already holds.
-func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
+// reap terminates an attempt's recorded session process and clears the now-stale
+// pid from session.json, keeping the session id, worktree, and log intact — the
+// cattle handle survives for a later Resume. It is the teardown shared by the
+// public Stop verb and restart's flush, and deliberately does NOT touch the
+// desired-marker: Stop removes it to leave the fleet, while restart rewrites it
+// to re-request the bring-up. It works on any recorded session regardless of who
+// started it (the daemon or a re-adopted foreign process), because all it needs
+// is the pid on disk. Reaping an attempt with no session, or one already
+// stopped, is not an error: the goal state (not running) already holds.
+func (r *Reconciler) reap(ticket, attempt string) (StopResult, error) {
 	sess, err := session.Open(r.opt.Root, ticket, attempt)
 	if err != nil {
 		return StopResult{}, err
@@ -1117,6 +1196,24 @@ func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
 	return res, nil
 }
 
+// Stop reaps an attempt's recorded session (see reap) and then clears any
+// desired-marker it carried, so the attempt leaves the imperative fleet and a
+// stopped attempt stays stopped — the symmetric counterpart of `start` writing
+// the marker. Without this, a still-desired attempt (enabled, or imperatively
+// started) would be re-admitted by the daemon on the next tick. Stopping an
+// attempt with no session, or one already stopped, is not an error: the goal
+// state (not running) already holds.
+func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
+	res, err := r.reap(ticket, attempt)
+	if err != nil {
+		return res, err
+	}
+	if err := removeDesiredMarker(r.opt.Root, ticket, attempt); err != nil {
+		return res, fmt.Errorf("reconcile: clear desired marker %s/%s: %w", ticket, attempt, err)
+	}
+	return res, nil
+}
+
 // FlushLevel selects how deep restart's teardown reaps before the start cascade
 // climbs back — a point on the degree axis of drvctl-016's state stack. The
 // levels are ordinal and cumulative: a deeper level implies every shallower
@@ -1140,76 +1237,112 @@ const (
 	FlushAttempt
 )
 
-// RestartResult reports what a Restart flushed and which attempt the start
-// cascade climbed back into — the same attempt for an in-place restart, or the
-// new fork's id when the depth reached FlushAttempt. Restart hands it to its
-// announce callback so a caller can report the plan (in particular a fork's new
-// id) before Start blocks.
+// RestartResult reports what a Restart flushed, which attempt the daemon will
+// bring back up — the same attempt for an in-place restart, or the new fork's id
+// when the depth reached FlushAttempt — and which controller it was handed to.
+// The client renders it to report the plan (in particular a fork's new id and
+// the parked parent) up front.
 type RestartResult struct {
-	Level   FlushLevel
-	Ticket  string
-	Attempt string // the attempt the cascade brought up (the fork's id for FlushAttempt)
-	Forked  bool   // true when FlushAttempt created a new attempt
-	From    string // the parent attempt id, set when Forked
+	Level         FlushLevel
+	Ticket        string
+	Attempt       string // the attempt handed off (the fork's id for FlushAttempt)
+	Forked        bool   // true when FlushAttempt created a new attempt
+	From          string // the parent attempt id, set when Forked
+	ControllerPID int    // the `ctl up` the restart handed the attempt off to
 }
 
-// Restart reaps the current session (Stop) then brings the attempt back up
-// through the foreground driver (runForeground), blocking until it exits. level
-// selects how deep the teardown flushes before the start cascade climbs back —
-// the degree axis of drvctl-016 (see FlushLevel). FlushNone is the clean
-// "continue" the old hybrid restart failed to be: it Resumes the same session and
-// does not re-brief. FlushAttempt is the one point on the axis where restart
-// stops mutating in place and instead forks a new attempt, bringing *that* one up
-// fresh.
+// Restart reaps the current session, flushes volatile state to the chosen depth,
+// then hands the attempt off to a running `ctl up` to bring back up in the
+// background — the same imperative-transient handoff `start` uses (drvctl-016
+// Phase C2). It requires pid 1 (ErrNoController otherwise) and returns without
+// blocking on a session; watch the brought-up attempt with `ctl logs -f`.
 //
-// Restart still drives its session in the foreground this phase; the imperative
-// Start verb has already moved to the daemon handoff (drvctl-016 Phase C1), and
-// Restart follows in C2.
+// level selects how deep the teardown flushes before the daemon's start cascade
+// climbs back — the degree axis (see FlushLevel). FlushNone is the clean
+// "continue" the old hybrid restart failed to be: the cascade Resumes the same
+// session and does not re-brief. FlushAttempt is the one branch point where
+// restart stops mutating in place and forks a new attempt, parking the parent
+// (disable + marker sweep) so the daemon runs the fork and not both (decision
+// #23); the fork is what RestartResult.Forked/From report.
 //
-// announce, if non-nil, is called once the target attempt is fixed (after any
-// flush/fork) but before the session blocks, so a caller can surface the plan —
-// notably a fork's new id — up front rather than only after the session exits.
-func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, level FlushLevel, announce func(RestartResult), observe func(agent.Event)) error {
-	// The shallowest teardown always happens: reap the running process, keeping the
-	// durable layers for the flush/cascade to act on.
-	if _, err := r.Stop(ticket, attempt); err != nil {
-		return err
+// The reap keeps the desired-marker (unlike the public Stop, which clears it);
+// the handoff below rewrites it. For an in-place restart that rewritten marker
+// is the re-admit signal the daemon honours over the spent, intentionally-
+// stopped run (see readmittable).
+func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, level FlushLevel) (RestartResult, error) {
+	ctrl, err := r.requireController()
+	if err != nil {
+		return RestartResult{}, err
 	}
 
-	res := RestartResult{Level: level, Ticket: ticket, Attempt: attempt}
+	// The shallowest teardown always happens: reap the running process, keeping the
+	// durable layers (and the marker) for the flush/cascade to act on.
+	if _, err := r.reap(ticket, attempt); err != nil {
+		return RestartResult{}, err
+	}
+
+	res := RestartResult{Level: level, Ticket: ticket, Attempt: attempt, ControllerPID: ctrl.PID}
 
 	switch {
 	case level >= FlushAttempt:
 		// Stop mutating in place and branch: fork a new attempt and climb into it.
 		newID, err := r.forkAttempt(ticket, attempt)
 		if err != nil {
-			return err
+			return RestartResult{}, err
 		}
 		r.recordFork(ticket, attempt, newID)
+		// Park the parent so the daemon does not run it alongside the child
+		// (decision #23): restart --new-attempt abandons this path for a fresh one.
+		if err := r.parkAttempt(ticket, attempt); err != nil {
+			return RestartResult{}, err
+		}
 		res.Attempt, res.Forked, res.From = newID, true, attempt
 	case level >= FlushWorktree:
 		a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
 		if err != nil {
-			return err
+			return RestartResult{}, err
 		}
 		if err := r.flushSession(ticket, attempt); err != nil {
-			return err
+			return RestartResult{}, err
 		}
 		if err := r.flushWorktree(ctx, a); err != nil {
-			return err
+			return RestartResult{}, err
 		}
 		r.recordFlush(ticket, attempt, FlushWorktree)
 	case level >= FlushSession:
 		if err := r.flushSession(ticket, attempt); err != nil {
-			return err
+			return RestartResult{}, err
 		}
 		r.recordFlush(ticket, attempt, FlushSession)
 	}
 
-	if announce != nil {
-		announce(res)
+	// Hand the (possibly new) target off to the daemon.
+	if err := r.handOff(ctrl, res.Ticket, res.Attempt); err != nil {
+		return RestartResult{}, err
 	}
-	return r.runForeground(ctx, res.Ticket, res.Attempt, observe)
+	return res, nil
+}
+
+// parkAttempt takes an attempt out of both desired sets: it appends a `disable`
+// event (leaving the declarative fleet) and sweeps any imperative desired-marker.
+// It is how `restart --new-attempt` retires the parent after forking a child off
+// it, so the daemon runs the fork and not both (decision #23). The parent's log
+// is untouched (recordFork already noted the branch on it); the daemon's normal
+// disable→retire reaps its session and reclaims a clean worktree, and the session
+// id survives on disk (Kill keeps the cattle handle) so the parked attempt stays
+// resumable.
+func (r *Reconciler) parkAttempt(ticket, attempt string) error {
+	if _, err := ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
+		Type:  "disable",
+		Actor: r.opt.Actor,
+		Body:  fmt.Sprintf("Parked %s/%s on fork: restart --new-attempt forked a new attempt from it, so it leaves the supervised fleet. Its log is preserved as an immutable record of the path taken so far.", ticket, attempt),
+	}); err != nil {
+		return fmt.Errorf("reconcile: park %s/%s on fork: %w", ticket, attempt, err)
+	}
+	if err := removeDesiredMarker(r.opt.Root, ticket, attempt); err != nil {
+		return fmt.Errorf("reconcile: sweep marker for parked %s/%s: %w", ticket, attempt, err)
+	}
+	return nil
 }
 
 // flushSession discards an attempt's session conversation (L0): it clears the
@@ -1301,6 +1434,21 @@ func (r *Reconciler) recordFork(ticket, parent, child string) {
 		Body:  body,
 	}); err != nil {
 		r.opt.Logf("reconcile: record fork %s/%s: %v", ticket, parent, err)
+	}
+}
+
+// recordStartFork notes on the parent that `start --new-attempt` branched a new
+// attempt off it while leaving it running — the parallel-branch counterpart of
+// recordFork (which restart uses when it instead parks the parent). Best-effort,
+// like recordFork.
+func (r *Reconciler) recordStartFork(ticket, parent, child string) {
+	body := fmt.Sprintf("Branched a new attempt %s/%s from this one (start --new-attempt); this attempt is left running alongside the fork.", ticket, child)
+	if _, err := ticketlog.Append(r.opt.Root, ticket, parent, event.Event{
+		Type:  "note",
+		Actor: r.opt.Actor,
+		Body:  body,
+	}); err != nil {
+		r.opt.Logf("reconcile: record start-fork %s/%s: %v", ticket, parent, err)
 	}
 }
 

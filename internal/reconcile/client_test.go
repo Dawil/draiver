@@ -6,11 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/session"
@@ -58,27 +56,6 @@ func writeRawMarker(t *testing.T, root store.Root, ticket, att, nonce string) {
 	if err := os.WriteFile(root.DesiredMarkerPath(ticket, att), body, 0o644); err != nil {
 		t.Fatalf("write raw marker: %v", err)
 	}
-}
-
-// collector accumulates the events a foreground Start mirrors to its observer, so
-// a test can assert the stream was rendered.
-type collector struct {
-	mu   sync.Mutex
-	kind map[agent.EventKind]int
-}
-
-func newCollector() *collector { return &collector{kind: map[agent.EventKind]int{}} }
-
-func (c *collector) observe(ev agent.Event) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.kind[ev.Kind]++
-}
-
-func (c *collector) count(k agent.EventKind) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.kind[k]
 }
 
 // TestStartHandsOffToRunningDaemon: `ctl start` no longer drives a session
@@ -179,11 +156,11 @@ func TestDaemonSweepsStaleMarker(t *testing.T) {
 	}
 }
 
-// TestRestartForegroundExitsWhenSessionEnds: restart still drives its session in
-// the foreground (this phase), so a resumed session that exits on its own — its
-// stream closes — makes Restart return without a cancel. This pins the
-// runForeground exit-on-close path that `start` used to cover.
-func TestRestartForegroundExitsWhenSessionEnds(t *testing.T) {
+// TestRestartRequiresController: like start, restart is a daemon handoff and
+// refuses without a running `ctl up` — and it checks the gate UP FRONT, before
+// reaping anything, so it never tears a session down it cannot hand back. A stale
+// controller record (dead pid) does not count as live.
+func TestRestartRequiresController(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
@@ -194,7 +171,7 @@ func TestRestartForegroundExitsWhenSessionEnds(t *testing.T) {
 	r := w.reconciler(t, f, proc)
 	t.Cleanup(r.Close)
 
-	// Admit once to record a session id + live pid, then detach the daemon ingest.
+	// Bring a session up so there is a live pid a buggy restart could reap.
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("admit tick: %v", err)
 	}
@@ -202,23 +179,62 @@ func TestRestartForegroundExitsWhenSessionEnds(t *testing.T) {
 	t.Cleanup(func() { sess.Close() })
 	orig, _ := sess.ReadIdentity()
 	proc.setAlive(orig.PID, true)
-	r.Close()
 
-	done := make(chan error, 1)
-	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushNone, nil, nil) }()
-
-	waitFor(t, "resume", func() bool { return f.count() == 2 })
-	resumed := f.at(1)
-	if err := resumed.Kill(); err != nil {
-		t.Fatalf("kill: %v", err)
+	if _, err := r.Restart(ctx, ticket, att, reconcile.FlushNone); !errors.Is(err, reconcile.ErrNoController) {
+		t.Fatalf("expected ErrNoController with no daemon, got %v", err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Restart returned %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Restart did not return after the session exited")
+	// The gate is up front: the running session was NOT reaped.
+	after, _ := sess.ReadIdentity()
+	if after.PID != orig.PID {
+		t.Fatalf("restart must not reap before the require-pid-1 gate: pid %d -> %d", orig.PID, after.PID)
+	}
+
+	seedControllerPID(t, w.root, 424242) // a crashed daemon's stale record
+	if _, err := r.Restart(ctx, ticket, att, reconcile.FlushNone); !errors.Is(err, reconcile.ErrNoController) {
+		t.Fatalf("dead controller pid should not satisfy require-pid-1, got %v", err)
+	}
+}
+
+// TestStopLeavesImperativeFleet: stop is the symmetric counterpart of start —
+// it reaps the process AND removes the desired-marker, so a stopped attempt
+// leaves the imperative fleet and the daemon does not re-admit it. Here a
+// disabled attempt is desired only via a marker; after stop the marker is gone
+// and a tick admits nothing.
+func TestStopLeavesImperativeFleet(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newDisabledTicket(t, ticket)
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	seedController(t, w.root, proc)
+
+	// start hands off: writes the marker for the disabled attempt.
+	if _, err := r.Start(ticket, att); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := os.Stat(w.root.DesiredMarkerPath(ticket, att)); err != nil {
+		t.Fatalf("start should have written a marker: %v", err)
+	}
+
+	// stop reaps and clears the marker (no session yet — reap is a no-op here).
+	if _, err := r.Stop(ticket, att); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := os.Stat(w.root.DesiredMarkerPath(ticket, att)); !os.IsNotExist(err) {
+		t.Fatalf("stop must remove the desired-marker, stat err=%v", err)
+	}
+
+	// With the marker gone the disabled attempt is no longer desired: nothing admits.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if n := f.count(); n != 0 {
+		t.Fatalf("a stopped (unmarked, disabled) attempt must not admit, but %d spawned", n)
 	}
 }
 
@@ -289,58 +305,73 @@ func TestStopWhenAlreadyStopped(t *testing.T) {
 }
 
 // TestRestartResumesWithoutRebrief closes the new restart contract: with no
-// teardown depth selected, Restart reaps the process and the start cascade Resumes
-// the SAME session id (a continue, not a new attempt) — and, because the session
-// layer (L0) was kept, does NOT re-inject the cold-start brief. This is the clean
-// "continue" the old hybrid restart failed to be (it resumed the same id yet
-// force-fed a brief); the brief is coupled to a reset, not to restart (drvctl-016).
+// teardown depth selected, Restart reaps the process (clearing the pid, keeping
+// the session id) and hands the attempt back to the daemon, whose next tick
+// re-admits the spent run (readmittable: spent + pid==0, still desired) and the
+// start cascade Resumes the SAME session id — a continue, not a new attempt. And
+// because the session layer (L0) was kept, it does NOT re-inject the cold-start
+// brief. This is the clean "continue" the old hybrid restart failed to be (it
+// resumed the same id yet force-fed a brief); the brief is coupled to a reset,
+// not to restart (drvctl-016).
 func TestRestartResumesWithoutRebrief(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
-	att := w.newTicket(t, ticket)
+	att := w.newTicket(t, ticket) // enabled: desired via the enable bit, no marker
 
 	f := &factory{}
 	proc := newProc()
 	r := w.reconciler(t, f, proc)
 	t.Cleanup(r.Close)
 
-	// First bring-up records a session id (and a live pid Stop will signal).
+	ctrl := seedController(t, w.root, proc)
+
+	// First bring-up records a session id and a live pid; the run is live in the table.
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("admit tick: %v", err)
 	}
+	waitFor(t, "first spawn", func() bool { return f.count() == 1 })
 	sess, _ := session.Open(w.root, ticket, att)
 	t.Cleanup(func() { sess.Close() })
 	orig, _ := sess.ReadIdentity()
 	proc.setAlive(orig.PID, true)
 
-	// Detach the daemon's ingest so the admitted run isn't racing the restart.
-	r.Close()
-
-	col := newCollector()
-	done := make(chan error, 1)
-	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushNone, nil, col.observe) }()
-
-	// Restart resumes on the recorded id, not a fresh Spawn.
-	waitFor(t, "resume", func() bool { return f.count() == 2 })
-	resumed := f.at(1)
-	waitFor(t, "resume on the surviving id", func() bool { return resumed.resumedWith() == orig.SessionID })
-
-	// Once the resumed stream is being consumed we are past the point a fresh spawn
-	// would have briefed; a resume must never have been prompted with a brief.
-	waitFor(t, "resumed stream consumed", func() bool { return col.count(agent.EventSystem) >= 1 })
-	if p := resumed.prompted(); len(p) != 0 {
-		t.Fatalf("a resume must not be re-briefed, but was prompted: %v", p)
+	res, err := r.Restart(ctx, ticket, att, reconcile.FlushNone)
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if res.ControllerPID != ctrl.PID || res.Forked {
+		t.Fatalf("unexpected restart result: %+v", res)
+	}
+	// The reap cleared the pid but kept the session id; an enabled attempt gets no marker.
+	after, _ := sess.ReadIdentity()
+	if after.PID != 0 {
+		t.Fatalf("restart should clear the pid, got %d", after.PID)
+	}
+	if after.SessionID != orig.SessionID {
+		t.Fatalf("restart (FlushNone) must keep the session id: %q -> %q", orig.SessionID, after.SessionID)
+	}
+	if _, statErr := os.Stat(w.root.DesiredMarkerPath(ticket, att)); !os.IsNotExist(statErr) {
+		t.Fatalf("an enabled attempt must not be marked (would outlive a disable), stat err=%v", statErr)
 	}
 
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Restart returned %v", err)
+	// The reaped process exits — its stream closes, so the run becomes spent.
+	if err := f.at(0).Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	// The daemon ticks on an interval; once it observes the spent run it re-admits
+	// it and Resumes the same id. Poll a tick (the run becomes spent asynchronously).
+	waitFor(t, "resume", func() bool {
+		if err := r.Tick(ctx); err != nil {
+			t.Fatalf("re-admit tick: %v", err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Restart did not return after ctx cancel")
+		return f.count() == 2
+	})
+	resumed := f.at(1)
+	waitFor(t, "resume on the surviving id", func() bool { return resumed.resumedWith() == orig.SessionID })
+	if p := resumed.prompted(); len(p) != 0 {
+		t.Fatalf("a resume must not be re-briefed, but was prompted: %v", p)
 	}
 }
 
@@ -350,7 +381,7 @@ func TestRestartResumesWithoutRebrief(t *testing.T) {
 // it from the brief. Contrast TestRestartResumesWithoutRebrief, where a bare
 // restart resumes the same id with no brief.
 func TestRestartNewSessionSpawnsFreshOnSameWorktree(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
 	att := w.newTicket(t, ticket)
@@ -360,21 +391,40 @@ func TestRestartNewSessionSpawnsFreshOnSameWorktree(t *testing.T) {
 	r := w.reconciler(t, f, proc)
 	t.Cleanup(r.Close)
 
+	seedController(t, w.root, proc)
+
 	// First bring-up records a session id, a live pid, and a worktree.
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("admit tick: %v", err)
 	}
+	waitFor(t, "first spawn", func() bool { return f.count() == 1 })
 	sess, _ := session.Open(w.root, ticket, att)
 	t.Cleanup(func() { sess.Close() })
 	orig, _ := sess.ReadIdentity()
 	proc.setAlive(orig.PID, true)
-	r.Close() // detach the daemon's ingest so it isn't racing the restart
 
-	done := make(chan error, 1)
-	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushSession, nil, nil) }()
+	if _, err := r.Restart(ctx, ticket, att, reconcile.FlushSession); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	// The flush discarded L0: the session id is cleared, the worktree is kept.
+	flushed, _ := sess.ReadIdentity()
+	if flushed.SessionID != "" {
+		t.Fatalf("--new-session must clear the session id, got %q", flushed.SessionID)
+	}
+	if flushed.Worktree != orig.Worktree {
+		t.Fatalf("--new-session must keep the worktree: %q -> %q", orig.Worktree, flushed.Worktree)
+	}
 
-	// The flush cleared the id, so the second bring-up is a fresh Spawn, not a Resume.
-	waitFor(t, "fresh spawn", func() bool { return f.count() == 2 })
+	// The reaped process exits; the daemon re-admits and, with no id, Spawns fresh.
+	if err := f.at(0).Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitFor(t, "fresh spawn", func() bool {
+		if err := r.Tick(ctx); err != nil {
+			t.Fatalf("re-admit tick: %v", err)
+		}
+		return f.count() == 2
+	})
 	fresh := f.at(1)
 	if fresh.resumedWith() != "" {
 		t.Fatalf("--new-session must Spawn fresh, not Resume (got resume id %q)", fresh.resumedWith())
@@ -389,16 +439,6 @@ func TestRestartNewSessionSpawnsFreshOnSameWorktree(t *testing.T) {
 		id, err := sess.ReadIdentity()
 		return err == nil && id.Worktree == orig.Worktree && id.SessionID != ""
 	})
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Restart returned %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Restart did not return after ctx cancel")
-	}
 }
 
 // TestRestartNewWorktreeRebuildsWorktree is the L0+L1 flush: restart
@@ -406,7 +446,7 @@ func TestRestartNewSessionSpawnsFreshOnSameWorktree(t *testing.T) {
 // fresh worktree from HEAD and cold-starts a fresh session. The rebuilt checkout
 // is a real git worktree on the per-attempt branch.
 func TestRestartNewWorktreeRebuildsWorktree(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
 	att := w.newTicket(t, ticket)
@@ -416,9 +456,12 @@ func TestRestartNewWorktreeRebuildsWorktree(t *testing.T) {
 	r := w.reconciler(t, f, proc)
 	t.Cleanup(r.Close)
 
+	seedController(t, w.root, proc)
+
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("admit tick: %v", err)
 	}
+	waitFor(t, "first spawn", func() bool { return f.count() == 1 })
 	sess, _ := session.Open(w.root, ticket, att)
 	t.Cleanup(func() { sess.Close() })
 	orig, _ := sess.ReadIdentity()
@@ -430,13 +473,21 @@ func TestRestartNewWorktreeRebuildsWorktree(t *testing.T) {
 	if err := os.WriteFile(scratch, []byte("wip"), 0o644); err != nil {
 		t.Fatalf("write scratch: %v", err)
 	}
-	r.Close()
 
-	done := make(chan error, 1)
-	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushWorktree, nil, nil) }()
+	if _, err := r.Restart(ctx, ticket, att, reconcile.FlushWorktree); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
 
-	// A fresh session is spawned and briefed on the rebuilt worktree.
-	waitFor(t, "fresh spawn", func() bool { return f.count() == 2 })
+	// The reaped process exits; the daemon re-admits, rebuilds the worktree, and Spawns.
+	if err := f.at(0).Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitFor(t, "fresh spawn", func() bool {
+		if err := r.Tick(ctx); err != nil {
+			t.Fatalf("re-admit tick: %v", err)
+		}
+		return f.count() == 2
+	})
 	fresh := f.at(1)
 	if fresh.resumedWith() != "" {
 		t.Fatalf("--new-worktree must Spawn fresh, not Resume (got resume id %q)", fresh.resumedWith())
@@ -457,61 +508,45 @@ func TestRestartNewWorktreeRebuildsWorktree(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(id.Worktree, ".git"))
 		return statErr == nil // a real (re)created worktree
 	})
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Restart returned %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Restart did not return after ctx cancel")
-	}
 }
 
-// TestRestartNewAttemptForksAndStartsFresh is the L2 branch point: restart
-// --new-attempt forks a new attempt (new id, `from` provenance), announces the
-// fork before the stream starts, brings the new attempt up cold-started from the
-// brief, and preserves the parent's log — recording the fork on it.
-func TestRestartNewAttemptForksAndStartsFresh(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+// TestRestartNewAttemptForksParksParentHandsOffChild is the L2 branch point:
+// restart --new-attempt forks a new attempt (new id, `from` provenance), PARKS
+// the parent (a disable event + a swept marker, so it leaves the supervised
+// fleet — decision #23), and hands the *child* off to the daemon, which brings it
+// up fresh from the brief. The parent's log and session id are preserved; the
+// daemon runs the fork, not both.
+func TestRestartNewAttemptForksParksParentHandsOffChild(t *testing.T) {
+	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
-	att := w.newTicket(t, ticket) // "0001"
+	att := w.newTicket(t, ticket) // "0001", enabled
 
 	f := &factory{}
 	proc := newProc()
 	r := w.reconciler(t, f, proc)
 	t.Cleanup(r.Close)
 
+	ctrl := seedController(t, w.root, proc)
+
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("admit tick: %v", err)
 	}
+	waitFor(t, "first spawn", func() bool { return f.count() == 1 })
 	sess, _ := session.Open(w.root, ticket, att)
 	t.Cleanup(func() { sess.Close() })
 	orig, _ := sess.ReadIdentity()
 	proc.setAlive(orig.PID, true)
-	r.Close()
 
-	announced := make(chan reconcile.RestartResult, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- r.Restart(ctx, ticket, att, reconcile.FlushAttempt,
-			func(res reconcile.RestartResult) { announced <- res }, nil)
-	}()
-
-	// The fork is announced up front with the new id and provenance.
-	var res reconcile.RestartResult
-	select {
-	case res = <-announced:
-	case <-time.After(3 * time.Second):
-		t.Fatal("restart never announced the fork")
+	res, err := r.Restart(ctx, ticket, att, reconcile.FlushAttempt)
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
 	}
-	if !res.Forked || res.From != att || res.Attempt != "0002" {
-		t.Fatalf("expected a fork into 0002 from %s, got %+v", att, res)
+	if !res.Forked || res.From != att || res.Attempt != "0002" || res.ControllerPID != ctrl.PID {
+		t.Fatalf("expected a fork into 0002 from %s handed to pid %d, got %+v", att, ctrl.PID, res)
 	}
 
-	// The new attempt exists, records `from` provenance, and inherits the repo.
+	// The new attempt exists and records `from` provenance.
 	child, err := attempt.LoadMeta(w.root, ticket, "0002")
 	if err != nil {
 		t.Fatalf("load forked attempt: %v", err)
@@ -520,7 +555,35 @@ func TestRestartNewAttemptForksAndStartsFresh(t *testing.T) {
 		t.Fatalf("forked attempt should record from=%s, got %q", att, child.From)
 	}
 
-	// The forked attempt is brought up fresh (Spawn) and cold-started from the brief.
+	// The parent is parked: its log records both the fork note and a disable event,
+	// its session id survives, and it carries no desired-marker.
+	types := logTypes(t, w.root, ticket, att)
+	if !hasType(types, "note") {
+		t.Fatal("parent log should record a fork note")
+	}
+	if !hasType(types, "disable") {
+		t.Fatal("parent should be parked with a disable event (decision #23)")
+	}
+	parent, err := sess.ReadIdentity()
+	if err != nil || parent.SessionID != orig.SessionID {
+		t.Fatalf("parent session id must survive the fork: got %q want %q (err %v)", parent.SessionID, orig.SessionID, err)
+	}
+	if _, statErr := os.Stat(w.root.DesiredMarkerPath(ticket, att)); !os.IsNotExist(statErr) {
+		t.Fatalf("parked parent must carry no marker, stat err=%v", statErr)
+	}
+	// The child carries the transient handoff marker.
+	if _, statErr := os.Stat(w.root.DesiredMarkerPath(ticket, "0002")); statErr != nil {
+		t.Fatalf("child should carry a desired-marker: %v", statErr)
+	}
+
+	// The parent process exits; the daemon's next tick runs the fork (fresh spawn +
+	// brief) and does NOT resume the parked parent.
+	if err := f.at(0).Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("re-admit tick: %v", err)
+	}
 	waitFor(t, "fork spawned", func() bool { return f.count() == 2 })
 	fresh := f.at(1)
 	if fresh.resumedWith() != "" {
@@ -530,25 +593,119 @@ func TestRestartNewAttemptForksAndStartsFresh(t *testing.T) {
 		p := fresh.prompted()
 		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
 	})
+}
 
-	// The parent attempt is preserved: its session id survives and its log records
-	// the fork as a note.
-	parent, err := sess.ReadIdentity()
-	if err != nil || parent.SessionID != orig.SessionID {
-		t.Fatalf("parent session id must survive the fork: got %q want %q (err %v)", parent.SessionID, orig.SessionID, err)
+// TestStartNewAttemptForksAndLeavesParent is the parallel-branch counterpart of
+// restart --new-attempt: `start --new-attempt` forks a child (new id, provenance)
+// and hands it off, but leaves the parent exactly as it was — still enabled, still
+// running, not parked. Both paths run (decision #23).
+func TestStartNewAttemptForksAndLeavesParent(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket) // enabled parent
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	ctrl := seedController(t, w.root, proc)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
 	}
-	if !hasType(logTypes(t, w.root, ticket, att), "note") {
-		t.Fatal("parent log should record a fork note")
+	waitFor(t, "parent spawn", func() bool { return f.count() == 1 })
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	orig, _ := sess.ReadIdentity()
+	proc.setAlive(orig.PID, true)
+
+	res, err := r.StartNewAttempt(ticket, att)
+	if err != nil {
+		t.Fatalf("StartNewAttempt: %v", err)
+	}
+	if !res.Forked || res.From != att || res.Attempt != "0002" || res.ControllerPID != ctrl.PID {
+		t.Fatalf("expected a fork into 0002 from %s handed to pid %d, got %+v", att, ctrl.PID, res)
 	}
 
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Restart returned %v", err)
+	child, err := attempt.LoadMeta(w.root, ticket, "0002")
+	if err != nil {
+		t.Fatalf("load forked attempt: %v", err)
+	}
+	if child.From != att {
+		t.Fatalf("forked attempt should record from=%s, got %q", att, child.From)
+	}
+
+	// The parent is left as it was: a fork note but NO disable (not parked), its
+	// session id and running pid intact, and no marker (it stays desired via enable).
+	types := logTypes(t, w.root, ticket, att)
+	if !hasType(types, "note") {
+		t.Fatal("parent log should record a start-fork note")
+	}
+	if hasType(types, "disable") {
+		t.Fatal("start --new-attempt must NOT park the parent (decision #23)")
+	}
+	parent, _ := sess.ReadIdentity()
+	if parent.SessionID != orig.SessionID || parent.PID != orig.PID {
+		t.Fatalf("parent must be left running as-is: got id=%q pid=%d want id=%q pid=%d", parent.SessionID, parent.PID, orig.SessionID, orig.PID)
+	}
+
+	// The child is admitted fresh alongside the still-live parent (parent's live run
+	// is left strictly alone; only the child is brought up).
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("re-admit tick: %v", err)
+	}
+	waitFor(t, "child spawn", func() bool { return f.count() == 2 })
+	if f.at(1).resumedWith() != "" {
+		t.Fatalf("a fork must Spawn fresh, not Resume (got resume id %q)", f.at(1).resumedWith())
+	}
+	if f.at(0).wasKilled() {
+		t.Fatal("parent's session must be left running, not reaped")
+	}
+}
+
+// TestStopOnEnabledIsTransient pins decision #29's consequence: a bare `ctl stop`
+// on a still-enabled attempt is transient — reap removes no durable desire (the
+// enable bit stays), so the daemon's next tick re-admits the spent run and Resumes
+// it. To durably stop an enabled attempt you `disable`, not `stop`.
+func TestStopOnEnabledIsTransient(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket) // enabled
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	seedController(t, w.root, proc)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	waitFor(t, "first spawn", func() bool { return f.count() == 1 })
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	orig, _ := sess.ReadIdentity()
+	proc.setAlive(orig.PID, true)
+
+	if _, err := r.Stop(ticket, att); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := f.at(0).Kill(); err != nil { // the reaped process exits
+		t.Fatalf("kill: %v", err)
+	}
+
+	waitFor(t, "resume after transient stop", func() bool {
+		if err := r.Tick(ctx); err != nil {
+			t.Fatalf("re-admit tick: %v", err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Restart did not return after ctx cancel")
+		return f.count() == 2
+	})
+	if f.at(1).resumedWith() != orig.SessionID {
+		t.Fatalf("a stop on an enabled attempt should be transient (resume the same id), got resume id %q", f.at(1).resumedWith())
 	}
 }
 
