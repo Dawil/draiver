@@ -51,6 +51,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/limit"
@@ -1032,16 +1033,208 @@ func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
 	return res, nil
 }
 
-// Restart reaps the current session and brings it back up — Stop followed by
-// Start, blocking in the foreground exactly like Start. With no teardown depth
-// selected it reaps only the process and the start cascade Resumes the same
-// session (L0 kept): the clean "continue" that the old hybrid restart failed to
-// be, no longer re-briefing a resume. The depth flags that flush deeper layers
-// before the cascade climbs back (--new-session and beyond) land in a later phase
-// of drvctl-016.
-func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, observe func(agent.Event)) error {
+// FlushLevel selects how deep restart's teardown reaps before the start cascade
+// climbs back — a point on the degree axis of drvctl-016's state stack. The
+// levels are ordinal and cumulative: a deeper level implies every shallower
+// flush. Each step discards one more volatile layer stacked on the durable ticket
+// floor (L3):
+//
+//	FlushNone      reap the process only; the cascade Resumes the same session (L0 kept).
+//	FlushSession   + discard the session conversation (L0); the cascade spawns a
+//	               fresh session on the surviving worktree, cold-started from the brief.
+//	FlushWorktree  + discard the worktree checkout and branch (L1); the cascade
+//	               rebuilds the worktree from HEAD before the fresh spawn.
+//	FlushAttempt   + discard the attempt (L2) — this FORKS a new attempt (new id,
+//	               `from` provenance) and climbs into it; the prior attempt's log is
+//	               preserved untouched as an immutable record.
+type FlushLevel int
+
+const (
+	FlushNone FlushLevel = iota
+	FlushSession
+	FlushWorktree
+	FlushAttempt
+)
+
+// RestartResult reports what a Restart flushed and which attempt the start
+// cascade climbed back into — the same attempt for an in-place restart, or the
+// new fork's id when the depth reached FlushAttempt. Restart hands it to its
+// announce callback so a caller can report the plan (in particular a fork's new
+// id) before Start blocks.
+type RestartResult struct {
+	Level   FlushLevel
+	Ticket  string
+	Attempt string // the attempt the cascade brought up (the fork's id for FlushAttempt)
+	Forked  bool   // true when FlushAttempt created a new attempt
+	From    string // the parent attempt id, set when Forked
+}
+
+// Restart reaps the current session (Stop) then brings the attempt back up
+// (Start), blocking in the foreground exactly like Start. level selects how deep
+// the teardown flushes before the start cascade climbs back — the degree axis of
+// drvctl-016 (see FlushLevel). FlushNone is the clean "continue" the old hybrid
+// restart failed to be: it Resumes the same session and does not re-brief.
+// FlushAttempt is the one point on the axis where restart stops mutating in place
+// and instead forks a new attempt, bringing *that* one up fresh.
+//
+// announce, if non-nil, is called once the target attempt is fixed (after any
+// flush/fork) but before Start blocks, so a caller can surface the plan — notably
+// a fork's new id — up front rather than only after the session exits.
+func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, level FlushLevel, announce func(RestartResult), observe func(agent.Event)) error {
+	// The shallowest teardown always happens: reap the running process, keeping the
+	// durable layers for the flush/cascade to act on.
 	if _, err := r.Stop(ticket, attempt); err != nil {
 		return err
 	}
-	return r.Start(ctx, ticket, attempt, observe)
+
+	res := RestartResult{Level: level, Ticket: ticket, Attempt: attempt}
+
+	switch {
+	case level >= FlushAttempt:
+		// Stop mutating in place and branch: fork a new attempt and climb into it.
+		newID, err := r.forkAttempt(ticket, attempt)
+		if err != nil {
+			return err
+		}
+		r.recordFork(ticket, attempt, newID)
+		res.Attempt, res.Forked, res.From = newID, true, attempt
+	case level >= FlushWorktree:
+		a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+		if err != nil {
+			return err
+		}
+		if err := r.flushSession(ticket, attempt); err != nil {
+			return err
+		}
+		if err := r.flushWorktree(ctx, a); err != nil {
+			return err
+		}
+		r.recordFlush(ticket, attempt, FlushWorktree)
+	case level >= FlushSession:
+		if err := r.flushSession(ticket, attempt); err != nil {
+			return err
+		}
+		r.recordFlush(ticket, attempt, FlushSession)
+	}
+
+	if announce != nil {
+		announce(res)
+	}
+	return r.Start(ctx, res.Ticket, res.Attempt, observe)
+}
+
+// flushSession discards an attempt's session conversation (L0): it clears the
+// recorded session id so the start cascade cannot Resume the old conversation and
+// instead Spawns a fresh session on the surviving worktree (which then cold-starts
+// from the brief). The pid was already cleared by the preceding Stop. An attempt
+// with no session on record — or one whose id is already empty — is a no-op: there
+// is no conversation to discard. Only the id is cleared; the meter and stream tee
+// carry across exactly as they do when the Phase-A cascade falls through a dead id
+// to a fresh spawn.
+func (r *Reconciler) flushSession(ticket, attempt string) error {
+	sess, err := session.Open(r.opt.Root, ticket, attempt)
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+
+	id, err := sess.ReadIdentity()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // no session on record — nothing to flush
+		}
+		return err
+	}
+	if id.SessionID == "" {
+		return nil
+	}
+	id.SessionID = ""
+	id.PID = 0
+	return sess.WriteIdentity(id)
+}
+
+// flushWorktree discards an attempt's worktree (L1): it force-removes the checkout
+// and deletes the per-attempt branch, so the start cascade rebuilds a fresh
+// worktree from HEAD rather than re-attaching to the surviving branch. The force
+// is deliberate — --new-worktree is an explicit request to discard the checkout,
+// uncommitted work and all. A worktree that was never created is tolerated as a
+// no-op by Remove.
+func (r *Reconciler) flushWorktree(ctx context.Context, a project.Attempt) error {
+	repo, err := r.repoFor(a)
+	if err != nil {
+		return err
+	}
+	wm, err := r.managerFor(repo)
+	if err != nil {
+		return fmt.Errorf("attempt %s/%s repo %q is missing or not a git working tree: %w", a.Ticket, a.ID, repo, err)
+	}
+	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
+	if err := wm.Remove(ctx, key, worktree.RemoveOptions{Force: true, DeleteBranch: true}); err != nil {
+		return fmt.Errorf("flush worktree %s/%s: %w", a.Ticket, a.ID, err)
+	}
+	return nil
+}
+
+// forkAttempt branches a new attempt off parent (the L2 flush): it inherits the
+// parent's tool/model/repo and records `from` provenance, leaving the parent's log
+// untouched as the immutable record of the path taken so far. It returns the new
+// attempt's id, which the start cascade then cold-starts fresh (no session, no
+// worktree — Spawn builds both). Repo is inherited so the fork targets the same
+// working tree, mirroring `attempt new --from`.
+func (r *Reconciler) forkAttempt(ticket, parent string) (string, error) {
+	pm, err := attempt.LoadMeta(r.opt.Root, ticket, parent)
+	if err != nil {
+		return "", err
+	}
+	m, err := attempt.Create(r.opt.Root, ticket, attempt.New{
+		Tool:  pm.Tool,
+		Model: pm.Model,
+		Repo:  pm.Repo,
+		Actor: r.opt.Actor,
+		From:  parent,
+	})
+	if err != nil {
+		return "", err
+	}
+	return m.ID, nil
+}
+
+// recordFork appends a note to the parent attempt's log recording that a restart
+// forked a new attempt from it, so the branch point — the one place restart lands
+// on a *different* attempt — is visible on the board and to a resumed agent.
+// Best-effort: a note that cannot be written is logged operationally, never
+// failing the restart.
+func (r *Reconciler) recordFork(ticket, parent, child string) {
+	body := fmt.Sprintf("Forked a new attempt %s/%s from this one (restart --new-attempt); this attempt's log is preserved as an immutable record of the path taken so far.", ticket, child)
+	if _, err := ticketlog.Append(r.opt.Root, ticket, parent, event.Event{
+		Type:  "note",
+		Actor: r.opt.Actor,
+		Body:  body,
+	}); err != nil {
+		r.opt.Logf("reconcile: record fork %s/%s: %v", ticket, parent, err)
+	}
+}
+
+// recordFlush appends a note recording an in-place restart's teardown depth, so a
+// destructive reset (especially --new-worktree, which discards uncommitted work) is
+// visible on the board rather than silent. FlushNone and FlushAttempt are recorded
+// elsewhere (a bare restart is an unremarkable continue; a fork is recorded on the
+// parent). Best-effort, like recordFork.
+func (r *Reconciler) recordFlush(ticket, attempt string, level FlushLevel) {
+	var what string
+	switch level {
+	case FlushSession:
+		what = "discarded the session conversation (restart --new-session); a fresh session will cold-start from the brief on the same worktree"
+	case FlushWorktree:
+		what = "discarded the session conversation and the worktree checkout+branch (restart --new-worktree); the worktree will be rebuilt from HEAD and the session cold-started from the brief"
+	default:
+		return
+	}
+	if _, err := ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
+		Type:  "note",
+		Actor: r.opt.Actor,
+		Body:  "Restart flush: " + what + ".",
+	}); err != nil {
+		r.opt.Logf("reconcile: record flush %s/%s: %v", ticket, attempt, err)
+	}
 }

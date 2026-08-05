@@ -36,6 +36,12 @@ var (
 	ctlLogsFollow    bool
 	ctlLogsJSON      bool
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
+
+	// restart depth flags — the cumulative degree axis (drvctl-016). The deepest
+	// one passed wins; a deeper flag implies every shallower flush.
+	ctlRestartNewSession  bool
+	ctlRestartNewWorktree bool
+	ctlRestartNewAttempt  bool
 )
 
 // ctlCmd is the draiverctld client surface — the reconciling supervisor half of
@@ -126,22 +132,62 @@ var ctlStopCmd = &cobra.Command{
 
 var ctlRestartCmd = &cobra.Command{
 	Use:   "restart <ticket[@attempt]>",
-	Short: "Reap and respawn a session fresh from a new brief (context refresh)",
-	Long: "restart reaps the current session and brings it back up fresh from a new " +
-		"cold-start brief — the context refresh. The session id survives, so this is a " +
-		"resume, not a new attempt. Like start it streams in the foreground.",
+	Short: "Reap and bring a session back up, optionally flushing deeper layers first",
+	Long: "restart reaps the current session and brings the attempt back up through the " +
+		"self-heal cascade. With no flag it reaps only the process and resumes the same " +
+		"session — a clean continue, no re-brief. The depth flags flush deeper volatile " +
+		"layers before the cascade climbs back; they are cumulative (a deeper flag implies " +
+		"the shallower flushes), and if more than one is given the deepest wins:\n\n" +
+		"  --new-session   discard the conversation (L0); spawn a fresh session on the same " +
+		"worktree, cold-started from the brief.\n" +
+		"  --new-worktree  also rebuild the worktree from HEAD (L1) — discards uncommitted " +
+		"work in the checkout.\n" +
+		"  --new-attempt   FORK a new attempt (L2): a new attempt id with provenance to this " +
+		"one, started fresh. This attempt's log is preserved untouched — restart lands on a " +
+		"*different* attempt rather than restarting this one.\n\n" +
+		"Like start it streams in the foreground; a re-brief happens only when the session " +
+		"layer was flushed.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, ticket, att, err := newCtlTarget(args[0])
 		if err != nil {
 			return err
 		}
+		level := restartLevel()
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "draiverctl restart %s/%s — reaping and respawning fresh from brief (Ctrl-C to stop)\n", ticket, att)
-		return r.Restart(ctx, ticket, att, streamPrinter(out))
+		announce := func(res reconcile.RestartResult) {
+			switch {
+			case res.Forked:
+				fmt.Fprintf(out, "draiverctl restart %s/%s --new-attempt — forked a new attempt %s/%s (from %s), cold-starting it fresh (Ctrl-C to stop)\n",
+					ticket, att, res.Ticket, res.Attempt, res.From)
+			case res.Level == reconcile.FlushWorktree:
+				fmt.Fprintf(out, "draiverctl restart %s/%s --new-worktree — rebuilding the worktree from HEAD, cold-starting from brief (Ctrl-C to stop)\n", ticket, att)
+			case res.Level == reconcile.FlushSession:
+				fmt.Fprintf(out, "draiverctl restart %s/%s --new-session — fresh session on the same worktree, cold-starting from brief (Ctrl-C to stop)\n", ticket, att)
+			default:
+				fmt.Fprintf(out, "draiverctl restart %s/%s — reaping and resuming the same session, continue (Ctrl-C to stop)\n", ticket, att)
+			}
+		}
+		return r.Restart(ctx, ticket, att, level, announce, streamPrinter(out))
 	},
+}
+
+// restartLevel resolves the restart depth flags into a single FlushLevel. The
+// flags are cumulative and the deepest one passed wins (--new-attempt implies a
+// new worktree implies a new session), so they are checked deepest-first.
+func restartLevel() reconcile.FlushLevel {
+	switch {
+	case ctlRestartNewAttempt:
+		return reconcile.FlushAttempt
+	case ctlRestartNewWorktree:
+		return reconcile.FlushWorktree
+	case ctlRestartNewSession:
+		return reconcile.FlushSession
+	default:
+		return reconcile.FlushNone
+	}
 }
 
 var ctlStatusCmd = &cobra.Command{
@@ -587,6 +633,12 @@ func init() {
 		// config file's permissions, itself over the allow-all auto-mode base.
 		c.Flags().StringToStringVar(&ctlPermRules, "permission", nil, "per-tool permission-gate override, e.g. --permission Bash=escalate (allow|escalate); layers over config")
 	}
+	// restart depth flags — the cumulative degree axis (drvctl-016); the deepest
+	// one passed selects how many volatile layers are flushed before the cascade
+	// climbs back.
+	ctlRestartCmd.Flags().BoolVar(&ctlRestartNewSession, "new-session", false, "flush the session conversation (L0): spawn a fresh session on the same worktree, cold-started from the brief")
+	ctlRestartCmd.Flags().BoolVar(&ctlRestartNewWorktree, "new-worktree", false, "flush the worktree too (L1): rebuild it from HEAD, discarding uncommitted work; implies --new-session")
+	ctlRestartCmd.Flags().BoolVar(&ctlRestartNewAttempt, "new-attempt", false, "fork a new attempt (L2) with provenance to this one and start it fresh; this attempt's log is preserved")
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlLogsCmd.Flags().BoolVar(&ctlLogsJSON, "json", false, "print the raw stream.jsonl lines verbatim (machine form for | jq / replay) instead of the human-readable rendering")
 	ctlCmd.AddCommand(ctlUpCmd, ctlStartCmd, ctlStopCmd, ctlRestartCmd, ctlStatusCmd, ctlLogsCmd)

@@ -3,12 +3,16 @@ package reconcile_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/session"
 )
 
@@ -239,7 +243,7 @@ func TestRestartResumesWithoutRebrief(t *testing.T) {
 
 	col := newCollector()
 	done := make(chan error, 1)
-	go func() { done <- r.Restart(ctx, ticket, att, col.observe) }()
+	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushNone, nil, col.observe) }()
 
 	// Restart resumes on the recorded id, not a fresh Spawn.
 	waitFor(t, "resume", func() bool { return f.count() == 2 })
@@ -251,6 +255,214 @@ func TestRestartResumesWithoutRebrief(t *testing.T) {
 	waitFor(t, "resumed stream consumed", func() bool { return col.count(agent.EventSystem) >= 1 })
 	if p := resumed.prompted(); len(p) != 0 {
 		t.Fatalf("a resume must not be re-briefed, but was prompted: %v", p)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Restart returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Restart did not return after ctx cancel")
+	}
+}
+
+// TestRestartNewSessionSpawnsFreshOnSameWorktree is the L0 flush: restart
+// --new-session discards the conversation, so the cascade must NOT resume the
+// recorded id — it Spawns a fresh session on the *same* worktree and cold-starts
+// it from the brief. Contrast TestRestartResumesWithoutRebrief, where a bare
+// restart resumes the same id with no brief.
+func TestRestartNewSessionSpawnsFreshOnSameWorktree(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	// First bring-up records a session id, a live pid, and a worktree.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	orig, _ := sess.ReadIdentity()
+	proc.setAlive(orig.PID, true)
+	r.Close() // detach the daemon's ingest so it isn't racing the restart
+
+	done := make(chan error, 1)
+	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushSession, nil, nil) }()
+
+	// The flush cleared the id, so the second bring-up is a fresh Spawn, not a Resume.
+	waitFor(t, "fresh spawn", func() bool { return f.count() == 2 })
+	fresh := f.at(1)
+	if fresh.resumedWith() != "" {
+		t.Fatalf("--new-session must Spawn fresh, not Resume (got resume id %q)", fresh.resumedWith())
+	}
+	// It cold-starts from the brief (L0 was discarded)...
+	waitFor(t, "brief on fresh spawn", func() bool {
+		p := fresh.prompted()
+		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
+	})
+	// ...on the SAME worktree the resumed session would have used.
+	waitFor(t, "same worktree", func() bool {
+		id, err := sess.ReadIdentity()
+		return err == nil && id.Worktree == orig.Worktree && id.SessionID != ""
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Restart returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Restart did not return after ctx cancel")
+	}
+}
+
+// TestRestartNewWorktreeRebuildsWorktree is the L0+L1 flush: restart
+// --new-worktree removes the checkout and its branch, then the cascade rebuilds a
+// fresh worktree from HEAD and cold-starts a fresh session. The rebuilt checkout
+// is a real git worktree on the per-attempt branch.
+func TestRestartNewWorktreeRebuildsWorktree(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	orig, _ := sess.ReadIdentity()
+	proc.setAlive(orig.PID, true)
+
+	// Drop an untracked file into the checkout — the uncommitted work --new-worktree
+	// is meant to discard by rebuilding from HEAD.
+	scratch := filepath.Join(orig.Worktree, "scratch.txt")
+	if err := os.WriteFile(scratch, []byte("wip"), 0o644); err != nil {
+		t.Fatalf("write scratch: %v", err)
+	}
+	r.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- r.Restart(ctx, ticket, att, reconcile.FlushWorktree, nil, nil) }()
+
+	// A fresh session is spawned and briefed on the rebuilt worktree.
+	waitFor(t, "fresh spawn", func() bool { return f.count() == 2 })
+	fresh := f.at(1)
+	if fresh.resumedWith() != "" {
+		t.Fatalf("--new-worktree must Spawn fresh, not Resume (got resume id %q)", fresh.resumedWith())
+	}
+	waitFor(t, "brief on fresh spawn", func() bool {
+		p := fresh.prompted()
+		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
+	})
+	// The worktree was rebuilt from HEAD, so the uncommitted scratch file is gone.
+	waitFor(t, "worktree rebuilt", func() bool {
+		id, err := sess.ReadIdentity()
+		if err != nil || id.Worktree == "" {
+			return false
+		}
+		if _, statErr := os.Stat(filepath.Join(id.Worktree, "scratch.txt")); !os.IsNotExist(statErr) {
+			return false
+		}
+		_, statErr := os.Stat(filepath.Join(id.Worktree, ".git"))
+		return statErr == nil // a real (re)created worktree
+	})
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Restart returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Restart did not return after ctx cancel")
+	}
+}
+
+// TestRestartNewAttemptForksAndStartsFresh is the L2 branch point: restart
+// --new-attempt forks a new attempt (new id, `from` provenance), announces the
+// fork before the stream starts, brings the new attempt up cold-started from the
+// brief, and preserves the parent's log — recording the fork on it.
+func TestRestartNewAttemptForksAndStartsFresh(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket) // "0001"
+
+	f := &factory{}
+	proc := newProc()
+	r := w.reconciler(t, f, proc)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	orig, _ := sess.ReadIdentity()
+	proc.setAlive(orig.PID, true)
+	r.Close()
+
+	announced := make(chan reconcile.RestartResult, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- r.Restart(ctx, ticket, att, reconcile.FlushAttempt,
+			func(res reconcile.RestartResult) { announced <- res }, nil)
+	}()
+
+	// The fork is announced up front with the new id and provenance.
+	var res reconcile.RestartResult
+	select {
+	case res = <-announced:
+	case <-time.After(3 * time.Second):
+		t.Fatal("restart never announced the fork")
+	}
+	if !res.Forked || res.From != att || res.Attempt != "0002" {
+		t.Fatalf("expected a fork into 0002 from %s, got %+v", att, res)
+	}
+
+	// The new attempt exists, records `from` provenance, and inherits the repo.
+	child, err := attempt.LoadMeta(w.root, ticket, "0002")
+	if err != nil {
+		t.Fatalf("load forked attempt: %v", err)
+	}
+	if child.From != att {
+		t.Fatalf("forked attempt should record from=%s, got %q", att, child.From)
+	}
+
+	// The forked attempt is brought up fresh (Spawn) and cold-started from the brief.
+	waitFor(t, "fork spawned", func() bool { return f.count() == 2 })
+	fresh := f.at(1)
+	if fresh.resumedWith() != "" {
+		t.Fatalf("a fork must Spawn fresh, not Resume (got resume id %q)", fresh.resumedWith())
+	}
+	waitFor(t, "brief on the fork", func() bool {
+		p := fresh.prompted()
+		return len(p) > 0 && strings.Contains(p[0], "BRIEF")
+	})
+
+	// The parent attempt is preserved: its session id survives and its log records
+	// the fork as a note.
+	parent, err := sess.ReadIdentity()
+	if err != nil || parent.SessionID != orig.SessionID {
+		t.Fatalf("parent session id must survive the fork: got %q want %q (err %v)", parent.SessionID, orig.SessionID, err)
+	}
+	if !hasType(logTypes(t, w.root, ticket, att), "note") {
+		t.Fatal("parent log should record a fork note")
 	}
 
 	cancel()
