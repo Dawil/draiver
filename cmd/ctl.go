@@ -74,7 +74,7 @@ var ctlUpCmd = &cobra.Command{
 		if ctlRepo != "" {
 			repoNote = "fallback repo " + ctlRepo
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld up — %s, tick every %s (Ctrl-C to drain)\n", repoNote, ctlInterval)
+		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld %s up — %s, tick every %s (Ctrl-C to drain)\n", version, repoNote, ctlInterval)
 		return r.Run(ctx, ctlInterval)
 	},
 }
