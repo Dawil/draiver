@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -102,6 +103,76 @@ func TestCtlEnableDisable(t *testing.T) {
 	// An unknown target is an error, not a silent no-op.
 	if _, code := run(t, "--data", dir, "ctl", "enable", "NOPE-9"); code == 0 {
 		t.Fatal("expected nonzero exit enabling an unknown ticket")
+	}
+}
+
+// TestCtlStatusHidesDone drives the status filter end to end: the default list
+// view omits terminal Done attempts, --all restores them, and an explicit target
+// prints its Done attempt regardless — plus the empty-view hint counts what it
+// hid.
+func TestCtlStatusHidesDone(t *testing.T) {
+	dir := newTicket(t) // PROJ-1/0001, Running
+
+	// A second ticket driven to Done via a `done` lifecycle event.
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-2", "--title", "Two"); code != 0 {
+		t.Fatalf("new PROJ-2 exited %d", code)
+	}
+	root := store.Root{Dir: dir}
+	if _, err := ticketlog.Append(root, "PROJ-2", "0001", event.Event{Type: "done", Actor: "human:test", Body: "closed"}); err != nil {
+		t.Fatalf("append done: %v", err)
+	}
+	if a, err := project.LoadAttempt(root, "PROJ-2", "0001"); err != nil || a.State != project.Done {
+		t.Fatalf("PROJ-2 should be Done (state=%q err=%v)", a.State, err)
+	}
+
+	// Default list view: Running shows, Done is hidden.
+	out, code := run(t, "--data", dir, "ctl", "status")
+	if code != 0 {
+		t.Fatalf("ctl status exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "PROJ-1/0001") {
+		t.Errorf("default view should list the Running attempt:\n%s", out)
+	}
+	if strings.Contains(out, "PROJ-2/0001") {
+		t.Errorf("default view should hide the Done attempt:\n%s", out)
+	}
+
+	// --all restores the Done attempt.
+	for _, flag := range []string{"--all", "-a"} {
+		out, code := run(t, "--data", dir, "ctl", "status", flag)
+		if code != 0 {
+			t.Fatalf("ctl status %s exited %d: %s", flag, code, out)
+		}
+		if !strings.Contains(out, "PROJ-2/0001") {
+			t.Errorf("%s should include the Done attempt:\n%s", flag, out)
+		}
+	}
+
+	// An explicit Done target prints regardless of the filter.
+	out, code = run(t, "--data", dir, "ctl", "status", "PROJ-2@0001")
+	if code != 0 {
+		t.Fatalf("ctl status PROJ-2@0001 exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "PROJ-2/0001") {
+		t.Errorf("an explicitly named Done attempt should print:\n%s", out)
+	}
+}
+
+// TestCtlStatusEmptyHint shows the one-line hint (with the hidden count) when the
+// default view filters everything away.
+func TestCtlStatusEmptyHint(t *testing.T) {
+	dir := newTicket(t) // PROJ-1/0001, Running
+	root := store.Root{Dir: dir}
+	if _, err := ticketlog.Append(root, "PROJ-1", "0001", event.Event{Type: "done", Actor: "human:test", Body: "closed"}); err != nil {
+		t.Fatalf("append done: %v", err)
+	}
+
+	out, code := run(t, "--data", dir, "ctl", "status")
+	if code != 0 {
+		t.Fatalf("ctl status exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "no active attempts — 1 Done hidden; --all to show") {
+		t.Errorf("expected the empty-view hint with a hidden count:\n%s", out)
 	}
 }
 
