@@ -6,6 +6,7 @@
   <title>Draiver — {{.Ticket}}</title>
   <link rel="icon" id="favicon" type="image/svg+xml" href="{{.FaviconHref}}">
   <link rel="stylesheet" href="/static/style.css">
+  {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/favicon.js" defer></script>
 </head>
@@ -26,6 +27,7 @@
         <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="/ticket/{{.Ticket}}/{{.ID}}">
           <span class="tid">attempt {{.ID}}</span>
           <span class="meta-row">
+            {{template "session-dot" .}}
             {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
             {{if .Model}}<span class="tool">{{.Model}}</span>{{end}}
             <span class="state state-{{.State}}">{{.State}}</span>
