@@ -9,6 +9,7 @@
   {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/favicon.js" defer></script>
+  <script src="/static/reltime.js" defer></script>
 </head>
 <body>
   {{/* Board-state signal on its own channel: a hidden poll that pulls only the
@@ -109,7 +110,7 @@
             <a class="seq" href="#event-{{.Seq}}" title="Permalink to this entry">#{{.Seq}}</a>
             <span class="type type-{{.Type}}">{{.Type}}</span>
             <span class="actor">{{.Actor}}</span>
-            <span class="ts">{{.TS}}</span>
+            <time class="ts" data-testid="ts-{{.Seq}}" datetime="{{.TSISO}}" title="{{.TSFull}}">{{.TSRel}}</time>
           </div>
           <div class="prose event-body">{{.BodyHTML}}</div>
           {{if .IsEsc}}

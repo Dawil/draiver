@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
@@ -176,6 +177,49 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	// replaces only the list can never disturb the reader's chosen order.
 	if i1, i2 := strings.Index(body, `data-testid="event-1"`), strings.Index(body, `data-testid="event-2"`); i1 > i2 {
 		t.Errorf("expected oldest-first DOM: event-1 (%d) should precede event-2 (%d)", i1, i2)
+	}
+}
+
+// TestTimelineShowsRelativeTimestamps pins the timestamp contract (drvweb-002):
+// each log entry renders a relative age instead of the raw minute-precision
+// stamp, carries the machine-readable datetime the client script reads to keep
+// the age live, and surfaces the precise UTC timestamp as a hover tooltip. The
+// page also loads reltime.js, which recomputes the age on load, after each log
+// swap, and on a tick (so a non-polling Done page does not freeze at load age).
+func TestTimelineShowsRelativeTimestamps(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("REL-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("REL-1"), []byte("---\nid: REL-1\ntitle: Rel\n---\n\nspec"), 0o644)
+	// A fixed age makes the relative bucket deterministic: three minutes back.
+	ts := time.Now().Add(-3 * time.Minute)
+	if _, err := ticketlog.Append(root, "REL-1", "0001", event.Event{Type: "created", Actor: "a", TS: ts, Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	body := get(t, h, "/ticket/REL-1/0001").Body.String()
+	iso := ts.UTC().Format(time.RFC3339)
+	full := ts.UTC().Format("2006-01-02 15:04:05 UTC")
+	for _, want := range []string{
+		`<time class="ts"`,       // the timestamp is a semantic <time> element...
+		"3 minutes ago",          // ...showing a relative age, not the raw stamp
+		`datetime="` + iso + `"`, // machine-readable stamp for the live client script
+		`title="` + full + `"`,   // full, second-precision UTC timestamp on hover
+		"/static/reltime.js",     // the script that keeps the age live
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("timeline missing %q\n%s", want, body)
+		}
+	}
+	// The raw minute-precision stamp the page used to print must be gone.
+	if raw := ts.UTC().Format("2006-01-02 15:04Z"); strings.Contains(body, raw) {
+		t.Errorf("timeline still shows the raw minute-precision timestamp %q", raw)
 	}
 }
 
@@ -504,6 +548,36 @@ func TestUnknownRoutes404(t *testing.T) {
 	}
 	if rr := get(t, h, "/ticket/PROJ-1/9999"); rr.Code != 404 {
 		t.Errorf("unknown attempt = %d want 404", rr.Code)
+	}
+}
+
+// TestRelativeAgeBuckets pins the wording and boundaries of the server-side
+// "time ago" formatter across the ranges a real log spans. reltime.js mirrors
+// these buckets on the client; keep the two in sync.
+func TestRelativeAgeBuckets(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "just now"},
+		{3 * time.Second, "just now"},
+		{5 * time.Second, "5 seconds ago"},
+		{59 * time.Second, "59 seconds ago"},
+		{time.Minute, "1 minute ago"},
+		{3 * time.Minute, "3 minutes ago"},
+		{90 * time.Minute, "1 hour ago"},
+		{5 * time.Hour, "5 hours ago"},
+		{25 * time.Hour, "yesterday"},
+		{3 * 24 * time.Hour, "3 days ago"},
+		{10 * 24 * time.Hour, "1 week ago"},
+		{40 * 24 * time.Hour, "1 month ago"},
+		{400 * 24 * time.Hour, "1 year ago"},
+		{-time.Minute, "just now"}, // future stamp (clock skew) clamps to now
+	}
+	for _, c := range cases {
+		if got := relativeAge(c.d); got != c.want {
+			t.Errorf("relativeAge(%s) = %q, want %q", c.d, got, c.want)
+		}
 	}
 }
 

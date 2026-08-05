@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/yuin/goldmark"
@@ -189,10 +190,17 @@ func (s *Server) faviconHref() string {
 }
 
 type eventVM struct {
-	Seq        int
-	Type       string
-	Actor      string
-	TS         string
+	Seq   int
+	Type  string
+	Actor string
+	// TSRel is the server-rendered relative age ("3 minutes ago"), a fallback
+	// that renders without JS and paints before reltime.js takes over. TSISO is
+	// the machine-readable RFC3339 stamp reltime.js reads to keep the age live
+	// (a Done attempt does not poll, so a frozen server string would go stale).
+	// TSFull is the precise UTC timestamp surfaced as the hover tooltip.
+	TSRel      string
+	TSISO      string
+	TSFull     string
 	BodyHTML   template.HTML
 	Refs       []int
 	Artefacts  []string
@@ -325,13 +333,17 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 		}
 	}
 
+	now := time.Now()
 	vm := detailVM{Attempt: a, SpecHTML: s.renderSpec(id), Polls: a.State != project.Done}
 	for _, e := range a.Events {
+		ts := e.TS.UTC()
 		ev := eventVM{
 			Seq:       e.Seq,
 			Type:      e.Type,
 			Actor:     e.Actor,
-			TS:        e.TS.UTC().Format("2006-01-02 15:04Z"),
+			TSRel:     relativeAge(now.Sub(e.TS)),
+			TSISO:     ts.Format(time.RFC3339),
+			TSFull:    ts.Format("2006-01-02 15:04:05 UTC"),
 			BodyHTML:  s.toHTML(e.Body),
 			Refs:      e.Refs,
 			Artefacts: e.Artefacts,
@@ -406,6 +418,41 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	http.Error(w, "draiver: "+err.Error(), http.StatusInternalServerError)
+}
+
+// relativeAge renders a duration-since as a human "time ago" phrase. It is the
+// server-side twin of static/reltime.js (which keeps the age live on the
+// client); keep the two bucket boundaries and wording in sync. A future stamp
+// (clock skew) clamps to "just now".
+func relativeAge(d time.Duration) string {
+	switch {
+	case d < 5*time.Second:
+		return "just now"
+	case d < time.Minute:
+		return agoPlural(int(d.Seconds()), "second")
+	case d < time.Hour:
+		return agoPlural(int(d.Minutes()), "minute")
+	case d < 24*time.Hour:
+		return agoPlural(int(d.Hours()), "hour")
+	case d < 48*time.Hour:
+		return "yesterday"
+	case d < 7*24*time.Hour:
+		return agoPlural(int(d.Hours()/24), "day")
+	case d < 30*24*time.Hour:
+		return agoPlural(int(d.Hours()/(24*7)), "week")
+	case d < 365*24*time.Hour:
+		return agoPlural(int(d.Hours()/(24*30)), "month")
+	default:
+		return agoPlural(int(d.Hours()/(24*365)), "year")
+	}
+}
+
+// agoPlural formats "N unit(s) ago" with singular/plural agreement.
+func agoPlural(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit + " ago"
+	}
+	return strconv.Itoa(n) + " " + unit + "s ago"
 }
 
 // toHTML renders trusted local markdown to HTML. goldmark's default config does
