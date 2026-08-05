@@ -231,6 +231,24 @@ func (h *Handle) Stream() <-chan agent.Event {
 	return h.adapter.Stream()
 }
 
+// Online exposes the live adapter's online signal — a channel closed once the
+// session has come online — when the adapter implements agent.Onliner, else nil.
+// A nil channel means the adapter cannot confirm coming online, so a caller
+// treats the session as online (the pre-cascade behaviour). It is the seam the
+// reconcile loop's confirm-on-resume uses to tell a live resume from one that
+// died on a stale session id (drvctl-016).
+func (h *Handle) Online() <-chan struct{} {
+	a := h.live()
+	if a == nil {
+		return nil
+	}
+	o, ok := a.(agent.Onliner)
+	if !ok {
+		return nil
+	}
+	return o.Online()
+}
+
 // Prompt submits a user turn to the live session (the reconcile loop uses it to
 // inject the cold-start brief). It errors if no session is live.
 func (h *Handle) Prompt(ctx context.Context, text string) error {

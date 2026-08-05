@@ -34,13 +34,20 @@ import (
 type fakeAdapter struct {
 	pid int
 
-	mu        sync.Mutex
-	events    chan agent.Event
-	started   bool
-	killed    bool
-	resumeID  string
-	prompts   []string
-	decisions map[string]agent.Decision
+	// staleResume simulates a session id that can no longer be resumed: Resume
+	// starts (returns nil) but the process never emits a system/init frame, so it
+	// never comes online — the case the confirm-on-resume cascade must self-heal.
+	staleResume bool
+
+	mu         sync.Mutex
+	events     chan agent.Event
+	online     chan struct{}
+	onlineOnce sync.Once
+	started    bool
+	killed     bool
+	resumeID   string
+	prompts    []string
+	decisions  map[string]agent.Decision
 }
 
 func (a *fakeAdapter) Spawn(ctx context.Context, spec agent.SessionSpec) (string, error) {
@@ -56,10 +63,19 @@ func (a *fakeAdapter) Resume(ctx context.Context, sessionID string, spec agent.S
 	a.mu.Lock()
 	a.resumeID = sessionID
 	a.started = true
+	stale := a.staleResume
 	a.mu.Unlock()
-	a.emit(agent.Event{Kind: agent.EventSystem, SessionID: sessionID})
+	// A stale id starts a process that dies on arrival: it never emits the
+	// system/init frame, so it never comes online and confirmOnline times out.
+	if !stale {
+		a.emit(agent.Event{Kind: agent.EventSystem, SessionID: sessionID})
+	}
 	return nil
 }
+
+// Online satisfies agent.Onliner: the channel closes when the fake emits its
+// first system/init frame (via emit), mirroring the real adapter's scan loop.
+func (a *fakeAdapter) Online() <-chan struct{} { return a.online }
 
 func (a *fakeAdapter) Prompt(ctx context.Context, text string) error {
 	a.mu.Lock()
@@ -103,7 +119,8 @@ func (a *fakeAdapter) PID() int {
 }
 
 // emit pushes an event onto the stream, dropping it if the session was killed
-// (the channel is closed) so a late-emitting test never panics.
+// (the channel is closed) so a late-emitting test never panics. A system/init
+// frame also signals online, mirroring the real adapter's scan loop.
 func (a *fakeAdapter) emit(ev agent.Event) {
 	a.mu.Lock()
 	if a.killed {
@@ -112,6 +129,9 @@ func (a *fakeAdapter) emit(ev agent.Event) {
 	}
 	ch := a.events
 	a.mu.Unlock()
+	if ev.Kind == agent.EventSystem {
+		a.onlineOnce.Do(func() { close(a.online) })
+	}
 	ch <- ev
 }
 
@@ -146,6 +166,11 @@ func (a *fakeAdapter) resumedWith() string {
 // factory mints one fresh fakeAdapter per Spawn/Resume and records them so a test
 // can drive the live one.
 type factory struct {
+	// staleResume stamps every minted adapter so a Resume never comes online —
+	// the fixture for the confirm-on-resume fall-through (a Spawn still comes up
+	// normally; only Resume is affected).
+	staleResume bool
+
 	mu      sync.Mutex
 	made    []*fakeAdapter
 	nextPID int
@@ -155,7 +180,12 @@ func (f *factory) new() agent.Adapter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextPID++
-	a := &fakeAdapter{pid: 1000 + f.nextPID, events: make(chan agent.Event, 16)}
+	a := &fakeAdapter{
+		pid:         1000 + f.nextPID,
+		events:      make(chan agent.Event, 16),
+		online:      make(chan struct{}),
+		staleResume: f.staleResume,
+	}
 	f.made = append(f.made, a)
 	return a
 }
@@ -315,6 +345,23 @@ func (w world) reconcilerLimit(t *testing.T, f *factory, p *fakeProc, contextLim
 		Actor:        "agent:claude-code",
 		ContextLimit: contextLimit,
 		Proc:         p,
+	})
+	if err != nil {
+		t.Fatalf("reconcile.New: %v", err)
+	}
+	return r
+}
+
+// reconcilerConfirm is reconciler with a short resume-confirm window, so the
+// confirm-on-resume fall-through can be exercised without a real 10s wait.
+func (w world) reconcilerConfirm(t *testing.T, f *factory, p *fakeProc, confirm time.Duration) *reconcile.Reconciler {
+	t.Helper()
+	r, err := reconcile.New(reconcile.Options{
+		Root:          w.root,
+		Adapters:      f.adapters,
+		Actor:         "agent:claude-code",
+		Proc:          p,
+		ResumeConfirm: confirm,
 	})
 	if err != nil {
 		t.Fatalf("reconcile.New: %v", err)
