@@ -6,6 +6,7 @@
   <title>Draiver — {{.Attempt.Ticket}}/{{.Attempt.ID}}</title>
   <link rel="icon" id="favicon" type="image/svg+xml" href="{{.FaviconHref}}">
   <link rel="stylesheet" href="/static/style.css">
+  {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/favicon.js" defer></script>
   <script src="/static/reltime.js" defer></script>
@@ -24,7 +25,8 @@
       <span class="current" aria-current="page">{{.Attempt.ID}}</span>
     </nav>
     <h1>{{.Attempt.Ticket}} <span class="att">/{{.Attempt.ID}}</span>
-      {{template "state-badge" (badge .Attempt.State false)}}</h1>
+      {{template "state-badge" (badge .Attempt.State false)}}
+      {{template "session-dot" .Attempt}}</h1>
     <p class="tagline">{{.Attempt.Title}}
       {{if .Attempt.Tool}} · <span data-testid="attempt-tool">{{.Attempt.Tool}}</span>{{end}}
       {{if .Attempt.Model}} · {{.Attempt.Model}}{{end}}
