@@ -25,7 +25,7 @@ var webuiCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "draiver webui (read-only) on http://%s  data=%s\n", webuiAddr, root.Dir)
+		fmt.Fprintf(cmd.OutOrStdout(), "draiver %s webui (read-only) on http://%s  data=%s\n", version, webuiAddr, root.Dir)
 		return srv.Serve(webuiAddr)
 	},
 }

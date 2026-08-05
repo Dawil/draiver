@@ -30,6 +30,25 @@ var (
 	attemptFlag string
 )
 
+// version is the resolved build version, single-sourced from the embedded
+// CHANGELOG.md by main at startup via SetVersion (see version.go at the repo
+// root). It stays "dev" until set — e.g. in cmd unit tests, which exercise the
+// commands without the top-level embed — so the daemon banners always have a
+// non-empty version to print.
+var version = "dev"
+
+// SetVersion records the resolved version as both cobra's --version string and
+// the value the long-running daemon banners (ctl up, webui) prefix their startup
+// line with, keeping every surface on the one changelog-derived source. An empty
+// value is ignored so the "dev" fallback survives.
+func SetVersion(v string) {
+	if v == "" {
+		return
+	}
+	version = v
+	rootCmd.Version = v
+}
+
 // exitError carries a specific process exit code out of a command.
 type exitError struct {
 	code int
