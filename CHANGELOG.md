@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-06
+
+### Added
+
+- **`draiver --version`, single-sourced from the changelog (drv-006).** The CLI
+  could not report its version — `rootCmd` set no cobra `Version` — and the two
+  version records that existed (this changelog and the git tags) had already
+  drifted. `internal/version.FromChangelog` now parses the topmost
+  non-`[Unreleased]` `## [x.y.z]` header, `main` embeds `CHANGELOG.md` (the
+  `//go:embed` must live in the repo-root package, as it cannot reach a parent
+  dir from `cmd/` or `internal/`) and hands it to `cmd.SetVersion`. That sets
+  `rootCmd.Version` — cobra gives `--version` for free — and the value the
+  long-running banners prefix their startup line with, so `ctl up` and `webui`
+  now report `draiverctld 0.2.2 up — …` / `draiver 0.2.2 webui …` from the same
+  source. The reported version *is* the changelog's latest released section; the
+  two cannot drift by construction.
+
+- **Session-liveness dot on dashboard cards (`draiver webui`, drvweb-001).** Each
+  attempt card gains a coloured runtime-liveness dot: eucalypt green (agent
+  running — live pid), wattle gold (stopped — session exists, dead pid, still
+  enabled), ghost-gum grey (disabled — dead pid, not enabled). A never-run or a
+  Stuck attempt shows no dot (its rust-red signals already carry it). The
+  read-only web server does its own signal-0 pid probe (mirroring
+  `reconcile.OSProc.Alive`) and reads `session.json` directly — never
+  `session.Open`, which would `MkdirAll` a session dir per attempt. The
+  Australian-bush colours are centralised in `internal/web/palette.go`: favicon
+  SVGs stay static behind a drift test, and the dot colours reach the browser as
+  `:root --dot-*` custom properties rendered from the constants, so `style.css`
+  carries no dot hex.
+
+### Changed
+
+- **Attempt-log timestamps render as relative age, full stamp on hover
+  (`draiver webui`, drvweb-002).** The attempt timeline showed each event's
+  timestamp as a raw minute-precision UTC string (`2006-01-02 15:04Z`), forcing
+  readers to mentally diff wall-clock strings and discarding sub-minute ordering.
+  Each entry now renders a relative age instead — "just now", "3 minutes ago",
+  "yesterday", … — inside a `<time>` element whose native `title` tooltip carries
+  the precise second-precision UTC stamp alongside the operator's local time.
+  `static/reltime.js` recomputes the age from the `datetime` attribute on load,
+  after every htmx log-swap, and on a 30s tick, so the age stays live even on a
+  Done attempt whose log region never polls. The Go `relativeAge` and the JS
+  share one set of bucket boundaries, each pinned by a test
+  (`TestRelativeAgeBuckets`, `TestTimelineShowsRelativeTimestamps`).
+
+- **`ctl status` hides Done attempts by default; `--all`/`-a` includes them
+  (`draiverctl`, drvctl-018).** The live view printed one row per attempt,
+  terminal Done ones included, so as closed tickets pile up they drown the
+  Running/Stuck/Review attempts an operator actually cares about. The default
+  list now shows only non-Done attempts; `--all`/`-a` restores the full list, and
+  an explicitly named target (`status <ticket[@attempt]>`) still prints its match
+  regardless of state. When the default filters everything away, a one-line hint
+  reports the hidden Done count and the `--all` opt-in instead of blank output.
+  Scope is `ctl status` only; the web board (`draiver status`) is untouched.
+
+- **`--repo` is required at attempt creation; a repo-less admit escalates instead
+  of silently stalling (`draiverctl`, drvctl-017).** Two gaps around a missing
+  repo, closed at both ends. **At creation:** `attempt.Create` trims and rejects
+  an empty repo — the one chokepoint every creation path funnels through — so no
+  path can mint a repo-less attempt; `new` and `attempt new` validate up front
+  (before any side effect, no orphan dir), while `attempt new --from` still
+  inherits its parent's repo (drvctl-015), so `--repo` is required only when it
+  can't be inherited. **At admit:** a repo-less admit now appends an `escalation`
+  event, flipping the attempt to Needs-me so it lands on the board with an
+  actionable ask, rather than staying Running+enabled and stalling silently in the
+  operational log. The tick never fails as a whole — siblings keep admitting — and
+  every other admit failure stays log-only.
+
 ## [0.2.1] - 2026-08-05
 
 ### Added
