@@ -32,8 +32,8 @@ func TestStatusWritesStateAndBoard(t *testing.T) {
 
 func TestInboxAndMine(t *testing.T) {
 	dir := t.TempDir()
-	run(t, "--data", dir, "new", "PROJ-1", "--title", "A", "--assignee", "dave")
-	run(t, "--data", dir, "new", "PROJ-2", "--title", "B", "--assignee", "sam")
+	run(t, "--data", dir, "new", "PROJ-1", "--title", "A", "--assignee", "dave", "--repo", dir)
+	run(t, "--data", dir, "new", "PROJ-2", "--title", "B", "--assignee", "sam", "--repo", dir)
 	run(t, "--data", dir, "--actor", "agent:x", "escalate", "PROJ-1", "q1")
 	run(t, "--data", dir, "--actor", "agent:x", "escalate", "PROJ-2", "q2")
 

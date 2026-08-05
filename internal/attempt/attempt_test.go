@@ -1,6 +1,7 @@
 package attempt
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/Dawil/draiver/internal/store"
@@ -14,11 +15,11 @@ func TestCreateAllocatesSequentialIDsWithGenesis(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a1, err := Create(root, id, New{Tool: "claude-code", Model: "opus-4.8", Actor: "agent:x"})
+	a1, err := Create(root, id, New{Tool: "claude-code", Model: "opus-4.8", Repo: "/repo", Actor: "agent:x"})
 	if err != nil {
 		t.Fatalf("create 1: %v", err)
 	}
-	a2, err := Create(root, id, New{Tool: "aider", Actor: "agent:y"})
+	a2, err := Create(root, id, New{Tool: "aider", Repo: "/repo", Actor: "agent:y"})
 	if err != nil {
 		t.Fatalf("create 2: %v", err)
 	}
@@ -42,7 +43,7 @@ func TestCreateAllocatesSequentialIDsWithGenesis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Tool != "claude-code" || m.Model != "opus-4.8" || m.Actor != "agent:x" {
+	if m.Tool != "claude-code" || m.Model != "opus-4.8" || m.Actor != "agent:x" || m.Repo != "/repo" {
 		t.Errorf("meta not persisted: %+v", m)
 	}
 
@@ -54,7 +55,27 @@ func TestCreateAllocatesSequentialIDsWithGenesis(t *testing.T) {
 
 func TestCreateRejectsUnknownTicket(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
-	if _, err := Create(root, "NOPE-1", New{Actor: "a"}); err == nil {
+	if _, err := Create(root, "NOPE-1", New{Repo: "/repo", Actor: "a"}); err == nil {
 		t.Error("expected error creating attempt on nonexistent ticket")
+	}
+}
+
+// Create is the chokepoint that guarantees no attempt is minted without a repo
+// (drvctl-017): an empty or whitespace-only Repo is refused, and nothing is
+// written to the (existing) ticket.
+func TestCreateRequiresRepo(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range []string{"", "   "} {
+		if _, err := Create(root, id, New{Actor: "agent:x", Repo: repo}); !errors.Is(err, ErrRepoRequired) {
+			t.Errorf("Create(repo=%q) err = %v, want ErrRepoRequired", repo, err)
+		}
+	}
+	// The refused creations wrote no attempt.
+	if ids, _ := List(root, id); len(ids) != 0 {
+		t.Errorf("a repo-less Create left an attempt behind: %v", ids)
 	}
 }
