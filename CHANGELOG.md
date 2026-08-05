@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Session lifecycle verbs recast around a state-stack "degree axis", and the
+  imperative verbs now hand off to the daemon (`draiverctl`, drvctl-016).**
+  `start`/`stop`/`restart` were an ad-hoc foreground driver: the resume path blindly
+  `--resume`'d any recorded session id — so an id that could no longer be resumed
+  was retried forever with no exit but a manual `rm -rf …/session/` — while
+  `restart` resumed the same id yet force-fed a fresh brief, neither a clean
+  continue nor a clean fresh start. Bring-up is now one **self-heal cascade** that
+  climbs from the highest surviving layer: a recorded session is Resumed and
+  **confirmed online** (the first `system`/init frame, via a new adapter-agnostic
+  `agent.Onliner` seam); an id that no longer resumes has its dead process reaped
+  and falls through to a fresh `Spawn` on the same worktree. **Brief-on-reset** is
+  coupled to that: a fresh spawn is cold-started from the brief, a resume continues
+  without a re-brief — so the "restart re-briefs a resume" incoherence is gone.
+- **`restart` is now flush-to-depth + that same climb, with the reset depth named
+  explicitly (`draiverctl`, drvctl-016).** A single ordinal flush runs before the
+  cascade climbs back, so all points on the axis share one path: `--new-session`
+  (clear the session id → respawn fresh on the same worktree, cold-started),
+  `--new-worktree` (also rebuild the checkout from HEAD, discarding uncommitted
+  work by design), and `--new-attempt` (fork a child attempt via
+  `attempt.Create{From}`, inheriting tool/model/repo, the parent log preserved
+  immutably with a fork note). Deepest flag wins; every destructive reset records a
+  durable note so it is never silent. The old "context refresh" framing is dropped.
+- **`start`/`restart`/`enable --now` are imperative-transient control-plane actions
+  that hand an attempt to a running `ctl up` (`draiverctl`, drvctl-016).** The
+  self-heal cascade and brief-on-reset coupling now live only in the daemon-shared
+  bring-up path, so the client verbs cannot drift from the fleet. `ctl up` claims a
+  **controller pidfile** (`controller.json` — pid, boot nonce, started; removed on
+  clean exit, liveness-probed so a stale record never passes for a running daemon)
+  and prints its pid on startup. `start`/`restart` **require a live controller**
+  (they error if none is up, and `restart` never reaps a session it cannot hand
+  back), then stamp a per-attempt **desired-marker** with the daemon's boot nonce —
+  transient by construction, swept when the daemon restarts, so they never leave an
+  unsupervised orphan; the verb prints a handoff and returns (watch via `ctl logs
+  -f`). `stop` reaps and removes the marker, leaving the imperative fleet, while a
+  spent-but-still-desired run is re-admitted by the daemon. `start --new-attempt`
+  forks a parallel branch and leaves the parent running; `restart --new-attempt`
+  parks the parent so only the fork runs.
+
 ## [0.2.2] - 2026-08-06
 
 ### Added

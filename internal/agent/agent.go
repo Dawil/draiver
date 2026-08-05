@@ -70,6 +70,20 @@ type Permissioner interface {
 	Decide(ctx context.Context, requestID string, d Decision) error
 }
 
+// Onliner is the optional capability of an adapter that can signal when its
+// session has come online — the first system/init frame observed on its stream.
+// The supervisor uses it to confirm a Resume actually reattached (the process
+// forked and the agent acknowledged the session) before trusting it, rather than
+// looping forever on a session id that is no longer resumable: an unresumable id
+// launches a process that dies on arrival, never coming online. It is discovered
+// by type-assertion like the other optional accessors; an adapter that does not
+// implement it is assumed to have come online (the pre-cascade behaviour).
+type Onliner interface {
+	// Online returns a channel closed once the session is confirmed online. It
+	// returns the same channel on every call, and closing is one-shot.
+	Online() <-chan struct{}
+}
+
 // Decision answers a PermissionRequest. Allow lets the tool call proceed;
 // otherwise it is denied and Message is the reason surfaced to the agent. Input,
 // when non-nil on an allow, is the (possibly rewritten) call input to run — the

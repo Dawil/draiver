@@ -26,8 +26,36 @@ var ctlEnableCmd = &cobra.Command{
 		"brief). The default is disabled — being in Running alone never auto-spawns an agent.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if ctlEnableNow {
+			return enableNow(cmd, args[0])
+		}
 		return setEnabled(cmd, args[0], true)
 	},
+}
+
+// ctlEnableNow backs `enable --now`: after recording the durable enable, hand the
+// attempt to a running `ctl up` to bring up immediately (requires one). It is the
+// persistent counterpart of `start` — enable survives a daemon restart where a
+// bare `start`'s transient marker is swept.
+var ctlEnableNow bool
+
+// enableNow implements `enable --now`: it requires a live `ctl up` up front (so a
+// no-daemon invocation persists nothing), records the durable enable event, and
+// reports the handoff. The enable bit makes the attempt desired, so the daemon
+// brings it up on its next tick — no transient marker needed.
+func enableNow(cmd *cobra.Command, arg string) error {
+	r, ticket, att, err := newCtlTarget(arg)
+	if err != nil {
+		return err
+	}
+	res, err := r.EnableNow(ticket, att)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(),
+		"enabled %s/%s and handed it to draiverctld (pid %d) — supervision persists and it will come up shortly; watch with `ctl logs -f %s@%s` (enable #%d)\n",
+		ticket, att, res.ControllerPID, ticket, att, res.Seq)
+	return nil
 }
 
 var ctlDisableCmd = &cobra.Command{
@@ -72,5 +100,10 @@ func setEnabled(cmd *cobra.Command, arg string, enable bool) error {
 }
 
 func init() {
+	// --now is the imperative add-on: enable persists as always, and additionally
+	// the attempt is handed to the running supervisor to come up immediately. It
+	// requires a live `ctl up` (unlike bare enable, which is purely declarative and
+	// takes effect whenever a daemon next runs). Only on enable — meaningless on disable.
+	ctlEnableCmd.Flags().BoolVar(&ctlEnableNow, "now", false, "also bring the attempt up immediately via the running `ctl up` (requires one; persists like enable, unlike the transient `start`)")
 	ctlCmd.AddCommand(ctlEnableCmd, ctlDisableCmd)
 }

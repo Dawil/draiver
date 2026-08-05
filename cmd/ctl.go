@@ -38,6 +38,17 @@ var (
 	ctlLogsJSON      bool
 	ctlStatusAll     bool // include terminal Done attempts in the list view
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
+
+	// restart depth flags — the cumulative degree axis (drvctl-016). The deepest
+	// one passed wins; a deeper flag implies every shallower flush.
+	ctlRestartNewSession  bool
+	ctlRestartNewWorktree bool
+	ctlRestartNewAttempt  bool
+
+	// start --new-attempt forks a new attempt off the target and starts the fork,
+	// leaving the parent as it is (the parallel-branch counterpart of restart
+	// --new-attempt, which parks the parent instead — drvctl-016 / decision #23).
+	ctlStartNewAttempt bool
 )
 
 // ctlCmd is the draiverctld client surface — the reconciling supervisor half of
@@ -74,32 +85,58 @@ var ctlUpCmd = &cobra.Command{
 		if ctlRepo != "" {
 			repoNote = "fallback repo " + ctlRepo
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld %s up — %s, tick every %s (Ctrl-C to drain)\n", version, repoNote, ctlInterval)
-		return r.Run(ctx, ctlInterval)
+		// Claim PID 1 for this data root with a fresh boot nonce, so imperative
+		// `ctl start`/`restart` can find this supervisor and stamp their transient
+		// desired-markers with a nonce that dies when this daemon does (drvctl-016).
+		nonce, err := reconcile.NewNonce()
+		if err != nil {
+			return err
+		}
+		ctrl := reconcile.Controller{PID: os.Getpid(), Nonce: nonce, Started: time.Now()}
+		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld %s up (pid %d) — %s, tick every %s (Ctrl-C to drain)\n", version, ctrl.PID, repoNote, ctlInterval)
+		return r.Run(ctx, ctlInterval, ctrl)
 	},
 }
 
 var ctlStartCmd = &cobra.Command{
 	Use:   "start <ticket[@attempt]>",
-	Short: "Bring up (or resume) a session for one attempt and stream it in the foreground",
-	Long: "start brings up a session for one attempt — spawning a fresh one, or " +
-		"resuming the recorded cattle handle if the attempt already ran — injects the " +
-		"cold-start brief, and streams it in the foreground with the full gate/protocol " +
-		"pipeline live. Ctrl-C reaps the session but keeps its id, so a later start (or " +
-		"restart) resumes it.\n\n" +
-		"Tier 0 has no background daemon channel, so start runs in the foreground; use " +
-		"`ctl up` to supervise the fleet in the background.",
+	Short: "Hand an attempt to a running `ctl up` to bring up in the background",
+	Long: "start hands one attempt off to a running `ctl up` supervisor, which brings " +
+		"it up in the background — resuming the recorded session, or spawning a fresh " +
+		"one (cold-started from the brief) if there is none — through the same self-heal " +
+		"cascade and gate/protocol pipeline the enabled fleet uses.\n\n" +
+		"It is imperative and transient: it does not persist like `enable` and is swept " +
+		"if the supervisor restarts, so it never leaves an unsupervised orphan. start " +
+		"requires a running `ctl up`; it errors if none is up. The session runs " +
+		"headless — watch it with `ctl logs -f <ticket[@attempt]>`.\n\n" +
+		"--new-attempt forks a NEW attempt off the target (new id, provenance to it) and " +
+		"starts the fork, leaving the parent as it is — a parallel branch that runs " +
+		"alongside it. Contrast `restart --new-attempt`, which parks the parent.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, ticket, att, err := newCtlTarget(args[0])
 		if err != nil {
 			return err
 		}
-		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "draiverctl start %s/%s — Ctrl-C to stop (session stays resumable)\n", ticket, att)
-		return r.Start(ctx, ticket, att, streamPrinter(out))
+		if ctlStartNewAttempt {
+			res, err := r.StartNewAttempt(ticket, att)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out,
+				"draiverctl start %s@%s --new-attempt — forked a new attempt %s/%s (from %s) and handed it to draiverctld (pid %d), leaving the parent running; watch with `ctl logs -f %s@%s`\n",
+				ticket, att, ticket, res.Attempt, res.From, res.ControllerPID, ticket, res.Attempt)
+			return nil
+		}
+		res, err := r.Start(ticket, att)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out,
+			"handed %s/%s to draiverctld (pid %d) — it will come up shortly; watch with `ctl logs -f %s@%s`\n",
+			ticket, att, res.ControllerPID, ticket, att)
+		return nil
 	},
 }
 
@@ -128,22 +165,67 @@ var ctlStopCmd = &cobra.Command{
 
 var ctlRestartCmd = &cobra.Command{
 	Use:   "restart <ticket[@attempt]>",
-	Short: "Reap and respawn a session fresh from a new brief (context refresh)",
-	Long: "restart reaps the current session and brings it back up fresh from a new " +
-		"cold-start brief — the context refresh. The session id survives, so this is a " +
-		"resume, not a new attempt. Like start it streams in the foreground.",
+	Short: "Reap, flush to a chosen depth, and hand the attempt to `ctl up` to bring back up",
+	Long: "restart reaps the current session, flushes volatile state to a chosen depth, then " +
+		"hands the attempt off to a running `ctl up` to bring back up in the background — the " +
+		"same imperative-transient handoff `start` uses. It requires a running `ctl up` " +
+		"(errors otherwise, never orphans) and returns immediately; watch with `ctl logs -f`.\n\n" +
+		"With no flag it reaps only the process and the daemon resumes the same session — a " +
+		"clean continue, no re-brief. The depth flags flush deeper volatile layers before the " +
+		"cascade climbs back; they are cumulative (a deeper flag implies the shallower flushes), " +
+		"and if more than one is given the deepest wins:\n\n" +
+		"  --new-session   discard the conversation (L0); spawn a fresh session on the same " +
+		"worktree, cold-started from the brief.\n" +
+		"  --new-worktree  also rebuild the worktree from HEAD (L1) — discards uncommitted " +
+		"work in the checkout.\n" +
+		"  --new-attempt   FORK a new attempt (L2): a new attempt id with provenance to this " +
+		"one, started fresh, and PARK this one (it leaves the supervised fleet). This attempt's " +
+		"log is preserved untouched — restart lands on a *different* attempt.\n\n" +
+		"A re-brief happens only when the session layer was flushed.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, ticket, att, err := newCtlTarget(args[0])
 		if err != nil {
 			return err
 		}
-		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
+		level := restartLevel()
+		res, err := r.Restart(cmd.Context(), ticket, att, level)
+		if err != nil {
+			return err
+		}
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "draiverctl restart %s/%s — reaping and respawning fresh from brief (Ctrl-C to stop)\n", ticket, att)
-		return r.Restart(ctx, ticket, att, streamPrinter(out))
+		switch {
+		case res.Forked:
+			fmt.Fprintf(out, "draiverctl restart %s@%s --new-attempt — forked a new attempt %s/%s (from %s) and parked the parent; handed the fork to draiverctld (pid %d), cold-starting it fresh. Watch with `ctl logs -f %s@%s`\n",
+				ticket, att, ticket, res.Attempt, res.From, res.ControllerPID, ticket, res.Attempt)
+		case res.Level == reconcile.FlushWorktree:
+			fmt.Fprintf(out, "draiverctl restart %s@%s --new-worktree — rebuilding the worktree from HEAD, cold-starting from brief; handed to draiverctld (pid %d). Watch with `ctl logs -f %s@%s`\n",
+				ticket, att, res.ControllerPID, ticket, att)
+		case res.Level == reconcile.FlushSession:
+			fmt.Fprintf(out, "draiverctl restart %s@%s --new-session — fresh session on the same worktree, cold-starting from brief; handed to draiverctld (pid %d). Watch with `ctl logs -f %s@%s`\n",
+				ticket, att, res.ControllerPID, ticket, att)
+		default:
+			fmt.Fprintf(out, "draiverctl restart %s@%s — reaping and resuming the same session; handed to draiverctld (pid %d). Watch with `ctl logs -f %s@%s`\n",
+				ticket, att, res.ControllerPID, ticket, att)
+		}
+		return nil
 	},
+}
+
+// restartLevel resolves the restart depth flags into a single FlushLevel. The
+// flags are cumulative and the deepest one passed wins (--new-attempt implies a
+// new worktree implies a new session), so they are checked deepest-first.
+func restartLevel() reconcile.FlushLevel {
+	switch {
+	case ctlRestartNewAttempt:
+		return reconcile.FlushAttempt
+	case ctlRestartNewWorktree:
+		return reconcile.FlushWorktree
+	case ctlRestartNewSession:
+		return reconcile.FlushSession
+	default:
+		return reconcile.FlushNone
+	}
 }
 
 var ctlStatusCmd = &cobra.Command{
@@ -286,15 +368,6 @@ func resolveCtlTarget(root store.Root, arg string) (string, string, error) {
 		return "", "", fmt.Errorf("attempt %s/%s not found", ticket, att)
 	}
 	return ticket, att, nil
-}
-
-// streamPrinter renders a live session's normalized events for a foreground
-// start/restart. It is a thin adapter over renderEvent — the one shared renderer
-// `ctl logs` also reads the recorded stream back through — so live and replayed
-// output speak the same vocabulary. It is presentation only; the durable log and
-// meter are written by the dispatch pipeline underneath.
-func streamPrinter(out io.Writer) func(agent.Event) {
-	return func(ev agent.Event) { renderEvent(out, ev) }
 }
 
 // renderEvent writes one normalized event as a concise, human-readable one-liner:
@@ -596,19 +669,23 @@ func init() {
 	// gate — for writes outside the checkout and other risky tools. Empty (the
 	// bare default mode) would instead route every in-worktree edit to the gate,
 	// which escalates them, stalling the attempt (drvctl-013).
+	// Per-session config (permission mode, context-window auto-stop, permission
+	// overrides) lives only on `up`. The daemon owns every session it brings up, and
+	// since start/restart became transient daemon handoffs that drive no session of
+	// their own (drvctl-016 C2), these flags would be dead on them.
 	ctlDefaultPermMode := "acceptEdits"
 	ctlUpCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
-	// The foreground drivers route tool use through the gates just like the daemon.
-	ctlStartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
-	ctlRestartCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
-	// The auto-stop is only meaningful where a session is actually driven: up,
-	// start, restart. 0 disables it; -1 defers to the config (default 150000).
-	for _, c := range []*cobra.Command{ctlUpCmd, ctlStartCmd, ctlRestartCmd} {
-		c.Flags().IntVar(&ctlContextLimit, "context-limit", -1, "context-window auto-stop threshold (tokens); 0 disables (default from config, 150000)")
-		// --permission tool=rule (allow|escalate) is the one-off layer over the
-		// config file's permissions, itself over the allow-all auto-mode base.
-		c.Flags().StringToStringVar(&ctlPermRules, "permission", nil, "per-tool permission-gate override, e.g. --permission Bash=escalate (allow|escalate); layers over config")
-	}
+	ctlUpCmd.Flags().IntVar(&ctlContextLimit, "context-limit", -1, "context-window auto-stop threshold (tokens); 0 disables (default from config, 150000)")
+	ctlUpCmd.Flags().StringToStringVar(&ctlPermRules, "permission", nil, "per-tool permission-gate override, e.g. --permission Bash=escalate (allow|escalate); layers over config")
+	// restart depth flags — the cumulative degree axis (drvctl-016); the deepest
+	// one passed selects how many volatile layers are flushed before the cascade
+	// climbs back.
+	ctlRestartCmd.Flags().BoolVar(&ctlRestartNewSession, "new-session", false, "flush the session conversation (L0): spawn a fresh session on the same worktree, cold-started from the brief")
+	ctlRestartCmd.Flags().BoolVar(&ctlRestartNewWorktree, "new-worktree", false, "flush the worktree too (L1): rebuild it from HEAD, discarding uncommitted work; implies --new-session")
+	ctlRestartCmd.Flags().BoolVar(&ctlRestartNewAttempt, "new-attempt", false, "fork a new attempt (L2) with provenance to this one and start the fork fresh, parking this attempt; its log is preserved")
+	// start --new-attempt forks a parallel branch (the fork runs alongside the
+	// parent) — contrast restart --new-attempt, which parks the parent.
+	ctlStartCmd.Flags().BoolVar(&ctlStartNewAttempt, "new-attempt", false, "fork a new attempt (new id, provenance to this one) and start the fork, leaving the parent running — a parallel branch")
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlLogsCmd.Flags().BoolVar(&ctlLogsJSON, "json", false, "print the raw stream.jsonl lines verbatim (machine form for | jq / replay) instead of the human-readable rendering")
 	ctlStatusCmd.Flags().BoolVarP(&ctlStatusAll, "all", "a", false, "include terminal Done attempts (hidden by default in the list view)")

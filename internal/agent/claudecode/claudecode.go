@@ -35,21 +35,25 @@ type Adapter struct {
 	// and buildCmd is used.
 	newCmd func(ctx context.Context, bin string, args []string) *exec.Cmd
 
-	mu        sync.Mutex
-	started   bool
-	sessionID string
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	events    chan agent.Event
-	done      chan struct{} // closed when the process has been reaped
-	killed    chan struct{} // closed by Kill so scan abandons blocked sends
-	killOnce  sync.Once
-	waitErr   error
+	mu         sync.Mutex
+	started    bool
+	sessionID  string
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	events     chan agent.Event
+	done       chan struct{} // closed when the process has been reaped
+	killed     chan struct{} // closed by Kill so scan abandons blocked sends
+	killOnce   sync.Once
+	online     chan struct{} // closed by scan on the first system/init frame
+	onlineOnce sync.Once
+	waitErr    error
 }
 
 // New returns an unstarted Claude Code adapter. Set Bin to override the
 // executable.
-func New() *Adapter { return &Adapter{events: make(chan agent.Event, 64)} }
+func New() *Adapter {
+	return &Adapter{events: make(chan agent.Event, 64), online: make(chan struct{})}
+}
 
 // Spawn starts a fresh session and returns its client-minted session id. The id
 // is generated before the process starts, so a caller records the cattle handle
@@ -143,6 +147,11 @@ loop:
 					a.mu.Lock()
 					a.sessionID = ev.SessionID
 					a.mu.Unlock()
+					// The system/init frame means the session is live: a Spawn
+					// forked and confirmed its id, or a Resume actually reattached.
+					// Signal online so a supervisor can distinguish a resume that
+					// came up from one that died on a stale id (drvctl-016).
+					a.onlineOnce.Do(func() { close(a.online) })
 				}
 				// Abandon the send if Kill fired, so a stalled consumer can never
 				// deadlock a reap.
@@ -251,6 +260,15 @@ func (a *Adapter) writeLine(line []byte) error {
 
 // Stream returns the normalized event channel.
 func (a *Adapter) Stream() <-chan agent.Event { return a.events }
+
+// Online returns a channel closed once the session has come online — the scan
+// loop saw the first system/init frame. It lets the supervisor confirm a Resume
+// actually reattached before trusting it, rather than looping on a session id
+// that can no longer be resumed. It satisfies the optional agent.Onliner
+// capability. The channel is created at New, so it is safe to read before the
+// process starts (it simply stays open until the init frame arrives, or forever
+// if the process dies without emitting one).
+func (a *Adapter) Online() <-chan struct{} { return a.online }
 
 // SessionID returns the confirmed session id once known (after Spawn/Resume and
 // the init frame), else empty.
