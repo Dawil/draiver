@@ -114,7 +114,7 @@ func TestCtlStatusHidesDone(t *testing.T) {
 	dir := newTicket(t) // PROJ-1/0001, Running
 
 	// A second ticket driven to Done via a `done` lifecycle event.
-	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-2", "--title", "Two"); code != 0 {
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-2", "--title", "Two", "--repo", dir); code != 0 {
 		t.Fatalf("new PROJ-2 exited %d", code)
 	}
 	root := store.Root{Dir: dir}

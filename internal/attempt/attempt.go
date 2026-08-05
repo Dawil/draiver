@@ -43,6 +43,14 @@ type New struct {
 	TS    time.Time // zero → now
 }
 
+// ErrRepoRequired is returned by Create when asked to mint an attempt with no
+// repo path. Every attempt must record where it runs (drvctl-017): the daemon
+// cuts each session's worktree from this path, and an attempt that omits it can
+// never come up. The check lives here, the one chokepoint every creation path
+// funnels through, so no caller can mint a repo-less attempt; the commands layer
+// this with an earlier, friendlier message.
+var ErrRepoRequired = errors.New("a repo path is required: set --repo to the local git working tree this attempt targets")
+
 // Create allocates the next attempt id on a ticket, writes attempt.md, ensures
 // the attempt's dirs, appends the genesis "created" event, and returns the meta.
 // Id allocation is race-safe: the attempt dir is created exclusively and a
@@ -50,6 +58,13 @@ type New struct {
 func Create(root store.Root, ticket string, n New) (Meta, error) {
 	if !root.Exists(ticket) {
 		return Meta{}, fmt.Errorf("attempt: ticket %q does not exist", ticket)
+	}
+	// Repo is mandatory and stored trimmed, so no path (including a whitespace-only
+	// one) can slip through — validated before any side effect so a rejected Create
+	// writes nothing (drvctl-017).
+	n.Repo = strings.TrimSpace(n.Repo)
+	if n.Repo == "" {
+		return Meta{}, ErrRepoRequired
 	}
 	if err := os.MkdirAll(root.AttemptsDir(ticket), 0o755); err != nil {
 		return Meta{}, fmt.Errorf("attempt: ensure attempts dir: %w", err)

@@ -48,11 +48,14 @@ the imported frontmatter do (ambiguous). A rejected new writes nothing.`,
 			return fmt.Errorf("ticket %q already exists", id)
 		}
 
-		// Build (and validate the title of) the spec before any side effect:
-		// a rejected `new` must leave no orphan ticket dir behind.
+		// Build (and validate the title of) the spec, and validate --repo, before
+		// any side effect: a rejected `new` must leave no orphan ticket dir behind.
 		spec, err := buildSpec(id)
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(newRepo) == "" {
+			return fmt.Errorf("%s", errNoRepo)
 		}
 		if err := root.EnsureTicketDir(id); err != nil {
 			return err
@@ -78,6 +81,12 @@ the imported frontmatter do (ambiguous). A rejected new writes nothing.`,
 // errNoTitle is returned when no creation path supplied a meaningful title.
 // Keeping it one message keeps the two inflow paths (scaffold, import) in sync.
 const errNoTitle = "a ticket title is required: pass --title, or --spec a file whose frontmatter carries a non-empty title:"
+
+// errNoRepo is returned when creation supplies no repo path. Every attempt must
+// record the local git working tree it targets (drvctl-017), so the daemon knows
+// where to cut its worktree; a repo-less attempt would only fail later, at the
+// daemon, far from the person who could fix it here.
+const errNoRepo = "a repo path is required: pass --repo <local git working tree> so the supervisor knows where to cut this attempt's worktree"
 
 // buildSpec produces the spec.md bytes for a new ticket and validates that the
 // title has exactly one source. It performs no side effects, so `new` can call
@@ -210,6 +219,6 @@ func init() {
 	newCmd.Flags().StringVar(&newSpecFile, "spec", "", "import spec.md from this file instead of scaffolding one; --title supplies the title if the file's frontmatter lacks one (supplying both errors)")
 	newCmd.Flags().StringVar(&newTool, "tool", "", "coding-agent tool for the first attempt (e.g. claude-code)")
 	newCmd.Flags().StringVar(&newModel, "model", "", "model for the first attempt (e.g. opus-4.8)")
-	newCmd.Flags().StringVar(&newRepo, "repo", "", "local path to the git working tree this ticket's attempts target (the supervisor cuts each session's worktree from it)")
+	newCmd.Flags().StringVar(&newRepo, "repo", "", "required: local path to the git working tree this ticket's attempts target (the supervisor cuts each session's worktree from it)")
 	rootCmd.AddCommand(newCmd)
 }
