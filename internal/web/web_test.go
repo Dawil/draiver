@@ -366,9 +366,9 @@ func TestLogBodyMarkdownRenderedAndSanitized(t *testing.T) {
 func TestFaviconServedAndWired(t *testing.T) {
 	h := newServer(t)
 
-	const green = "#3E6B48" // eucalypt "D"
-	const rust = "#B7410E"  // Stuck badge
-	const misty = "#6E9BB5" // Blue Mountains Review badge
+	const green = Eucalypt      // eucalypt "D"
+	const rust = MurrayRust     // Stuck badge
+	const misty = BlueMountains // Blue Mountains Review badge
 
 	// Detail pages reflect live board state too: the seed has a Stuck attempt,
 	// so they server-render the Stuck variant (same precedence as the board),

@@ -30,6 +30,9 @@ type Server struct {
 	root store.Root
 	tmpl *template.Template
 	md   goldmark.Markdown
+	// alive probes whether a recorded session pid is still running. It defaults to
+	// a signal-0 OS probe (pidAlive); tests inject a deterministic stub.
+	alive func(pid int) bool
 }
 
 // stateLabels overrides how a control state is shown in the human-facing web UI.
@@ -73,17 +76,31 @@ func cardHref(a project.Attempt) string {
 
 // New builds a Server over the given data root.
 func New(root store.Root) (*Server, error) {
+	s := &Server{root: root, md: goldmark.New(), alive: pidAlive}
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
-			"stateLabel": stateLabel,
-			"badge":      func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
-			"cardHref":   cardHref,
+			"stateLabel":  stateLabel,
+			"badge":       func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
+			"cardHref":    cardHref,
+			"sessionDot":  s.sessionDot,
+			"paletteVars": paletteVars,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
-	return &Server{root: root, tmpl: tmpl, md: goldmark.New()}, nil
+	s.tmpl = tmpl
+	return s, nil
+}
+
+// paletteVars renders the session-dot colours as a :root custom-property block so
+// the browser gets them from the Go palette constants — one origin, no dot hex
+// typed into style.css. It is injected into each full page's <head>; style.css
+// styles the dots purely through var(--dot-*).
+func paletteVars() template.HTML {
+	return template.HTML(fmt.Sprintf(
+		"<style>:root{--dot-running:%s;--dot-stopped:%s;--dot-disabled:%s;}</style>",
+		Eucalypt, Wattle, GhostGum))
 }
 
 // Handler returns the read-only route mux.
