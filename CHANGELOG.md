@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-07
+
 ### Added
 
 - **Landing is now a `ctl` primitive — `ctl merge` / `ctl sync` on a per-attempt
@@ -26,6 +28,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disposition, defaulting by actor kind: an `agent:*` land raises a durable
   escalation (→ Needs me, halt), a `human:*` land exits nonzero with a message.
   Conflict / divergence / dirty always abort cleanly and never force.
+- **Inline escalation resolution from the board (drvweb-007).** Each *open*
+  escalation on the attempt timeline now renders a resolution textarea + Resolve
+  button; submitting appends a `resolution` event refing that escalation's seq,
+  clears the block, and leaves Stuck — the board affordance for `draiver resolve`.
+  A resolved escalation shows only "→ resolved by #N". Like the other webui
+  writes, it is not reimplemented in the web layer: `POST
+  /ticket/{id}/{attempt}/resolve` shells `draiver resolve` (runDraiverResolve, via
+  a shared `draiverExe()` helper), so the board and a terminal share one append
+  path. Guards mirror the CLI and close the gap it leaves: same-origin CSRF (403),
+  empty answer (400), and `classifyResolveTarget` rejects an unknown or
+  non-escalation seq (400) and an already-resolved seq (409), all read from
+  derived state rather than the posted form. The textarea carries a stable id +
+  `hx-preserve` so the 3s poll swap never clobbers a half-typed answer and
+  correctly vanishes once resolved. The webui is now a three-write surface (log,
+  resolve, enable).
+- **Agents are prompted to push and attach a review URL when raising review
+  (drvctl-026).** The onboarding skill's "Claim review" step (SKILL.md §5) and the
+  Loop line now teach the agent to push its attempt branch to a git remote and
+  claim review with a link the human can click — a `compare` URL by default
+  (`<base>/compare/<main>...<branch>`, derived from `git remote get-url` with a
+  trailing `.git` stripped), or a real PR via `--url`. Remote selection is
+  explicit: exactly one remote → use it; more than one → the new global-config key
+  `primary_remote` (a git remote name, sitting alongside `review_link_hosts` in
+  `~/.draiver/config.json`); ambiguous (several remotes with no primary, or a
+  primary absent from `git remote`) → escalate rather than guess. `draiver review`
+  is unchanged behaviourally — it still only appends and validates the link, never
+  pushing or opening a PR — but its `--help` now says so. `config.Config` gains an
+  optional `primary_remote` field (omitted → empty).
 - **Green play button on the board's Running column, the webui's first write
   (drvweb-005).** A Running attempt that is not yet enabled (the supervision axis
   the grey session-dot reads) shows a green play button on its card; clicking it
@@ -96,6 +126,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The injected brief now carries the Markdown-when-logging nudge (`draiverctl`,
+  drvctl-020).** The board renders event bodies as Markdown, but that how-to-log
+  guidance only reached agents that loaded the onboarding skill (§3.5) — sessions
+  the supervisor drives get their instructions from the cold-start brief, which
+  carried none, so a supervised agent without the skill logged unstructured blobs.
+  `brief.Build` now prepends a one-line working-instructions preamble,
+  single-sourced from a `workingInstructions` const kept in sync with SKILL §3.5.
+  It rides every cold-start and resume (`protocol.InjectBrief` re-injects the
+  brief after Spawn/Resume) and sits with the spec/log the agent already reads.
 - **Session lifecycle verbs recast around a state-stack "degree axis", and the
   imperative verbs now hand off to the daemon (`draiverctl`, drvctl-016).**
   `start`/`stop`/`restart` were an ad-hoc foreground driver: the resume path blindly

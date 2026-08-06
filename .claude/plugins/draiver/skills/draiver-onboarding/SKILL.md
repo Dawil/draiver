@@ -143,13 +143,53 @@ answer and log what you did, closing the escalate → resolve → action arc:
 draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_URL from a fixture; opened PROJ-140 for the real secret."
 ```
 
-## 5. Claim review — don't self-close
+## 5. Claim review — push, then claim with a link
 
 When you believe the work is complete, make a **claim** for a human to verify.
-Do not mark the ticket done; that decision is the human's.
+Do not mark the ticket done; that decision is the human's. A claim the human
+can't click through to is a claim they have to chase — so a review must carry a
+**URL that points at the change**, and that means your branch has to be on a
+remote first.
+
+`draiver review` only appends the claim and validates the link — it does **not**
+push or open a PR. You push, exactly as you run `git commit` yourself.
+
+**a. Push your attempt branch to a remote.** Which remote:
+
+- **Exactly one remote** (`git remote` prints one name) → push there.
+- **More than one remote** → push to the **primary remote** named in the global
+  config, `~/.draiver/config.json` key `primary_remote` (e.g.
+  `"primary_remote": "forgejo"`).
+- **Ambiguous** — several remotes with no `primary_remote` set, or a
+  `primary_remote` that isn't in `git remote` — **do not guess a remote.**
+  Escalate (§4): pushing to the wrong forge is worse than asking.
 
 ```
-draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's three acceptance criteria."
+git push -u <remote> HEAD
+```
+
+**b. Derive the review URL from that remote.** Take the remote's URL
+(`git remote get-url <remote>`), strip a trailing `.git`, and — for a web forge
+(GitHub / Forgejo / GitLab) — build a **compare** URL against the main branch:
+
+```
+http://host:3000/owner/repo.git  →  http://host:3000/owner/repo/compare/main...<branch>
+```
+
+A compare URL needs no forge API and works across forges, so it is the default.
+If you opened a real PR, link that instead.
+
+**c. Claim, attaching the link.** `--url` defaults the link rel to `pr`; for a
+branch-compare or diff use `--link compare=<url>` / `--link diff=<url>`:
+
+```
+draiver review <TICKET> "Pushed to forgejo; all tests green; covers the spec's three acceptance criteria." --link compare=http://host:3000/owner/repo/compare/main...drvctl-026-0001
+```
+
+or, when it's a real PR:
+
+```
+draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's three acceptance criteria." --url http://host:3000/owner/repo/pulls/142
 ```
 
 ## Loop
@@ -157,7 +197,8 @@ draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's thre
 Each session: `brief` once → work → `log` gotchas/decisions as you go → when
 blocked, `escalate` and stop (the human resolves from their board, on their own
 time) → when the ticket is worked again, a session `brief`s, reads the
-resolution, and continues → `review` when the work is done.
+resolution, and continues → when the work is done, **push** to a remote and
+`review` with a link the human can click.
 
 Everything valuable lives in the log. Leave the ticket resumable — the next
 `brief` is the only handoff.

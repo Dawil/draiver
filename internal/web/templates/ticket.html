@@ -158,7 +158,25 @@
             {{if .Resolved}}
               <p class="link-note resolved" data-testid="resolved-{{.Seq}}">→ resolved by #{{.ResolvedBy}}</p>
             {{else}}
+              {{/* Inline resolution: answer this escalation from the board (the
+                   affordance for `draiver resolve`). It posts the escalation's own
+                   seq, so with several open at once each box answers exactly one.
+                   The response is the attempt-live fragment swapped into the log
+                   region — the escalation flips to "resolved by #N" and the badge
+                   leaves Stuck from one swap. The <textarea> carries a stable id +
+                   hx-preserve so the 3s poll swap of this region never clobbers a
+                   half-typed answer (and it correctly vanishes once resolved,
+                   since the id is gone from the fragment). */}}
               <p class="link-note unresolved" data-testid="unresolved-{{.Seq}}">→ unresolved — needs a human</p>
+              <form class="resolve-form" data-testid="resolve-form-{{.Seq}}"
+                hx-post="/ticket/{{$.Attempt.Ticket}}/{{$.Attempt.ID}}/resolve"
+                hx-target="[data-testid=log-region]" hx-swap="innerHTML">
+                <input type="hidden" name="seq" value="{{.Seq}}">
+                <textarea id="resolve-input-{{.Seq}}" hx-preserve="true" name="answer"
+                  class="resolve-input" data-testid="resolve-input-{{.Seq}}" rows="2"
+                  placeholder="Answer this escalation (markdown)…"></textarea>
+                <button type="submit" class="resolve-submit" data-testid="resolve-submit-{{.Seq}}">Resolve</button>
+              </form>
             {{end}}
           {{end}}
           {{if .Refs}}<p class="refs">refs: {{range .Refs}}#{{.}} {{end}}</p>{{end}}
