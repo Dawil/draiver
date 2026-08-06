@@ -1,9 +1,12 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,31 @@ import (
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
+
+// TestMain builds the real draiver binary once and points draiverBinOverride at
+// it, so the enable tests drive the CLI end-to-end (a real `ctl enable` appending
+// to disk) rather than a stub — genuine coverage of "the write goes through the
+// draiver CLI" (decision #7). Under `go test`, os.Executable() is the test
+// binary, not draiver, so the override is required.
+func TestMain(m *testing.M) {
+	os.Exit(func() int {
+		dir, err := os.MkdirTemp("", "draiver-web-bin")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tempdir for test binary:", err)
+			return 1
+		}
+		defer os.RemoveAll(dir)
+		bin := filepath.Join(dir, "draiver")
+		build := exec.Command("go", "build", "-o", bin, "github.com/Dawil/draiver")
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "build draiver for tests:", err)
+			return 1
+		}
+		draiverBinOverride = bin
+		return m.Run()
+	}())
+}
 
 func seedBoard(t *testing.T) store.Root {
 	t.Helper()

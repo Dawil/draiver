@@ -15,11 +15,11 @@ var webuiCmd = &cobra.Command{
 	Use:   "webui",
 	Short: "Run the HTMX board over a data folder",
 	Long: "webui serves a board of the four control states plus a per-ticket detail\n" +
-		"view. It is read-only but for one affordance: a Running attempt's green play\n" +
-		"button appends an `enable` event to opt it into daemon supervision (the board\n" +
-		"twin of `ctl enable`). It never spawns processes and touches nothing else.\n" +
-		"Board-originated enables are attributed to --actor / $DRAIVER_ACTOR, else\n" +
-		"human:webui.",
+		"view. It is read-mostly but for one affordance: a Running attempt's green play\n" +
+		"button opts it into daemon supervision (the board twin of `ctl enable`). That\n" +
+		"write is not reimplemented in the web layer — it shells `draiver ctl enable`,\n" +
+		"the same verb a human runs at a terminal. Board-originated enables are\n" +
+		"attributed to --actor / $DRAIVER_ACTOR, else human:webui.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()

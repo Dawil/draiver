@@ -1,9 +1,10 @@
 // Package web serves the Draiver board: a self-contained HTMX server that renders
 // the four control states per ATTEMPT from the filesystem log. Each attempt is
-// its own card; one ticket can appear several times. It is read-only but for one
-// affordance — the board's green play button POSTs a single `enable` event
-// (handleEnable) to opt a parked attempt into daemon supervision; it never spawns
-// processes and touches nothing else on disk.
+// its own card; one ticket can appear several times. It is read-mostly but for one
+// affordance — the board's green play button POSTs to opt a parked attempt into
+// daemon supervision. That write is not reimplemented here: handleEnable shells
+// `draiver ctl enable` (runDraiverEnable), the same verb a human runs at a
+// terminal, so there is a single enable code path.
 package web
 
 import (
@@ -14,15 +15,16 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yuin/goldmark"
 
-	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -450,17 +452,19 @@ func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEnable is the board's one write (POST /ticket/{id}/{attempt}/enable): it
-// opts a Running, disabled attempt into daemon supervision by appending an
-// `enable` event — the exact event `draiver ctl enable` records (setEnabled,
-// cmd/ctl_enable.go) — then re-renders the card so htmx swaps the play button
-// away and the grey session-dot flips. It is purely declarative: no control
-// socket, no reconciler; a running `ctl up` brings the attempt up on its next
-// tick, and with no daemon the enable simply waits, matching the grey-dot
-// semantics the button sits on.
+// opts a Running, disabled attempt into daemon supervision by shelling
+// `draiver ctl enable` (runDraiverEnable) — the same verb a human runs at a
+// terminal, so the enable is not reimplemented in the web layer — then re-renders
+// the card so htmx swaps the play button away and the grey session-dot flips. The
+// bare enable is purely declarative: no control socket, no reconciler; a running
+// `ctl up` brings the attempt up on its next tick, and with no daemon the enable
+// simply waits, matching the grey-dot semantics the button sits on.
 //
 // It is idempotent: an already-enabled (or non-Running) attempt — e.g. a
 // double-click racing the 3s board poll — is a no-op that just re-renders the
-// current card, so the chain gains exactly one enable per enable. The
+// current card, so the chain gains exactly one enable per enable. The gate is
+// canEnable, checked here before the shell-out (the CLI's `enable` would append
+// unconditionally), so the button and the effect can never disagree. The
 // state-changing POST carries a same-origin guard so a cross-site page in a
 // browser cannot drive it, proportionate to a localhost dev tool.
 func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
@@ -482,11 +486,7 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// Only the disabled→enabled transition writes; canEnable is the same gate the
 	// button renders behind, so a POST for a card that shows no button is a no-op.
 	if canEnable(a) {
-		if _, err := ticketlog.Append(s.root, id, att, event.Event{
-			Type:  "enable",
-			Actor: s.actor,
-			Body:  fmt.Sprintf("Supervision enabled for %s/%s.", id, att),
-		}); err != nil {
+		if err := s.runDraiverEnable(id, att); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -498,6 +498,38 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// Re-render just this card; htmx swaps it in place (outerHTML on .card-wrap),
 	// dropping the button and recomputing the session-dot off the fresh state.
 	s.render(w, "card", a)
+}
+
+// draiverBinOverride points the enable shell-out at a specific draiver binary. It
+// is empty in production, where runDraiverEnable resolves the running executable
+// via os.Executable() (under `draiver webui`, that is draiver itself). Tests set
+// it to a freshly built binary, since under `go test` os.Executable() is the test
+// binary, not draiver.
+var draiverBinOverride string
+
+// runDraiverEnable opts an attempt into supervision by invoking the draiver CLI
+// rather than reimplementing the append in the web layer: `draiver ctl enable`
+// records the durable `enable` log event (setEnabled, cmd/ctl_enable.go), the
+// exact write a human's terminal performs, so there is a single enable code path.
+// It passes the server's resolved data root, actor, and target attempt as
+// explicit flags (env-independent), and ends with "--" so a ticket id beginning
+// with "-" is never parsed as a flag. Bare enable only (no --now): no control
+// socket is dragged into the web process. On failure it surfaces the CLI's
+// combined output for a legible error.
+func (s *Server) runDraiverEnable(id, att string) error {
+	exe := draiverBinOverride
+	if exe == "" {
+		var err error
+		if exe, err = os.Executable(); err != nil {
+			return fmt.Errorf("locate draiver binary: %w", err)
+		}
+	}
+	cmd := exec.Command(exe, "ctl", "enable",
+		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver ctl enable: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // sameOrigin guards the write route against cross-site POSTs. The webui binds to
