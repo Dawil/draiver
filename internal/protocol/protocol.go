@@ -68,6 +68,34 @@ func InjectBrief(ctx context.Context, root store.Root, ticket, attempt string, p
 // authoritative session context rather than a user message it might second-guess.
 const coldStartPreamble = "You are cold-starting a draiver attempt. The following is your brief — the complete truth for this session: the spec, every prior decision, and any open or resolved escalation. Work the protocol: log decisions and gotchas as you go, escalate when blocked, and claim review when done.\n\n"
 
+// InjectResumeNudge prompts a short "keep going" turn into a session that was
+// *resumed* (its recorded Claude session id came back online with its context
+// window intact), so the agent gets the one driving user turn a headless
+// stream-json process needs to continue — without re-dumping the whole brief it
+// already remembers. It is the resume-side counterpart of InjectBrief: the caller
+// (the reconcile loop's Admit step) picks one by whether bringUp spawned fresh or
+// resumed, keyed on the same session-identity split. It errors only if the prompt
+// cannot be delivered.
+func InjectResumeNudge(ctx context.Context, ticket string, p Prompter) error {
+	if err := p.Prompt(ctx, resumeNudge(ticket)); err != nil {
+		return fmt.Errorf("protocol: inject resume nudge for %s: %w", ticket, err)
+	}
+	return nil
+}
+
+// resumeNudge is the short driving turn a resumed session receives instead of the
+// full cold-start brief. It states that the context is restored (so the agent
+// does not expect to be re-briefed), points to `draiver brief <ticket>` as the way
+// to re-ground if it needs to, and restates the standing obligation to log as it
+// goes and hand off — claim review or escalate — before it stops. It deliberately
+// does not re-dump the spec and log (that is drvctl-016's legitimate intent).
+func resumeNudge(ticket string) string {
+	return fmt.Sprintf(
+		"You are resuming a draiver attempt: your session context is restored, so you are not being re-briefed. Continue the work where you left off. If you need to re-ground, run `draiver brief %s` for the current spec, every decision, and any resolved escalation. Log decisions and gotchas as you go, escalate when blocked, and claim `review` or `escalate` when the work is done.",
+		ticket,
+	)
+}
+
 // Decider answers a tool-permission request back to the agent. The claudecode
 // adapter satisfies it via agent.Permissioner; the Gate holds the interface so a
 // test can substitute a fake without a live session.

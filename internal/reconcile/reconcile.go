@@ -53,6 +53,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/limit"
@@ -450,13 +451,14 @@ func (r *Reconciler) stateOf(key worktree.Key) project.State {
 // (drvctl-016), admit is the only caller, so the client path cannot drift from
 // it: `start`/`restart` write a marker and the daemon does the bring-up.
 type wired struct {
-	handle    *manage.Handle
-	sess      *session.Store
-	protoGate *protocol.Gate
-	permGate  *gate.Gate
-	limitGate *limit.Gate
-	watcher   *watch.Watcher
-	repo      string // resolved repo path, recorded on the run for retire
+	handle       *manage.Handle
+	sess         *session.Store
+	protoGate    *protocol.Gate
+	permGate     *gate.Gate
+	limitGate    *limit.Gate
+	completeGate *completion.Gate
+	watcher      *watch.Watcher
+	repo         string // resolved repo path, recorded on the run for retire
 
 	// spawned reports whether bringUp started a fresh session (true) rather than
 	// resuming the recorded one (false). It drives the brief-on-reset coupling:
@@ -570,9 +572,19 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 	}
 	permGate := gate.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.PermPolicy, handle, handle.Kill)
 	limitGate := limit.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.ContextLimit, handle.Kill)
+
+	// The completion gate's baseline is the same log-tail-at-session-start snapshot
+	// the protocol gate takes: a review/escalation must be logged *during* this
+	// session to count as its hand-off, so snapshot it now, before the session works.
+	completeGate, err := completion.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, handle.Prompt, handle.Kill)
+	if err != nil {
+		_ = handle.Kill()
+		_ = sess.Close()
+		return nil, fmt.Errorf("completion gate: %w", err)
+	}
 	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
 
-	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, watcher: watcher, repo: repo, spawned: spawned}, nil
+	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, completeGate: completeGate, watcher: watcher, repo: repo, spawned: spawned}, nil
 }
 
 // confirmOnline waits for a just-Resumed session to come online — to emit its
@@ -618,18 +630,23 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	r.runs[key] = rn
 	r.mu.Unlock()
 
-	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.watcher, stream)
+	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.completeGate, w.watcher, stream)
 
-	// Inject the cold-start brief last, so the stream is already being consumed
-	// when the agent starts producing — but only on a fresh spawn (L0 discarded).
-	// A resume continues its own conversation and must not be force-fed a brief
-	// (the brief-on-reset coupling, drvctl-016). A brief that fails to
-	// build/deliver does not tear the live session down — it is logged and the
-	// session works on.
+	// Drive the session last, so the stream is already being consumed when the agent
+	// starts producing. A headless stream-json process produces nothing until it
+	// receives a user turn, so it must always get one — but which turn depends on the
+	// session identity (drvctl-022): a fresh spawn (empty context window) gets the
+	// full cold-start brief; a resume (recorded id came back online, context intact)
+	// gets a short nudge to continue rather than the whole brief re-dumped (the
+	// brief-on-reset coupling's legitimate intent, drvctl-016). Either injection
+	// failing does not tear the live session down — it is logged and the session
+	// works on.
 	if w.spawned {
 		if err := protocol.InjectBrief(ctx, r.opt.Root, a.Ticket, a.ID, w.handle); err != nil {
 			r.opt.Logf("reconcile: inject brief %s/%s: %v", a.Ticket, a.ID, err)
 		}
+	} else if err := protocol.InjectResumeNudge(ctx, a.Ticket, w.handle); err != nil {
+		r.opt.Logf("reconcile: inject resume nudge %s/%s: %v", a.Ticket, a.ID, err)
 	}
 	return nil
 }
@@ -683,7 +700,7 @@ func (r *Reconciler) escalateNoRepo(a project.Attempt) {
 // retire/drain do — so a session that exits on its own leaves a spent entry that
 // keeps the next tick from re-admitting it (Tier 0 has no respawn ceiling, so
 // re-admitting a crashed session would be an unbounded loop).
-func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, stream <-chan agent.Event) {
+func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, stream <-chan agent.Event) {
 	defer close(rn.done)
 	for {
 		select {
@@ -693,7 +710,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 			if !ok {
 				return
 			}
-			r.dispatch(ctx, key, pg, permGate, lg, w, ev)
+			r.dispatch(ctx, key, pg, permGate, lg, cg, w, ev)
 		}
 	}
 }
@@ -705,7 +722,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 // answering; a cleared request falls through to the permission gate, which allows
 // it or escalates-and-halts. Ordering protocol → permission is what keeps the two
 // from double-answering the agent.
-func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, ev agent.Event) {
+func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, ev agent.Event) {
 	if _, err := w.Process(ev); err != nil {
 		r.opt.Logf("reconcile: watch %s/%s: %v", key.Ticket, key.Attempt, err)
 	}
@@ -719,6 +736,21 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 	} else if out == limit.Stopped {
 		r.opt.Logf("reconcile: context auto-stop %s/%s at %d tokens", key.Ticket, key.Attempt, ev.Usage.ContextTokens)
 		return
+	}
+
+	// Turn-end guard: a session that ends a success turn without having claimed
+	// review or filed an escalation is nudged once, then escalated-and-halted to a
+	// human — so it can never silently stop at "done" and strand the attempt in
+	// Running + enabled (drvctl-022). watch.Process above has already promoted any
+	// review/escalate the agent ran this turn, so the gate reads a log that reflects
+	// a genuine hand-off. An Escalated outcome reaped the session; nothing more to do.
+	if out, err := cg.Consider(ctx, ev); err != nil {
+		r.opt.Logf("reconcile: completion gate %s/%s: %v", key.Ticket, key.Attempt, err)
+	} else if out == completion.Escalated {
+		r.opt.Logf("reconcile: completion auto-stop %s/%s: success turn with no review/escalation filed", key.Ticket, key.Attempt)
+		return
+	} else if out == completion.Nudged {
+		r.opt.Logf("reconcile: completion nudge %s/%s: reminded to claim review or escalate", key.Ticket, key.Attempt)
 	}
 
 	if ev.Kind != agent.EventPermission {

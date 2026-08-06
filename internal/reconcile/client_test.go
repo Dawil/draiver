@@ -385,10 +385,11 @@ func TestStopWhenAlreadyStopped(t *testing.T) {
 // the session id) and hands the attempt back to the daemon, whose next tick
 // re-admits the spent run (readmittable: spent + pid==0, still desired) and the
 // start cascade Resumes the SAME session id — a continue, not a new attempt. And
-// because the session layer (L0) was kept, it does NOT re-inject the cold-start
-// brief. This is the clean "continue" the old hybrid restart failed to be (it
-// resumed the same id yet force-fed a brief); the brief is coupled to a reset,
-// not to restart (drvctl-016).
+// because the session layer (L0) was kept, it does NOT re-inject the full
+// cold-start brief. It IS still driven, though: a headless stream-json process
+// needs a user turn to continue, so the resume gets the short resume nudge (not
+// the whole brief re-dumped) — the brief is coupled to a reset, the nudge to a
+// resume (drvctl-016 + drvctl-022).
 func TestRestartResumesWithoutRebrief(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
@@ -446,8 +447,10 @@ func TestRestartResumesWithoutRebrief(t *testing.T) {
 	})
 	resumed := f.at(1)
 	waitFor(t, "resume on the surviving id", func() bool { return resumed.resumedWith() == orig.SessionID })
-	if p := resumed.prompted(); len(p) != 0 {
-		t.Fatalf("a resume must not be re-briefed, but was prompted: %v", p)
+	// Driven, but with the nudge — not the full brief re-dumped.
+	waitFor(t, "resume nudge", func() bool { return len(resumed.prompted()) > 0 })
+	if p := resumed.prompted()[0]; strings.Contains(p, "BRIEF") {
+		t.Fatalf("a resume must be nudged, not re-briefed, but got the brief: %q", p)
 	}
 }
 
