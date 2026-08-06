@@ -12,9 +12,12 @@ var webuiAddr string
 
 var webuiCmd = &cobra.Command{
 	Use:   "webui",
-	Short: "Run the read-only HTMX board over a data folder",
-	Long: "webui serves a read-only board of the four control states plus a per-ticket\n" +
-		"detail view. It never writes to the data folder and never spawns processes.",
+	Short: "Run the HTMX board over a data folder",
+	Long: "webui serves a board of the four control states plus a per-ticket detail\n" +
+		"view. Its one write path is appending a typed log entry from the detail page\n" +
+		"(a note/gotcha/decision, or a Review attempt's Decision/Done action); it does\n" +
+		"that by shelling the draiver CLI (log/done), so the write shares the CLI's\n" +
+		"single append path rather than reimplementing it.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()
@@ -25,7 +28,7 @@ var webuiCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "draiver %s webui (read-only) on http://%s  data=%s\n", version, webuiAddr, root.Dir)
+		fmt.Fprintf(cmd.OutOrStdout(), "draiver %s webui (read-mostly) on http://%s  data=%s\n", version, webuiAddr, root.Dir)
 		return srv.Serve(webuiAddr)
 	},
 }

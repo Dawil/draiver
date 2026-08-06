@@ -1,9 +1,13 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,31 @@ import (
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
+
+// TestMain builds the draiver binary once and points the web server's log-append
+// shell-out at it (draiverBinOverride). The webui's one write goes through the
+// draiver CLI, so the append/decision/done tests below drive the real binary
+// end-to-end — under `go test` os.Executable() is the test binary, not draiver,
+// which is why the override is needed.
+func TestMain(m *testing.M) {
+	os.Exit(func() int {
+		dir, err := os.MkdirTemp("", "draiver-web-bin")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tempdir for test binary:", err)
+			return 1
+		}
+		defer os.RemoveAll(dir)
+		bin := filepath.Join(dir, "draiver")
+		build := exec.Command("go", "build", "-o", bin, "github.com/Dawil/draiver")
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "build draiver for tests:", err)
+			return 1
+		}
+		draiverBinOverride = bin
+		return m.Run()
+	}())
+}
 
 func seedBoard(t *testing.T) store.Root {
 	t.Helper()
@@ -581,6 +610,9 @@ func TestRelativeAgeBuckets(t *testing.T) {
 	}
 }
 
+// TestReadOnlyNoWriteRoutes pins that the view routes stay GET-only: the sole
+// write path is POST .../log (see the log-append tests), so posting to a page or
+// the board is still a 405.
 func TestReadOnlyNoWriteRoutes(t *testing.T) {
 	h := newServer(t)
 	for _, path := range []string{"/", "/board", "/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
@@ -616,6 +648,224 @@ func newServerOver(t *testing.T, root store.Root) http.Handler {
 		t.Fatal(err)
 	}
 	return s.Handler()
+}
+
+// postLog posts a compose form to an attempt's log-append route. It sets a
+// same-origin Origin header so the CSRF guard passes, mirroring a real htmx post.
+func postLog(t *testing.T, h http.Handler, id, att, typ, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{"type": {typ}, "body": {body}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/"+id+"/"+att+"/log", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// stateOf reads an attempt's derived control state straight from the log, so a
+// test asserts on the domain truth rather than the rendered badge.
+func stateOf(t *testing.T, root store.Root, id, att string) project.State {
+	t.Helper()
+	a, err := project.LoadAttempt(root, id, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.State
+}
+
+// TestComposeBoxAppendsTypedEntry pins the base compose contract: the detail page
+// carries a compose control, and posting a curated type appends exactly one event
+// of that type, returned in the live fragment without a full reload.
+func TestComposeBoxAppendsTypedEntry(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	// The control and its allow-listed options render on the detail page.
+	page := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="log-compose"`,
+		`data-testid="compose-type"`,
+		`data-testid="compose-body"`,
+		`data-testid="compose-submit"`,
+		`value="note"`, `value="gotcha"`, `value="decision"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("detail page missing compose hook %q", want)
+		}
+	}
+
+	before, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	rr := postLog(t, h, "PROJ-3", "0001", "gotcha", "the cache key ignores tenant")
+	if rr.Code != 200 {
+		t.Fatalf("POST log = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	if len(after) != len(before)+1 {
+		t.Fatalf("expected exactly one new event, got %d -> %d", len(before), len(after))
+	}
+	last := after[len(after)-1]
+	if last.Type != "gotcha" || last.Body != "the cache key ignores tenant" {
+		t.Errorf("appended event = %+v, want gotcha with the posted body", last)
+	}
+	// The response is the live fragment: the new entry plus the OOB badge/count.
+	out := rr.Body.String()
+	for _, want := range []string{"the cache key ignores tenant", `id="state-badge"`, `hx-swap-oob="true"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("live fragment missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "<html") {
+		t.Errorf("log-append response must be a fragment, not a full page")
+	}
+}
+
+// TestComposeAppendStampsActor pins that a web-composed entry is attributable:
+// the server stamps its resolved actor identity, not an empty one.
+func TestComposeAppendStampsActor(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := postLog(t, s.Handler(), "PROJ-3", "0001", "note", "context"); rr.Code != 200 {
+		t.Fatalf("POST log = %d", rr.Code)
+	}
+	events, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	last := events[len(events)-1]
+	if last.Actor == "" || !strings.HasPrefix(last.Actor, "human:") {
+		t.Errorf("web-composed event actor = %q, want a resolved human: identity", last.Actor)
+	}
+}
+
+// TestReviewDecisionReopensToRunning pins the first-class Review → Running verb:
+// posting a decision on a Review attempt appends it and the derived state falls
+// back to Running (Derive: a decision is the latest lifecycle marker).
+func TestReviewDecisionReopensToRunning(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stateOf(t, root, "PROJ-2", "0001"); got != project.Review {
+		t.Fatalf("seed PROJ-2/0001 = %q, want Review", got)
+	}
+	rr := postLog(t, s.Handler(), "PROJ-2", "0001", "decision", "spec was misread; more work needed")
+	if rr.Code != 200 {
+		t.Fatalf("POST decision = %d", rr.Code)
+	}
+	if got := stateOf(t, root, "PROJ-2", "0001"); got != project.Running {
+		t.Errorf("after decision, state = %q, want Running (reopened)", got)
+	}
+	// The OOB badge in the response reflects the reopened state.
+	if !strings.Contains(rr.Body.String(), "state-Running") {
+		t.Errorf("live fragment badge should flip to Running\n%s", rr.Body.String())
+	}
+}
+
+// TestReviewDoneClosesAttempt pins the terminal Review verb: posting done appends
+// it and the attempt moves to Done (and its live poll then self-cancels at 286).
+func TestReviewDoneClosesAttempt(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	if rr := postLog(t, h, "PROJ-2", "0001", "done", "verified, shipping"); rr.Code != 200 {
+		t.Fatalf("POST done = %d", rr.Code)
+	}
+	if got := stateOf(t, root, "PROJ-2", "0001"); got != project.Done {
+		t.Errorf("after done, state = %q, want Done", got)
+	}
+	// The now-terminal attempt's live fragment self-cancels the poll with 286.
+	if rr := get(t, h, "/ticket/PROJ-2/0001/live"); rr.Code != 286 {
+		t.Errorf("Done attempt live = %d, want 286 (stop polling)", rr.Code)
+	}
+}
+
+// TestComposeRejectsOutOfSetType pins the allow-list: a lifecycle type that owns
+// its own flow (escalation/resolution/review/enable/disable) cannot be smuggled
+// in through the generic compose route, and nothing is appended.
+func TestComposeRejectsOutOfSetType(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	for _, typ := range []string{"escalation", "resolution", "review", "enable", "disable", "created", "bogus"} {
+		before, _ := ticketlog.Read(root, "PROJ-3", "0001")
+		rr := postLog(t, h, "PROJ-3", "0001", typ, "should not land")
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("POST type=%q = %d, want 400", typ, rr.Code)
+		}
+		after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+		if len(after) != len(before) {
+			t.Errorf("type=%q was rejected but still appended an event", typ)
+		}
+	}
+}
+
+// TestReviewActionsRenderOnlyInReview pins that the Decision/Done buttons appear
+// exactly when the attempt is in Review and are absent otherwise.
+func TestReviewActionsRenderOnlyInReview(t *testing.T) {
+	h := newServer(t)
+	// PROJ-2/0001 is Review: both actions present.
+	review := get(t, h, "/ticket/PROJ-2/0001").Body.String()
+	for _, want := range []string{`data-testid="review-actions"`, `data-testid="action-decision"`, `data-testid="action-done"`} {
+		if !strings.Contains(review, want) {
+			t.Errorf("Review attempt missing %q", want)
+		}
+	}
+	// PROJ-3/0001 is Running: no review actions.
+	running := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+	for _, absent := range []string{`data-testid="review-actions"`, `data-testid="action-decision"`, `data-testid="action-done"`} {
+		if strings.Contains(running, absent) {
+			t.Errorf("non-Review attempt should not render %q", absent)
+		}
+	}
+}
+
+// TestLogAppendRejectsCrossOrigin pins the CSRF guard: a POST whose Origin names
+// a different host is refused with 403 and nothing is appended.
+func TestLogAppendRejectsCrossOrigin(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	form := url.Values{"type": {"note"}, "body": {"forged"}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-3/0001/log", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://evil.example")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin POST = %d, want 403", rr.Code)
+	}
+	after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	if len(after) != len(before) {
+		t.Errorf("cross-origin POST must not append an event")
+	}
+}
+
+// TestLogAppendUnknownAttempt404 pins that posting to a non-existent attempt is a
+// 404, not a silent no-op or a 500.
+func TestLogAppendUnknownAttempt404(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := postLog(t, s.Handler(), "PROJ-3", "9999", "note", "x"); rr.Code != 404 {
+		t.Errorf("POST to unknown attempt = %d, want 404", rr.Code)
+	}
 }
 
 // TestReviewCardSurfacesPrimaryReviewLink pins that a Review card with links shows
