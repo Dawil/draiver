@@ -473,6 +473,17 @@ func permReq(id, tool string) agent.Event {
 	}
 }
 
+// turnEnd is a turn-end frame with the given terminal status ("success", "error",
+// ...) — the signal the completion gate keys on.
+func turnEnd(status string) agent.Event {
+	return agent.Event{
+		Kind:   agent.EventTurnEnd,
+		Turn:   status,
+		Result: "final assistant text",
+		Raw:    json.RawMessage(`{"turn":"` + status + `"}`),
+	}
+}
+
 // --- tests ------------------------------------------------------------------
 
 // TestTickAdmitsWatchesAndMeters is the headline Tier-0 path: a Running attempt is
@@ -834,6 +845,18 @@ func TestResumeAfterResolution(t *testing.T) {
 	if resumed.resumeID != origID.SessionID {
 		t.Fatalf("resumed with id %q, want the surviving %q", resumed.resumeID, origID.SessionID)
 	}
+
+	// The resumed session must actually be *driven*: a headless stream-json process
+	// produces nothing until it gets a user turn, so without this it would idle and
+	// never continue the work (drvctl-022). Because the recorded id came back online
+	// with its context intact, the drive is the short resume nudge — not the full
+	// cold-start brief re-dumped.
+	waitFor(t, "resume nudge prompt", func() bool { return len(resumed.prompted()) > 0 })
+	if p := resumed.prompted()[0]; strings.Contains(p, "BRIEF") {
+		t.Fatalf("resume must be nudged, not re-briefed: got %q", p)
+	} else if !strings.Contains(p, "resuming") || !strings.Contains(p, "draiver brief PROJ-1") {
+		t.Fatalf("resume nudge missing its guidance: %q", p)
+	}
 }
 
 // TestPermissionGateEscalates: a gated tool (Bash under the ReadOnly base) surfaced
@@ -918,6 +941,110 @@ func TestContextLimitAutoStops(t *testing.T) {
 	}
 	if a.State != project.NeedsMe {
 		t.Fatalf("state = %v, want NeedsMe after auto-stop", a.State)
+	}
+}
+
+// TestCompletionGuardNudgesThenEscalates is the drvctl-022 turn-end guard: a
+// session that ends a success turn without having filed a review or escalation is
+// nudged once to hand off, and — if a later success turn still has nothing filed —
+// escalated to a human and halted, so it can never silently stop at "done" and
+// strand the attempt in Running + enabled.
+func TestCompletionGuardNudgesThenEscalates(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	live := f.at(0)
+	waitFor(t, "brief prompt", func() bool { return len(live.prompted()) > 0 })
+
+	// First success turn with nothing filed → a one-shot nudge (a second prompt),
+	// not an escalation, and the session stays live.
+	live.emit(turnEnd("success"))
+	waitFor(t, "completion nudge", func() bool {
+		ps := live.prompted()
+		return len(ps) >= 2 && strings.Contains(ps[1], "review") && strings.Contains(ps[1], "escalate")
+	})
+	if hasType(logTypes(t, w.root, ticket, att), "escalation") {
+		t.Fatal("a first unmet success turn must nudge, not escalate")
+	}
+	if live.wasKilled() {
+		t.Fatal("a nudge must not halt the session")
+	}
+
+	// The nudge went unheeded: a second unmet success turn escalates to a human and
+	// halts the session, parking the attempt at Needs-me.
+	live.emit(turnEnd("success"))
+	waitFor(t, "stall escalation recorded", func() bool {
+		return hasType(logTypes(t, w.root, ticket, att), "escalation")
+	})
+	waitFor(t, "session halted", live.wasKilled)
+
+	a, err := project.LoadAttempt(w.root, ticket, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.State != project.NeedsMe {
+		t.Fatalf("state = %v, want NeedsMe after completion auto-stop", a.State)
+	}
+}
+
+// TestCompletionGuardSatisfiedByReview: a session that DID claim review before its
+// success turn ended has met its hand-off obligation, so the guard stays quiet — no
+// nudge, no escalation. A non-success (error) turn is likewise never treated as a
+// false "done".
+func TestCompletionGuardSatisfiedByReview(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	live := f.at(0)
+	waitFor(t, "brief prompt", func() bool { return len(live.prompted()) > 0 })
+
+	// The agent runs `draiver review …`; the watcher promotes it into the durable
+	// log before the turn ends.
+	live.emit(bashCall("t1", `draiver review PROJ-1 "done, ready for review"`))
+	waitFor(t, "promoted review", func() bool {
+		return hasType(logTypes(t, w.root, ticket, att), "review")
+	})
+
+	// An error turn is not a "done"; a success turn now finds the obligation met.
+	live.emit(turnEnd("error"))
+	live.emit(turnEnd("success"))
+
+	// Drive a second usage frame through and confirm the guard never acted: only the
+	// brief prompt was ever sent, and no escalation was recorded.
+	live.emit(usageEvt(4242))
+	waitFor(t, "metered usage", func() bool {
+		sess, err := session.Open(w.root, ticket, att)
+		if err != nil {
+			return false
+		}
+		defer sess.Close()
+		m, err := sess.ReadMeter()
+		return err == nil && m.Usage.ContextTokens == 4242
+	})
+	if got := live.prompted(); len(got) != 1 {
+		t.Fatalf("guard must not nudge once review is filed; prompts = %v", got)
+	}
+	if hasType(logTypes(t, w.root, ticket, att), "escalation") {
+		t.Fatal("guard must not escalate once review is filed")
+	}
+	if live.wasKilled() {
+		t.Fatal("guard must not halt a session that handed off")
 	}
 }
 

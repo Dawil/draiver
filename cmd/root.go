@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -146,6 +147,22 @@ func appendEvent(id string, e event.Event) (event.Event, string, error) {
 	}
 	if !root.AttemptExists(id, att) {
 		return event.Event{}, "", fmt.Errorf("attempt %s/%s not found", id, att)
+	}
+	// Validate any review links against the append-time safety floor (hardcoded
+	// {http, https} scheme allowlist) and the optional per-deployment host
+	// allowlist, before the single write below — a rejected link fails the command
+	// and writes nothing, matching new's reject-writes-nothing posture. Config is
+	// loaded only when links are present so link-less appends pay nothing.
+	if len(e.Links) > 0 {
+		cfg, err := config.Load("")
+		if err != nil {
+			return event.Event{}, "", err
+		}
+		for _, l := range e.Links {
+			if err := event.ValidateLink(l, cfg.ReviewLinkHosts); err != nil {
+				return event.Event{}, "", fmt.Errorf("invalid --link %s=%s: %w", l.Rel, l.Href, err)
+			}
+		}
 	}
 	if e.Actor == "" {
 		e.Actor = resolveActor()

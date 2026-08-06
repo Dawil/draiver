@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log region and OOB-swaps the state badge and log count, so a Decision/Done
   visibly flips the badge, and a Done then self-cancels the log poll on its next
   `/live` tick (286). The `web` package is now read-mostly rather than read-only.
+- **Forge-neutral review links on the event log (`review --url`, drv-007).** An
+  event can now carry one or more opaque review links — a draft PR, merge request,
+  or diff URL — set by the agent at the moment it claims review, on the append-only,
+  hash-chained log with full provenance. The schema gains `Links []Link`
+  (`{Rel, Href}`, `yaml:"links,omitempty"`), included in the hashable projection so
+  links are tamper-evident under `draiver audit`; `omitempty` keeps existing
+  link-less events hashing identically, so there is no migration. `draiver review`
+  and `draiver log` gain a repeatable `--url <uri>` (rel defaults to `pr`) and an
+  explicit `--link <rel>=<uri>` for other rels (`mr`, `diff`, `ci`, …). `Rel` is an
+  uninterpreted free label — draiver never parses the host or path and carries no
+  forge-specific code. At append time `Href` must parse as an absolute URL whose
+  scheme is in a **hardcoded `{http, https}` allowlist** (a safety floor,
+  deliberately not operator-configurable — an editable scheme list reopens
+  `javascript:`/`file:`/`data:`); a rejected link fails the command and writes
+  nothing. `config.Config` gains an optional `review_link_hosts` allowlist
+  alongside `Permissions` — empty (the default) admits any http/https host, so the
+  host policy is opt-in and off by default. draiver never fetches the URL.
 
 ### Changed
 
@@ -69,6 +86,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spent-but-still-desired run is re-admitted by the daemon. `start --new-attempt`
   forks a parallel branch and leaves the parent running; `restart --new-attempt`
   parks the parent so only the fork runs.
+
+### Fixed
+
+- **Resumed sessions get a driving turn again, and a session can no longer stop
+  at `result: success` without handing off (`draiverctl`, drvctl-022).** drvctl-016's
+  brief-on-reset coupling gated the sole driving prompt behind `if w.spawned`, so a
+  resumed headless `stream-json` session — which produces nothing until it receives a
+  user turn — came online, restored its context, and idled forever, never continuing
+  the work and never filing a `review` or `escalation`. From the supervisor's stream
+  the attempt "got to `result: success` and stopped" with nothing filed, stranding it
+  in Running + enabled; this broke every resume path, including the core
+  `escalate → resolve → resume` arc. **Part A** restores drive keyed on session
+  identity: `admit` branches on `wired.spawned` — a fresh spawn (empty context) still
+  gets the full cold-start brief, while a resume (recorded id came back online, context
+  intact) gets a new short `protocol.InjectResumeNudge` that points to `draiver brief
+  <ticket>` and restates the log/hand-off obligation without re-dumping spec + log.
+  **Part B** adds defense in depth: a new `internal/completion.Gate`, constructed in
+  `bringUp` and threaded through `ingest`/`dispatch`, reacts to `agent.EventTurnEnd`
+  with `Turn == "success"`; using the same log-tail-vs-baseline check the protocol gate
+  uses, it looks for a `review`/`escalation` newer than the session baseline, injects a
+  one-shot nudge if the obligation is unmet, and escalates-and-halts to a human on a
+  later still-unmet success turn — so a stalled "done" lands on the board instead of
+  idling. The gate latches so it cannot loop.
 
 ## [0.2.2] - 2026-08-06
 

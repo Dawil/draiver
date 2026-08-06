@@ -53,6 +53,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/limit"
@@ -65,10 +66,6 @@ import (
 	"github.com/Dawil/draiver/internal/watch"
 	"github.com/Dawil/draiver/internal/worktree"
 )
-
-// defaultAdapter is the adapter name assumed for an attempt whose attempt.md
-// records none — Claude Code is the first and reference adapter (Tier 0).
-const defaultAdapter = "claude-code"
 
 // defaultResumeConfirm is how long bringUp waits for a Resumed session to come
 // online before falling through to a fresh spawn. Long enough that a live resume
@@ -442,162 +439,6 @@ func (r *Reconciler) stateOf(key worktree.Key) project.State {
 	return a.State
 }
 
-// wired is a brought-up live session with the ingest machinery bound to its
-// stream: the handle owning the process, the session store, and the two gates
-// plus the watcher each of its events is dispatched through. admit obtains one
-// from bringUp — the single place the session and its watch/gate/protocol
-// pipeline are wired. Since the imperative verbs became daemon handoffs
-// (drvctl-016), admit is the only caller, so the client path cannot drift from
-// it: `start`/`restart` write a marker and the daemon does the bring-up.
-type wired struct {
-	handle    *manage.Handle
-	sess      *session.Store
-	protoGate *protocol.Gate
-	permGate  *gate.Gate
-	limitGate *limit.Gate
-	watcher   *watch.Watcher
-	repo      string // resolved repo path, recorded on the run for retire
-
-	// spawned reports whether bringUp started a fresh session (true) rather than
-	// resuming the recorded one (false). It drives the brief-on-reset coupling:
-	// the cold-start brief is (re)injected iff the session layer (L0) was
-	// discarded — i.e. a fresh spawn — so a resume continues its conversation
-	// without being force-fed a brief (drvctl-016).
-	spawned bool
-}
-
-// bringUp opens an attempt's session store, binds a manage.Handle, brings the
-// session up via the self-heal cascade (below), snapshots the protocol-gate
-// baseline, and constructs the permission gate and watcher — everything needed to
-// consume the live stream, but not yet consuming it. On any failure it unwinds
-// cleanly (reap + close) so a failed bring-up leaves nothing half-live. The
-// caller (admit) injects the cold-start brief once it is ready to consume the
-// stream — but only when bringUp spawned fresh (wired.spawned), the
-// brief-on-reset coupling.
-//
-// The cascade climbs from the highest surviving layer: if a session id is on
-// record it Resumes and confirms the resume came online; a recorded id that can
-// no longer be resumed launches a process that dies on arrival and never comes
-// online, so bringUp reaps it and falls through to a fresh Spawn on the same
-// worktree rather than looping on the dead id forever (drvctl-016). Spawn itself
-// creates the worktree if it is gone, so the worktree and attempt-log rungs of
-// the cascade fall out of Spawn's own idempotence.
-func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, error) {
-	adapterName := a.Tool
-	if adapterName == "" {
-		adapterName = defaultAdapter
-	}
-	newAdapter, err := r.opt.Adapters(adapterName)
-	if err != nil {
-		return nil, fmt.Errorf("resolve adapter %q: %w", adapterName, err)
-	}
-
-	// Resolve this attempt's own repo and get-or-create its Manager. A missing or
-	// non-git repo fails *this* attempt's bring-up with an actionable error naming
-	// the ticket and path; admit logs it and the tick moves on to other attempts.
-	repo, err := r.repoFor(a)
-	if err != nil {
-		return nil, err
-	}
-	wm, err := r.managerFor(repo)
-	if err != nil {
-		return nil, fmt.Errorf("attempt %s/%s repo %q is missing or not a git working tree: %w", a.Ticket, a.ID, repo, err)
-	}
-
-	sess, err := session.Open(r.opt.Root, a.Ticket, a.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	handle, err := manage.New(sess, wm, newAdapter, manage.Config{
-		Ticket:  a.Ticket,
-		Attempt: a.ID,
-		Adapter: adapterName,
-		Model:   a.Model,
-		Spec:    r.opt.BaseSpec,
-	})
-	if err != nil {
-		_ = sess.Close()
-		return nil, err
-	}
-
-	// A recorded session id means this attempt already ran: reuse the cattle
-	// handle and Resume rather than Spawn a second, unrelated session. But a
-	// recorded id is not proof the id is still resumable, so a resume is trusted
-	// only once it comes online; otherwise the cascade falls through to a fresh
-	// spawn on the same worktree (the self-heal that retires "stale id resumed
-	// forever").
-	resuming := false
-	if id, err := sess.ReadIdentity(); err == nil && id.SessionID != "" {
-		resuming = true
-	}
-	spawned := false
-	if resuming {
-		if err := handle.Resume(ctx); err != nil {
-			// The recorded id could not even be launched; fall through to a fresh
-			// spawn rather than failing the whole bring-up.
-			r.opt.Logf("reconcile: resume %s/%s failed to launch, spawning fresh: %v", a.Ticket, a.ID, err)
-			resuming = false
-		} else if confirmed, cerr := r.confirmOnline(ctx, handle); cerr != nil {
-			// ctx was cancelled while confirming; unwind cleanly.
-			_ = handle.Kill()
-			_ = sess.Close()
-			return nil, cerr
-		} else if !confirmed {
-			// Process started but never came online — an unresumable id. Reap it and
-			// fall through; the following Spawn overwrites the dead id with a fresh one.
-			r.opt.Logf("reconcile: resume %s/%s never came online, spawning fresh on the same worktree", a.Ticket, a.ID)
-			_ = handle.Kill()
-			resuming = false
-		}
-	}
-	if !resuming {
-		if err := handle.Spawn(ctx); err != nil {
-			_ = sess.Close()
-			return nil, err
-		}
-		spawned = true
-	}
-
-	// The protocol gate's baseline is the log tail *at session start*, so a
-	// justifying decision/gotcha must be logged during this session. Snapshot it
-	// now, right after the session came up and before it does any work.
-	protoGate, err := protocol.New(r.opt.Root, a.Ticket, a.ID, r.opt.ProtoPolicy, handle)
-	if err != nil {
-		_ = handle.Kill()
-		_ = sess.Close()
-		return nil, fmt.Errorf("protocol gate: %w", err)
-	}
-	permGate := gate.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.PermPolicy, handle, handle.Kill)
-	limitGate := limit.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.ContextLimit, handle.Kill)
-	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
-
-	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, watcher: watcher, repo: repo, spawned: spawned}, nil
-}
-
-// confirmOnline waits for a just-Resumed session to come online — to emit its
-// first system/init frame — bounding the wait at ResumeConfirm. It returns
-// (true, nil) once the session signals online, (false, nil) if the window
-// elapses first (the caller reaps and falls through to a fresh spawn), or a
-// non-nil error if ctx is cancelled while waiting (the caller aborts the
-// bring-up). An adapter that cannot signal online (does not implement
-// agent.Onliner, so Handle.Online is nil) is assumed online, preserving the
-// pre-cascade behaviour for adapters without the capability.
-func (r *Reconciler) confirmOnline(ctx context.Context, handle *manage.Handle) (bool, error) {
-	online := handle.Online()
-	if online == nil {
-		return true, nil
-	}
-	select {
-	case <-online:
-		return true, nil
-	case <-time.After(r.opt.ResumeConfirm):
-		return false, nil
-	case <-ctx.Done():
-		return false, ctx.Err()
-	}
-}
-
 // admit brings up a session for a desired attempt and attaches the ingest
 // goroutine to its live stream, then injects the cold-start brief — the daemon's
 // background path. bringUp does the wiring (and its clean unwind on failure); a
@@ -618,19 +459,11 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	r.runs[key] = rn
 	r.mu.Unlock()
 
-	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.watcher, stream)
+	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.completeGate, w.watcher, stream)
 
-	// Inject the cold-start brief last, so the stream is already being consumed
-	// when the agent starts producing — but only on a fresh spawn (L0 discarded).
-	// A resume continues its own conversation and must not be force-fed a brief
-	// (the brief-on-reset coupling, drvctl-016). A brief that fails to
-	// build/deliver does not tear the live session down — it is logged and the
-	// session works on.
-	if w.spawned {
-		if err := protocol.InjectBrief(ctx, r.opt.Root, a.Ticket, a.ID, w.handle); err != nil {
-			r.opt.Logf("reconcile: inject brief %s/%s: %v", a.Ticket, a.ID, err)
-		}
-	}
+	// Drive the session last, so the stream is already being consumed when the
+	// agent starts producing (bringUp-vs-resume brief decision lives in drive).
+	r.drive(ctx, a, w)
 	return nil
 }
 
@@ -683,7 +516,7 @@ func (r *Reconciler) escalateNoRepo(a project.Attempt) {
 // retire/drain do — so a session that exits on its own leaves a spent entry that
 // keeps the next tick from re-admitting it (Tier 0 has no respawn ceiling, so
 // re-admitting a crashed session would be an unbounded loop).
-func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, stream <-chan agent.Event) {
+func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, stream <-chan agent.Event) {
 	defer close(rn.done)
 	for {
 		select {
@@ -693,7 +526,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 			if !ok {
 				return
 			}
-			r.dispatch(ctx, key, pg, permGate, lg, w, ev)
+			r.dispatch(ctx, key, pg, permGate, lg, cg, w, ev)
 		}
 	}
 }
@@ -705,7 +538,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 // answering; a cleared request falls through to the permission gate, which allows
 // it or escalates-and-halts. Ordering protocol → permission is what keeps the two
 // from double-answering the agent.
-func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, ev agent.Event) {
+func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, ev agent.Event) {
 	if _, err := w.Process(ev); err != nil {
 		r.opt.Logf("reconcile: watch %s/%s: %v", key.Ticket, key.Attempt, err)
 	}
@@ -719,6 +552,21 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 	} else if out == limit.Stopped {
 		r.opt.Logf("reconcile: context auto-stop %s/%s at %d tokens", key.Ticket, key.Attempt, ev.Usage.ContextTokens)
 		return
+	}
+
+	// Turn-end guard: a session that ends a success turn without having claimed
+	// review or filed an escalation is nudged once, then escalated-and-halted to a
+	// human — so it can never silently stop at "done" and strand the attempt in
+	// Running + enabled (drvctl-022). watch.Process above has already promoted any
+	// review/escalate the agent ran this turn, so the gate reads a log that reflects
+	// a genuine hand-off. An Escalated outcome reaped the session; nothing more to do.
+	if out, err := cg.Consider(ctx, ev); err != nil {
+		r.opt.Logf("reconcile: completion gate %s/%s: %v", key.Ticket, key.Attempt, err)
+	} else if out == completion.Escalated {
+		r.opt.Logf("reconcile: completion auto-stop %s/%s: success turn with no review/escalation filed", key.Ticket, key.Attempt)
+		return
+	} else if out == completion.Nudged {
+		r.opt.Logf("reconcile: completion nudge %s/%s: reminded to claim review or escalate", key.Ticket, key.Attempt)
 	}
 
 	if ev.Kind != agent.EventPermission {
