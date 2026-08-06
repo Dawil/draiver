@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-07
+
 ### Added
 
+- **Inline escalation resolution from the board (drvweb-007).** Each *open*
+  escalation on the attempt timeline now renders a resolution textarea + Resolve
+  button; submitting appends a `resolution` event refing that escalation's seq,
+  clears the block, and leaves Stuck — the board affordance for `draiver resolve`.
+  A resolved escalation shows only "→ resolved by #N". Like the other webui
+  writes, it is not reimplemented in the web layer: `POST
+  /ticket/{id}/{attempt}/resolve` shells `draiver resolve` (runDraiverResolve, via
+  a shared `draiverExe()` helper), so the board and a terminal share one append
+  path. Guards mirror the CLI and close the gap it leaves: same-origin CSRF (403),
+  empty answer (400), and `classifyResolveTarget` rejects an unknown or
+  non-escalation seq (400) and an already-resolved seq (409), all read from
+  derived state rather than the posted form. The textarea carries a stable id +
+  `hx-preserve` so the 3s poll swap never clobbers a half-typed answer and
+  correctly vanishes once resolved. The webui is now a three-write surface (log,
+  resolve, enable).
 - **Green play button on the board's Running column, the webui's first write
   (drvweb-005).** A Running attempt that is not yet enabled (the supervision axis
   the grey session-dot reads) shows a green play button on its card; clicking it
@@ -79,6 +96,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The injected brief now carries the Markdown-when-logging nudge (`draiverctl`,
+  drvctl-020).** The board renders event bodies as Markdown, but that how-to-log
+  guidance only reached agents that loaded the onboarding skill (§3.5) — sessions
+  the supervisor drives get their instructions from the cold-start brief, which
+  carried none, so a supervised agent without the skill logged unstructured blobs.
+  `brief.Build` now prepends a one-line working-instructions preamble,
+  single-sourced from a `workingInstructions` const kept in sync with SKILL §3.5.
+  It rides every cold-start and resume (`protocol.InjectBrief` re-injects the
+  brief after Spawn/Resume) and sits with the spec/log the agent already reads.
 - **Session lifecycle verbs recast around a state-stack "degree axis", and the
   imperative verbs now hand off to the daemon (`draiverctl`, drvctl-016).**
   `start`/`stop`/`restart` were an ad-hoc foreground driver: the resume path blindly
