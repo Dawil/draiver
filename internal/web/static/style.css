@@ -47,12 +47,29 @@ body {
 .col-stuck { border-color: var(--alert); }
 .col-stuck h2 { color: var(--alert); }
 
+.card-wrap { position: relative; }
 .card {
   display: flex; flex-direction: column; gap: 2px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px; margin-bottom: 8px; text-decoration: none; color: var(--ink);
 }
 .card:hover { border-color: var(--accent); }
+/* Reserve room for the corner play button so it never overlaps the ticket id. */
+.card-wrap:has(.enable-form) .card { padding-right: 36px; }
+/* Green play button: enable a parked Running attempt into supervision. Colour is
+   the eucalypt --dot-running (the same green the running dot uses); the play
+   triangle carries the meaning as shape, not colour alone, and it is a real
+   <button> with an aria-label. */
+.enable-form { position: absolute; top: 8px; right: 8px; margin: 0; }
+.enable-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; line-height: 0; cursor: pointer;
+  border: 1px solid var(--dot-running); border-radius: 50%;
+  background: color-mix(in srgb, var(--dot-running) 18%, transparent);
+  color: var(--dot-running);
+}
+.enable-btn:hover { background: var(--dot-running); color: var(--panel-2); }
+.enable-btn:focus-visible { outline: 2px solid var(--dot-running); outline-offset: 2px; }
 .card .tid { font-weight: 600; font-size: 13px; }
 .card .att { color: var(--muted); font-weight: 500; }
 .card .title { color: var(--muted); font-size: 13px; }

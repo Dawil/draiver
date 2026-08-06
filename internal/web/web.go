@@ -1,7 +1,9 @@
-// Package web serves the read-only Draiver board: a self-contained HTMX server
-// that renders the four control states per ATTEMPT from the filesystem log. Each
-// attempt is its own card; one ticket can appear several times. It never writes
-// and never spawns processes.
+// Package web serves the Draiver board: a self-contained HTMX server that renders
+// the four control states per ATTEMPT from the filesystem log. Each attempt is
+// its own card; one ticket can appear several times. It is read-only but for one
+// affordance — the board's green play button POSTs a single `enable` event
+// (handleEnable) to opt a parked attempt into daemon supervision; it never spawns
+// processes and touches nothing else on disk.
 package web
 
 import (
@@ -11,13 +13,16 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/yuin/goldmark"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -26,7 +31,8 @@ var templatesFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// Server renders the read-only board and attempt detail from a data root.
+// Server renders the board and attempt detail from a data root, and serves the
+// board's one write (the enable button).
 type Server struct {
 	root store.Root
 	tmpl *template.Template
@@ -34,6 +40,26 @@ type Server struct {
 	// alive probes whether a recorded session pid is still running. It defaults to
 	// a signal-0 OS probe (pidAlive); tests inject a deterministic stub.
 	alive func(pid int) bool
+	// actor is the identity stamped on board-originated writes (the enable event).
+	// The board has no CLI actor context, so it is configured at construction (see
+	// WithActor); it defaults to human:webui.
+	actor string
+}
+
+// Option configures a Server at construction. It keeps New's zero-config form
+// (New(root)) working for the read-only paths while letting the webui command
+// thread in the write actor.
+type Option func(*Server)
+
+// WithActor sets the identity stamped on the enable event a board click appends,
+// so a board-originated write is attributable in the hash chain. An empty actor
+// is ignored, leaving the human:webui default.
+func WithActor(actor string) Option {
+	return func(s *Server) {
+		if actor != "" {
+			s.actor = actor
+		}
+	}
 }
 
 // stateLabels overrides how a control state is shown in the human-facing web UI.
@@ -75,14 +101,29 @@ func cardHref(a project.Attempt) string {
 	return base
 }
 
-// New builds a Server over the given data root.
-func New(root store.Root) (*Server, error) {
-	s := &Server{root: root, md: goldmark.New(), alive: pidAlive}
+// canEnable reports whether an attempt's card should show the green play button:
+// a Running attempt that is not yet enabled (the supervision axis — the same bit
+// the grey session-dot reads, DeriveEnabled). Enabled attempts, and attempts in
+// any other column, get no button. It gates both the rendered button and — via
+// handleEnable's idempotent no-op — the effect of the POST, so the two can never
+// disagree about which cards are actionable.
+func canEnable(a project.Attempt) bool {
+	return a.State == project.Running && !a.Enabled
+}
+
+// New builds a Server over the given data root. Options configure the write path
+// (see WithActor); with none it is the read-only board with a human:webui actor.
+func New(root store.Root, opts ...Option) (*Server, error) {
+	s := &Server{root: root, md: goldmark.New(), alive: pidAlive, actor: "human:webui"}
+	for _, opt := range opts {
+		opt(s)
+	}
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
 			"stateLabel":  stateLabel,
 			"badge":       func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
 			"cardHref":    cardHref,
+			"canEnable":   canEnable,
 			"sessionDot":  s.sessionDot,
 			"paletteVars": paletteVars,
 		}).
@@ -104,7 +145,8 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum))
 }
 
-// Handler returns the read-only route mux.
+// Handler returns the route mux. Every route is a GET but one: the board's single
+// write, POST .../enable, opts an attempt into daemon supervision.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -113,6 +155,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -404,6 +447,82 @@ func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(286)
 	}
 	buf.WriteTo(w)
+}
+
+// handleEnable is the board's one write (POST /ticket/{id}/{attempt}/enable): it
+// opts a Running, disabled attempt into daemon supervision by appending an
+// `enable` event — the exact event `draiver ctl enable` records (setEnabled,
+// cmd/ctl_enable.go) — then re-renders the card so htmx swaps the play button
+// away and the grey session-dot flips. It is purely declarative: no control
+// socket, no reconciler; a running `ctl up` brings the attempt up on its next
+// tick, and with no daemon the enable simply waits, matching the grey-dot
+// semantics the button sits on.
+//
+// It is idempotent: an already-enabled (or non-Running) attempt — e.g. a
+// double-click racing the 3s board poll — is a no-op that just re-renders the
+// current card, so the chain gains exactly one enable per enable. The
+// state-changing POST carries a same-origin guard so a cross-site page in a
+// browser cannot drive it, proportionate to a localhost dev tool.
+func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request blocked", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Only the disabled→enabled transition writes; canEnable is the same gate the
+	// button renders behind, so a POST for a card that shows no button is a no-op.
+	if canEnable(a) {
+		if _, err := ticketlog.Append(s.root, id, att, event.Event{
+			Type:  "enable",
+			Actor: s.actor,
+			Body:  fmt.Sprintf("Supervision enabled for %s/%s.", id, att),
+		}); err != nil {
+			s.fail(w, err)
+			return
+		}
+		if a, err = project.LoadAttempt(s.root, id, att); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	// Re-render just this card; htmx swaps it in place (outerHTML on .card-wrap),
+	// dropping the button and recomputing the session-dot off the fresh state.
+	s.render(w, "card", a)
+}
+
+// sameOrigin guards the write route against cross-site POSTs. The webui binds to
+// localhost, so the surface is already small; this keeps a cross-origin page in a
+// browser from driving the enable button. Modern browsers set Sec-Fetch-Site,
+// the primary check; when absent (non-browser clients like curl, or the test
+// harness) it falls back to comparing the Origin host to Host, treating a missing
+// Origin as trusted — a same-origin fetch/form omits it, and a non-browser caller
+// on localhost is already inside the trust boundary.
+func sameOrigin(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "cross-site", "same-site":
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

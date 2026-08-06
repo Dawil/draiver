@@ -541,6 +541,133 @@ func TestFaviconStateEmitsTrigger(t *testing.T) {
 	}
 }
 
+// TestEnableButtonAndPost pins the board's one write (drvweb-005): the green play
+// button renders only on a Running, disabled card; POSTing the enable route
+// appends exactly one `enable` event attributed to the server's actor and returns
+// a card with the button gone; the write is idempotent (a re-POST is a no-op); a
+// missing attempt 404s; and a cross-origin POST is blocked and writes nothing.
+func TestEnableButtonAndPost(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	// The button renders only for Running + disabled cards. The seed's Running
+	// attempts (PROJ-3/0001, PROJ-1/0002) have no enable event, so both are
+	// disabled and actionable; the Stuck and Review cards must not carry it.
+	board := get(t, h, "/board").Body.String()
+	for _, want := range []string{
+		`data-testid="enable-btn-PROJ-3-0001"`,
+		`data-testid="enable-btn-PROJ-1-0002"`,
+		`aria-label="enable supervision"`, // an action with a label, not colour alone
+	} {
+		if !strings.Contains(board, want) {
+			t.Errorf("board missing enable button %q", want)
+		}
+	}
+	for _, notWant := range []string{
+		`data-testid="enable-btn-PROJ-1-0001"`, // Stuck
+		`data-testid="enable-btn-PROJ-2-0001"`, // Review
+	} {
+		if strings.Contains(board, notWant) {
+			t.Errorf("enable button must not render for a non-Running card %q", notWant)
+		}
+	}
+
+	// POST enables: exactly one enable event, attributed to the default actor, and
+	// the returned card drops the button (htmx swaps it in place).
+	rr := post(t, h, "/ticket/PROJ-3/0001/enable")
+	if rr.Code != 200 {
+		t.Fatalf("POST enable = %d, want 200", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), `data-testid="enable-btn-PROJ-3-0001"`) {
+		t.Errorf("enabled card must no longer show the button:\n%s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `data-testid="card-PROJ-3-0001"`) {
+		t.Errorf("enable response must be the re-rendered card:\n%s", rr.Body.String())
+	}
+	if got := enableEvents(t, root, "PROJ-3", "0001"); len(got) != 1 {
+		t.Fatalf("want exactly 1 enable event, got %d", len(got))
+	} else if got[0].Actor != "human:webui" {
+		t.Errorf("enable actor = %q, want default human:webui", got[0].Actor)
+	}
+
+	// Idempotent: a re-POST (e.g. a double-click racing the board poll) writes
+	// nothing new.
+	if rr := post(t, h, "/ticket/PROJ-3/0001/enable"); rr.Code != 200 {
+		t.Fatalf("re-POST enable = %d, want 200", rr.Code)
+	}
+	if n := len(enableEvents(t, root, "PROJ-3", "0001")); n != 1 {
+		t.Errorf("re-POST must be a no-op; enable events = %d, want 1", n)
+	}
+	// ...and the now-enabled attempt shows no button on the next board render.
+	if strings.Contains(get(t, h, "/board").Body.String(), `data-testid="enable-btn-PROJ-3-0001"`) {
+		t.Errorf("an enabled attempt must not show the enable button")
+	}
+
+	// A non-existent attempt 404s and writes nothing.
+	if rr := post(t, h, "/ticket/PROJ-1/9999/enable"); rr.Code != 404 {
+		t.Errorf("POST enable to a missing attempt = %d, want 404", rr.Code)
+	}
+
+	// A cross-origin POST is blocked and appends nothing.
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-1/0002/enable", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin POST = %d, want 403", rr.Code)
+	}
+	if n := len(enableEvents(t, root, "PROJ-1", "0002")); n != 0 {
+		t.Errorf("a blocked POST must not write; enable events = %d, want 0", n)
+	}
+}
+
+// TestEnableActorConfigurable pins that WithActor threads the write identity so a
+// board-originated enable is attributable to the configured actor.
+func TestEnableActorConfigurable(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root, WithActor("human:dave"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := post(t, s.Handler(), "/ticket/PROJ-3/0001/enable"); rr.Code != 200 {
+		t.Fatalf("POST enable = %d, want 200", rr.Code)
+	}
+	got := enableEvents(t, root, "PROJ-3", "0001")
+	if len(got) != 1 || got[0].Actor != "human:dave" {
+		t.Errorf("enable events = %+v, want one attributed to human:dave", got)
+	}
+}
+
+// post issues a same-origin POST (no Sec-Fetch/Origin headers, as the test
+// harness sends none — sameOrigin treats that as trusted).
+func post(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, path, nil))
+	return rr
+}
+
+// enableEvents returns an attempt's `enable` events, for asserting the write
+// landed exactly once and carries the right actor.
+func enableEvents(t *testing.T, root store.Root, id, att string) []event.Event {
+	t.Helper()
+	events, err := ticketlog.Read(root, id, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []event.Event
+	for _, e := range events {
+		if e.Type == "enable" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func TestUnknownRoutes404(t *testing.T) {
 	h := newServer(t)
 	if rr := get(t, h, "/ticket/NOPE-1"); rr.Code != 404 {

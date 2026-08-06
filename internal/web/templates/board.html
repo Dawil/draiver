@@ -22,16 +22,33 @@
 </div>
 {{end}}
 
+{{/* card is a tile plus, for a Running attempt not yet enabled, a green play
+     button that enables it into daemon supervision. The button is a SIBLING of
+     the card <a> inside .card-wrap (not nested), so a play click posts the enable
+     without also following the card's href — no JS stop-propagation. handleEnable
+     answers with this same template, so the htmx swap drops the button and reflows
+     the session-dot in place. */}}
 {{define "card"}}
-<a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
-  <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
-  <span class="title">{{.Title}}</span>
-  <span class="meta-row">
-    {{template "session-dot" .}}
-    {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
-    {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
-  </span>
-</a>
+<div class="card-wrap" data-testid="card-{{.Ticket}}-{{.ID}}">
+  <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
+    <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
+    <span class="title">{{.Title}}</span>
+    <span class="meta-row">
+      {{template "session-dot" .}}
+      {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
+      {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
+    </span>
+  </a>
+  {{if canEnable .}}
+  <form class="enable-form" method="post" action="/ticket/{{.Ticket}}/{{.ID}}/enable"
+        hx-post="/ticket/{{.Ticket}}/{{.ID}}/enable" hx-target="closest .card-wrap" hx-swap="outerHTML">
+    <button type="submit" class="enable-btn" data-testid="enable-btn-{{.Ticket}}-{{.ID}}"
+            aria-label="enable supervision" title="Enable supervision">
+      <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>
+    </button>
+  </form>
+  {{end}}
+</div>
 {{end}}
 
 {{/* session-dot renders an attempt's runtime-liveness dot (green running / wattle
