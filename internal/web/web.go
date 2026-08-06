@@ -1,15 +1,16 @@
 // Package web serves the Draiver board: a self-contained HTMX server that
 // renders the four control states per ATTEMPT from the filesystem log. Each
 // attempt is its own card; one ticket can appear several times. It is
-// read-mostly but for two write affordances, neither reimplemented here: the
-// attempt detail page appends a typed log event (POST /ticket/{id}/{attempt}/log),
-// which is how a human records a note/gotcha/decision or acts on a Review claim
-// (Decision to reopen, Done to close), by shelling the draiver CLI (draiver log /
-// draiver done, see runDraiverLog); and the board's green play button
+// read-mostly but for three write affordances, none reimplemented here: the
+// attempt detail page appends a typed log event (POST /ticket/{id}/{attempt}/log
+// — a note/gotcha/decision, or a Review action: Decision to reopen, Done to
+// close) and answers an open escalation (POST /ticket/{id}/{attempt}/resolve —
+// the board affordance for `draiver resolve`); and the board's green play button
 // (POST /ticket/{id}/{attempt}/enable) opts a parked attempt into daemon
-// supervision by shelling `draiver ctl enable` (handleEnable / runDraiverEnable).
-// Each write is the same verb a human runs at a terminal, so there is a single
-// code path per write.
+// supervision. Each write shells the same verb a human runs at a terminal
+// (draiver log / draiver done / draiver resolve / draiver ctl enable — see
+// runDraiverLog, runDraiverResolve, runDraiverEnable), so there is a single code
+// path per write.
 package web
 
 import (
@@ -96,6 +97,21 @@ var composeTypes = map[string]bool{
 // binary, since under `go test` os.Executable() is the test binary, not draiver.
 var draiverBinOverride string
 
+// draiverExe resolves the draiver binary the write shell-outs invoke:
+// draiverBinOverride when set (tests, where os.Executable() is the test binary,
+// not draiver), else the running executable — under `draiver webui` that is
+// draiver itself.
+func draiverExe() (string, error) {
+	if draiverBinOverride != "" {
+		return draiverBinOverride, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate draiver binary: %w", err)
+	}
+	return exe, nil
+}
+
 // runDraiverLog appends a web-composed event by invoking the draiver CLI rather
 // than reimplementing the append in the web layer: note/gotcha/decision go
 // through `draiver log --type T`, and the terminal action through `draiver done`
@@ -105,12 +121,9 @@ var draiverBinOverride string
 // "-" is never parsed as a flag. On failure it surfaces the CLI's combined
 // output for a legible error.
 func (s *Server) runDraiverLog(typ, id, att, body string) error {
-	exe := draiverBinOverride
-	if exe == "" {
-		var err error
-		if exe, err = os.Executable(); err != nil {
-			return fmt.Errorf("locate draiver binary: %w", err)
-		}
+	exe, err := draiverExe()
+	if err != nil {
+		return err
 	}
 	var args []string
 	if typ == "done" {
@@ -122,6 +135,27 @@ func (s *Server) runDraiverLog(typ, id, att, body string) error {
 	cmd := exec.Command(exe, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runDraiverResolve answers an escalation by invoking `draiver resolve` rather
+// than reimplementing the resolution append in the web layer — the same verb a
+// human runs at a terminal, so the board and the CLI share one write path (see
+// runDraiverLog). The escalation seq and the answer go as positional args after
+// "--" so an answer beginning with "-" is never parsed as a flag; the server's
+// data root, actor, and target attempt go as explicit flags. On failure it
+// surfaces the CLI's combined output for a legible error.
+func (s *Server) runDraiverResolve(id, att string, seq int, answer string) error {
+	exe, err := draiverExe()
+	if err != nil {
+		return err
+	}
+	args := []string{"resolve", "--data", s.root.Dir, "--actor", s.actor, "--attempt", att,
+		"--", id, strconv.Itoa(seq), answer}
+	cmd := exec.Command(exe, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver resolve: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -355,9 +389,9 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum))
 }
 
-// Handler returns the route mux. Every route is a GET but two writes: POST
-// .../log appends a composed log event, and POST .../enable opts an attempt into
-// daemon supervision.
+// Handler returns the route mux. Every route is a GET but three writes: POST
+// .../log appends a composed log event, POST .../resolve answers an open
+// escalation, and POST .../enable opts an attempt into daemon supervision.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -367,6 +401,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
@@ -732,7 +767,7 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 	w.Write(live)
 }
 
-// handleEnable is the board's one write (POST /ticket/{id}/{attempt}/enable): it
+// handleEnable is the board's enable write (POST /ticket/{id}/{attempt}/enable): it
 // opts a Running, disabled attempt into daemon supervision by shelling
 // `draiver ctl enable` (runDraiverEnable) — the same verb a human runs at a
 // terminal, so the enable is not reimplemented in the web layer — then re-renders
@@ -791,12 +826,9 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 // socket is dragged into the web process. On failure it surfaces the CLI's
 // combined output for a legible error.
 func (s *Server) runDraiverEnable(id, att string) error {
-	exe := draiverBinOverride
-	if exe == "" {
-		var err error
-		if exe, err = os.Executable(); err != nil {
-			return fmt.Errorf("locate draiver binary: %w", err)
-		}
+	exe, err := draiverExe()
+	if err != nil {
+		return err
 	}
 	cmd := exec.Command(exe, "ctl", "enable",
 		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
@@ -806,13 +838,102 @@ func (s *Server) runDraiverEnable(id, att string) error {
 	return nil
 }
 
-// sameOrigin guards the write route against cross-site POSTs. The webui binds to
-// localhost, so the surface is already small; this keeps a cross-origin page in a
-// browser from driving the enable button. Modern browsers set Sec-Fetch-Site,
-// the primary check; when absent (non-browser clients like curl, or the test
-// harness) it falls back to comparing the Origin host to Host, treating a missing
-// Origin as trusted — a same-origin fetch/form omits it, and a non-browser caller
-// on localhost is already inside the trust boundary.
+// handleResolve answers an open escalation from the attempt timeline (POST
+// /ticket/{id}/{attempt}/resolve) and returns the re-rendered live fragment, so
+// the escalation flips to "resolved by #N", the state badge leaves Stuck, and the
+// count bump all land from one swap. It is the board affordance for `draiver
+// resolve`: the write goes through the CLI (runDraiverResolve), not a re-appended
+// event here, so the board and a terminal share one resolution path.
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	seq, err := strconv.Atoi(strings.TrimSpace(r.FormValue("seq")))
+	if err != nil {
+		http.Error(w, "draiver: escalation seq must be an integer", http.StatusBadRequest)
+		return
+	}
+	answer := strings.TrimSpace(r.FormValue("answer"))
+	if answer == "" {
+		http.Error(w, "draiver: a resolution needs an answer", http.StatusBadRequest)
+		return
+	}
+	// Guard against the derived truth, never the posted seq: it must name an open
+	// escalation on THIS attempt. This rejects an unknown/non-escalation seq and an
+	// already-resolved one (a double-submit or forged post) before the shell-out —
+	// the resolve box only renders for open escalations, and `draiver resolve`
+	// re-checks seq+type once more when it runs.
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if ok, status, msg := classifyResolveTarget(a, seq); !ok {
+		http.Error(w, "draiver: "+msg, status)
+		return
+	}
+	if err := s.runDraiverResolve(id, att, seq, answer); err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(live)
+}
+
+// classifyResolveTarget validates a posted seq against the derived attempt before
+// the resolve shell-out, without trusting the form. It mirrors the CLI's own
+// checks (cmd/resolve.go) and adds the one the CLI lacks: an unknown or
+// non-escalation seq is a bad request, an escalation that already has a later
+// resolution is a conflict (a double-submit or forged post), and an open
+// escalation passes. It reads derived state (Events for seq/type, OpenEscalations
+// for openness) — it does not re-append; the write itself stays in the CLI.
+func classifyResolveTarget(a project.Attempt, seq int) (ok bool, status int, msg string) {
+	var esc *event.Event
+	for i := range a.Events {
+		if a.Events[i].Seq == seq {
+			esc = &a.Events[i]
+			break
+		}
+	}
+	if esc == nil {
+		return false, http.StatusBadRequest, fmt.Sprintf("no event #%d on %s/%s", seq, a.Ticket, a.ID)
+	}
+	if esc.Type != "escalation" {
+		return false, http.StatusBadRequest, fmt.Sprintf("event #%d on %s/%s is a %q, not an escalation", seq, a.Ticket, a.ID, esc.Type)
+	}
+	for _, o := range a.OpenEscalations {
+		if o.Seq == seq {
+			return true, 0, ""
+		}
+	}
+	return false, http.StatusConflict, fmt.Sprintf("escalation #%d on %s/%s is already resolved", seq, a.Ticket, a.ID)
+}
+
+// sameOrigin guards the state-changing POST routes against cross-site POSTs. The
+// webui binds to localhost, so the surface is already small; this keeps a
+// cross-origin page in a browser from driving a write (the log append, resolve, or
+// enable button). Modern browsers set Sec-Fetch-Site, the primary check; when
+// absent (non-browser clients like curl, or the test harness) it falls back to
+// comparing the Origin host to Host, treating a missing Origin as trusted — a
+// same-origin fetch/form omits it, and a non-browser caller on localhost is
+// already inside the trust boundary.
 func sameOrigin(r *http.Request) bool {
 	switch r.Header.Get("Sec-Fetch-Site") {
 	case "same-origin", "none":

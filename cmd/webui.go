@@ -15,13 +15,14 @@ var webuiCmd = &cobra.Command{
 	Use:   "webui",
 	Short: "Run the HTMX board over a data folder",
 	Long: "webui serves a board of the four control states plus a per-ticket detail\n" +
-		"view. It is read-mostly but for two write affordances, each of which shells\n" +
+		"view. It is read-mostly but for three write affordances, each of which shells\n" +
 		"the draiver CLI rather than reimplementing the write in the web layer: the\n" +
 		"detail page appends a typed log entry (a note/gotcha/decision, or a Review\n" +
-		"attempt's Decision/Done action) via `draiver log`/`draiver done`, and a\n" +
-		"Running attempt's green play button opts it into daemon supervision via\n" +
-		"`draiver ctl enable` (the board twin of `ctl enable`). Board-originated writes\n" +
-		"are attributed to --actor / $DRAIVER_ACTOR, else human:webui.",
+		"attempt's Decision/Done action) via `draiver log`/`draiver done` and answers\n" +
+		"an open escalation inline via `draiver resolve`, and a Running attempt's green\n" +
+		"play button opts it into daemon supervision via `draiver ctl enable` (the\n" +
+		"board twin of `ctl enable`). Board-originated writes are attributed to\n" +
+		"--actor / $DRAIVER_ACTOR, else human:webui.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()
