@@ -12,6 +12,8 @@ var (
 	logType      string
 	logRefs      []int
 	logArtefacts []string
+	logURLs      []string
+	logLinks     []string
 )
 
 var logCmd = &cobra.Command{
@@ -26,10 +28,15 @@ var logCmd = &cobra.Command{
 		if logType == "" {
 			return fmt.Errorf("--type is required")
 		}
+		links, err := buildLinks(logURLs, logLinks)
+		if err != nil {
+			return err
+		}
 		e, att, err := appendEvent(id, event.Event{
 			Type:      logType,
 			Refs:      logRefs,
 			Artefacts: logArtefacts,
+			Links:     links,
 			Body:      msg,
 		})
 		if err != nil {
@@ -44,5 +51,6 @@ func init() {
 	logCmd.Flags().StringVar(&logType, "type", "", "event type (gotcha|decision|note|...) (required)")
 	logCmd.Flags().IntSliceVar(&logRefs, "ref", nil, "seq of an event this one references (repeatable)")
 	logCmd.Flags().StringSliceVar(&logArtefacts, "artefact", nil, "path under artefacts/ this event references (repeatable)")
+	addLinkFlags(logCmd, &logURLs, &logLinks)
 	rootCmd.AddCommand(logCmd)
 }

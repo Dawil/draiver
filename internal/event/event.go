@@ -14,6 +14,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Link is an opaque, forge-neutral hyperlink attached to an event — a review
+// link: a draft PR, a merge request, a diff URL, a CI run. Rel is an
+// uninterpreted free label (pr, mr, diff, ci, …) draiver uses only to pick a
+// primary for display; it never parses the host or the path, and there is no
+// forge-specific code anywhere. Href is the URL, validated at append time
+// against a hardcoded scheme allowlist (see ValidateLink).
+type Link struct {
+	Rel  string `yaml:"rel"`
+	Href string `yaml:"href"`
+}
+
 // Event is one entry in a ticket's append-only log. The frontmatter fields are
 // persisted as YAML; Body is the markdown message beneath it.
 type Event struct {
@@ -25,6 +36,7 @@ type Event struct {
 	Attempt   string    `yaml:"attempt"`
 	Refs      []int     `yaml:"refs,omitempty"`
 	Artefacts []string  `yaml:"artefacts,omitempty"`
+	Links     []Link    `yaml:"links,omitempty"`
 	Prev      string    `yaml:"prev"`
 	Hash      string    `yaml:"hash"`
 
@@ -43,6 +55,7 @@ type hashable struct {
 	Attempt   string   `yaml:"attempt"`
 	Refs      []int    `yaml:"refs,omitempty"`
 	Artefacts []string `yaml:"artefacts,omitempty"`
+	Links     []Link   `yaml:"links,omitempty"`
 	Prev      string   `yaml:"prev"`
 }
 
@@ -59,6 +72,7 @@ func (e Event) ComputeHash() string {
 		Attempt:   e.Attempt,
 		Refs:      e.Refs,
 		Artefacts: e.Artefacts,
+		Links:     e.Links,
 		Prev:      e.Prev,
 	}
 	front, err := yaml.Marshal(h)
