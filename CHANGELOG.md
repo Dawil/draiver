@@ -15,10 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed event to the attempt without dropping to a terminal, and two Review-gated
   buttons: **Decision** (reopens a Review attempt to Running) and **Done** (closes
   it), both driven by the existing lifecycle `Derive`. This makes the board a
-  write surface for the first time: `POST /ticket/{id}/{attempt}/log` appends
-  directly via `ticketlog.Append` (no CLI shell-out, still never spawns a
-  process), stamping a resolved actor (`$DRAIVER_ACTOR`, else `human:$USER`, else
-  `human:web`) so a web-composed entry is attributable exactly like a CLI one. The
+  write surface for the first time: `POST /ticket/{id}/{attempt}/log` performs
+  the append by shelling the draiver CLI (`draiver log --type …`, and `draiver
+  done` for the terminal action) rather than reimplementing it in the web layer,
+  so the webui and a human at a terminal share one append path. It passes a
+  resolved actor (`$DRAIVER_ACTOR`, else `human:$USER`, else `human:web`) through
+  as `--actor` so a web-composed entry is attributable exactly like a CLI one. The
   type is checked against a curated allow-list `{note, gotcha, decision, done}`,
   so lifecycle types with their own flows (`escalation`/`resolution`/`review`/
   `enable`/`disable`) can never be hand-typed (400, nothing appended). The

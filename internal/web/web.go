@@ -4,7 +4,9 @@
 // read-mostly — the one mutation it allows is appending a typed log event from
 // the attempt detail page (POST /ticket/{id}/{attempt}/log), which is how a
 // human records a note/gotcha/decision or acts on a Review claim (Decision to
-// reopen, Done to close). It still never spawns processes.
+// reopen, Done to close). That single write is not reimplemented here: it shells
+// the draiver CLI (draiver log / draiver done), so the webui and a human at a
+// terminal share one append code path (see runDraiverLog).
 package web
 
 import (
@@ -16,16 +18,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yuin/goldmark"
 
-	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -75,6 +76,43 @@ func resolveWebActor() string {
 		return "human:" + u
 	}
 	return "human:web"
+}
+
+// draiverBinOverride points the log-append shell-out at a specific draiver
+// binary. It is empty in production, where runDraiverLog resolves the running
+// executable via os.Executable() (under `draiver webui`, that is draiver
+// itself). Tests set it to a freshly built binary, since under `go test`
+// os.Executable() is the test binary, not draiver.
+var draiverBinOverride string
+
+// runDraiverLog appends a web-composed event by invoking the draiver CLI rather
+// than reimplementing the append in the web layer: note/gotcha/decision go
+// through `draiver log --type T`, and the terminal action through `draiver done`
+// — the same verbs a human runs at a terminal, so there is a single write path.
+// It passes the server's resolved data root, actor, and target attempt as
+// explicit flags (env-independent), and ends with "--" so a body beginning with
+// "-" is never parsed as a flag. On failure it surfaces the CLI's combined
+// output for a legible error.
+func (s *Server) runDraiverLog(typ, id, att, body string) error {
+	exe := draiverBinOverride
+	if exe == "" {
+		var err error
+		if exe, err = os.Executable(); err != nil {
+			return fmt.Errorf("locate draiver binary: %w", err)
+		}
+	}
+	var args []string
+	if typ == "done" {
+		args = []string{"done"}
+	} else {
+		args = []string{"log", "--type", typ}
+	}
+	args = append(args, "--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id, body)
+	cmd := exec.Command(exe, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // sameOrigin guards the state-changing POST against cross-site request forgery.
@@ -520,7 +558,7 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err := ticketlog.Append(s.root, id, att, event.Event{Type: typ, Actor: s.actor, Body: body}); err != nil {
+	if err := s.runDraiverLog(typ, id, att, body); err != nil {
 		s.fail(w, err)
 		return
 	}

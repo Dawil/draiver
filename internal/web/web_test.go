@@ -1,10 +1,13 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,31 @@ import (
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
+
+// TestMain builds the draiver binary once and points the web server's log-append
+// shell-out at it (draiverBinOverride). The webui's one write goes through the
+// draiver CLI, so the append/decision/done tests below drive the real binary
+// end-to-end — under `go test` os.Executable() is the test binary, not draiver,
+// which is why the override is needed.
+func TestMain(m *testing.M) {
+	os.Exit(func() int {
+		dir, err := os.MkdirTemp("", "draiver-web-bin")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tempdir for test binary:", err)
+			return 1
+		}
+		defer os.RemoveAll(dir)
+		bin := filepath.Join(dir, "draiver")
+		build := exec.Command("go", "build", "-o", bin, "github.com/Dawil/draiver")
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "build draiver for tests:", err)
+			return 1
+		}
+		draiverBinOverride = bin
+		return m.Run()
+	}())
+}
 
 func seedBoard(t *testing.T) store.Root {
 	t.Helper()
