@@ -1,10 +1,15 @@
-// Package web serves the Draiver board: a self-contained HTMX server that renders
-// the four control states per ATTEMPT from the filesystem log. Each attempt is
-// its own card; one ticket can appear several times. It is read-mostly but for one
-// affordance — the board's green play button POSTs to opt a parked attempt into
-// daemon supervision. That write is not reimplemented here: handleEnable shells
-// `draiver ctl enable` (runDraiverEnable), the same verb a human runs at a
-// terminal, so there is a single enable code path.
+// Package web serves the Draiver board: a self-contained HTMX server that
+// renders the four control states per ATTEMPT from the filesystem log. Each
+// attempt is its own card; one ticket can appear several times. It is
+// read-mostly but for two write affordances, neither reimplemented here: the
+// attempt detail page appends a typed log event (POST /ticket/{id}/{attempt}/log),
+// which is how a human records a note/gotcha/decision or acts on a Review claim
+// (Decision to reopen, Done to close), by shelling the draiver CLI (draiver log /
+// draiver done, see runDraiverLog); and the board's green play button
+// (POST /ticket/{id}/{attempt}/enable) opts a parked attempt into daemon
+// supervision by shelling `draiver ctl enable` (handleEnable / runDraiverEnable).
+// Each write is the same verb a human runs at a terminal, so there is a single
+// code path per write.
 package web
 
 import (
@@ -22,7 +27,12 @@ import (
 	"time"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 )
@@ -33,8 +43,9 @@ var templatesFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// Server renders the board and attempt detail from a data root, and serves the
-// board's one write (the enable button).
+// Server renders the board and attempt detail from a data root, appends
+// human-composed log events from the detail page, and serves the board's enable
+// button.
 type Server struct {
 	root store.Root
 	tmpl *template.Template
@@ -42,9 +53,9 @@ type Server struct {
 	// alive probes whether a recorded session pid is still running. It defaults to
 	// a signal-0 OS probe (pidAlive); tests inject a deterministic stub.
 	alive func(pid int) bool
-	// actor is the identity stamped on board-originated writes (the enable event).
-	// The board has no CLI actor context, so it is configured at construction (see
-	// WithActor); it defaults to human:webui.
+	// actor is the identity stamped on both web writes — a composed log event and
+	// a board enable. The board has no CLI actor context, so it is configured at
+	// construction (see WithActor); it defaults to human:webui.
 	actor string
 }
 
@@ -62,6 +73,57 @@ func WithActor(actor string) Option {
 			s.actor = actor
 		}
 	}
+}
+
+// composeTypes is the curated allow-list of event types the web compose box may
+// append. draiver log accepts a free-form --type, but the web form must never
+// let a human hand-type a lifecycle type that owns a dedicated flow —
+// escalation/resolution (the escalate/resolve pair), review (the agent's own
+// claim), enable/disable (supervision), or created. Only note and gotcha (plain
+// context), decision (which also reopens a Review attempt to Running), and done
+// (the Review terminal action) are allowed; any other type is a 400.
+var composeTypes = map[string]bool{
+	"note":     true,
+	"gotcha":   true,
+	"decision": true,
+	"done":     true,
+}
+
+// draiverBinOverride points the web writes' shell-outs (runDraiverLog and
+// runDraiverEnable) at a specific draiver binary. It is empty in production,
+// where those resolve the running executable via os.Executable() (under
+// `draiver webui`, that is draiver itself). Tests set it to a freshly built
+// binary, since under `go test` os.Executable() is the test binary, not draiver.
+var draiverBinOverride string
+
+// runDraiverLog appends a web-composed event by invoking the draiver CLI rather
+// than reimplementing the append in the web layer: note/gotcha/decision go
+// through `draiver log --type T`, and the terminal action through `draiver done`
+// — the same verbs a human runs at a terminal, so there is a single write path.
+// It passes the server's resolved data root, actor, and target attempt as
+// explicit flags (env-independent), and ends with "--" so a body beginning with
+// "-" is never parsed as a flag. On failure it surfaces the CLI's combined
+// output for a legible error.
+func (s *Server) runDraiverLog(typ, id, att, body string) error {
+	exe := draiverBinOverride
+	if exe == "" {
+		var err error
+		if exe, err = os.Executable(); err != nil {
+			return fmt.Errorf("locate draiver binary: %w", err)
+		}
+	}
+	var args []string
+	if typ == "done" {
+		args = []string{"done"}
+	} else {
+		args = []string{"log", "--type", typ}
+	}
+	args = append(args, "--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id, body)
+	cmd := exec.Command(exe, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // stateLabels overrides how a control state is shown in the human-facing web UI.
@@ -113,10 +175,155 @@ func canEnable(a project.Attempt) bool {
 	return a.State == project.Running && !a.Enabled
 }
 
+// linkVM is a hyperlink surfaced on a served page — a board-card review action or
+// a detail-timeline chip. Rel is the opaque, forge-neutral label (pr, mr, diff,
+// ci, …) used only to pick a primary and to label a chip; Href is the URL, always
+// re-checked against the render-time scheme floor before it becomes a live href.
+type linkVM struct {
+	Rel  string
+	Href string
+}
+
+// allowedHREFScheme reports whether raw may be emitted as a live href on the
+// board: an absolute http/https URL. This is re-applied at render for every link
+// the board serves, independent of the append-time event.ValidateLink check —
+// defense in depth, so a link that reached disk by any path (an older event, a
+// hand-edited file) still cannot produce a javascript:/data:/file: href. The
+// board never fetches or previews raw; this is a scheme test, not an integration.
+func allowedHREFScheme(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return true
+	}
+	return false
+}
+
+// primaryLink picks the review link to feature on a card: the first whose rel is
+// "pr" or "mr" (a merge/pull request outranks a bare diff/ci link), else the
+// first link — considering only links that pass the render-time scheme floor. It
+// returns nil when no link survives.
+func primaryLink(links []event.Link) *linkVM {
+	var first *linkVM
+	for _, l := range links {
+		if !allowedHREFScheme(l.Href) {
+			continue
+		}
+		vm := linkVM{Rel: l.Rel, Href: l.Href}
+		if first == nil {
+			first = &vm
+		}
+		switch strings.ToLower(l.Rel) {
+		case "pr", "mr":
+			return &vm
+		}
+	}
+	return first
+}
+
+// reviewLink returns the primary review link to surface as a board card action,
+// or nil when there is none. It is scoped to the Review column: only a Review
+// attempt's latest `review` event is consulted, so a reopened (Running) or
+// blocked (Stuck) attempt never shows a stale PR button. A direct-merge flow with
+// no PR carries no link and the card degrades to no action.
+func reviewLink(a project.Attempt) *linkVM {
+	if a.State != project.Review {
+		return nil
+	}
+	for i := len(a.Events) - 1; i >= 0; i-- {
+		if a.Events[i].Type == "review" {
+			return primaryLink(a.Events[i].Links)
+		}
+	}
+	return nil
+}
+
+// safeLinks maps an event's links to chip view models, dropping any whose scheme
+// fails the render-time floor. The chips render as live hrefs, so the floor is
+// re-applied here (defense in depth) rather than trusting the stored value.
+func safeLinks(links []event.Link) []linkVM {
+	var out []linkVM
+	for _, l := range links {
+		if allowedHREFScheme(l.Href) {
+			out = append(out, linkVM{Rel: l.Rel, Href: l.Href})
+		}
+	}
+	return out
+}
+
+// linkPolicy is a goldmark AST transformer enforcing the render-time scheme floor
+// on markdown body hyperlinks. goldmark's default already blanks javascript:/
+// vbscript:/file: and non-image data: destinations, but it admits data:image/
+// {png,gif,jpeg,webp}; this closes that carve-out so a Link/Image destination is
+// http/https (or a scheme-less relative URL) only, and a disallowed autolink is
+// demoted to plain text. It is defense in depth, independent of the append-time
+// event.ValidateLink check.
+type linkPolicy struct{}
+
+func (linkPolicy) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	src := reader.Source()
+	var demote []*ast.AutoLink
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch v := n.(type) {
+		case *ast.Link:
+			if !bodyDestOK(v.Destination) {
+				v.Destination = nil
+			}
+		case *ast.Image:
+			if !bodyDestOK(v.Destination) {
+				v.Destination = nil
+			}
+		case *ast.AutoLink:
+			if !bodyDestOK(v.URL(src)) {
+				demote = append(demote, v)
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	// An autolink has no settable destination, so a disallowed one is replaced by
+	// its literal label as escaped text — no live href survives. Done after the
+	// walk so the tree is not mutated mid-traversal.
+	for _, a := range demote {
+		if p := a.Parent(); p != nil {
+			p.ReplaceChild(p, a, ast.NewString(a.Label(src)))
+		}
+	}
+}
+
+// bodyDestOK reports whether a markdown link/image/autolink destination may render
+// as a live href: a scheme-less relative URL (nothing to abuse) or an http/https
+// absolute URL. Everything else — javascript:, data:, vbscript:, file: — is
+// blanked or demoted by linkPolicy.
+func bodyDestOK(raw []byte) bool {
+	u, err := url.Parse(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "", "http", "https":
+		return true
+	}
+	return false
+}
+
 // New builds a Server over the given data root. Options configure the write path
-// (see WithActor); with none it is the read-only board with a human:webui actor.
+// (see WithActor); with none it is a board with the human:webui default actor.
 func New(root store.Root, opts ...Option) (*Server, error) {
-	s := &Server{root: root, md: goldmark.New(), alive: pidAlive, actor: "human:webui"}
+	// goldmark's default already blanks javascript:/vbscript:/file: and non-image
+	// data: link hrefs, but it admits data:image/{png,gif,jpeg,webp}. linkPolicy
+	// closes that carve-out so body links/images/autolinks are http/https (or
+	// relative) only — the render-time scheme floor, independent of the
+	// append-time event.ValidateLink check (defense in depth).
+	md := goldmark.New(goldmark.WithParserOptions(
+		parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
+	))
+	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui"}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -126,6 +333,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"badge":       func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
 			"cardHref":    cardHref,
 			"canEnable":   canEnable,
+			"reviewLink":  reviewLink,
 			"sessionDot":  s.sessionDot,
 			"paletteVars": paletteVars,
 		}).
@@ -147,8 +355,9 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum))
 }
 
-// Handler returns the route mux. Every route is a GET but one: the board's single
-// write, POST .../enable, opts an attempt into daemon supervision.
+// Handler returns the route mux. Every route is a GET but two writes: POST
+// .../log appends a composed log event, and POST .../enable opts an attempt into
+// daemon supervision.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -157,6 +366,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
@@ -249,6 +459,7 @@ type eventVM struct {
 	BodyHTML   template.HTML
 	Refs       []int
 	Artefacts  []string
+	Links      []linkVM
 	IsEsc      bool
 	Resolved   bool
 	ResolvedBy int
@@ -392,6 +603,7 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 			BodyHTML:  s.toHTML(e.Body),
 			Refs:      e.Refs,
 			Artefacts: e.Artefacts,
+			Links:     safeLinks(e.Links),
 		}
 		if e.Type == "escalation" {
 			ev.IsEsc = true
@@ -438,8 +650,8 @@ func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "attempt-live", vm); err != nil {
+	live, err := s.executeLive(vm)
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -448,7 +660,76 @@ func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
 		// 286 tells htmx to cancel the polling trigger on a terminal attempt.
 		w.WriteHeader(286)
 	}
-	buf.WriteTo(w)
+	w.Write(live)
+}
+
+// executeLive renders the attempt-live fragment (the log <ol> plus the OOB state
+// badge and log count) for one attempt. It is shared by the live poll and the
+// log-append POST so both update every live region from one response body.
+func (s *Server) executeLive(vm detailVM) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "attempt-live", vm); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// handleLogAppend appends a human-composed typed event to an attempt (POST
+// /ticket/{id}/{attempt}/log) and returns the re-rendered live fragment, so the
+// new entry, the state badge, and the log count all update from one swap. It is
+// the webui's single write path: a Decision reopens a Review attempt to Running
+// and a Done closes it (both via Derive on the appended lifecycle event), while
+// note/gotcha/decision on any other attempt just record context.
+func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	typ := r.FormValue("type")
+	if !composeTypes[typ] {
+		http.Error(w, "draiver: unsupported log type "+strconv.Quote(typ), http.StatusBadRequest)
+		return
+	}
+	// The two Review actions (decision/done) may fire without a typed reason, so
+	// they fall back to a sensible default body; a plain note/gotcha with no body
+	// is a mistake and is rejected.
+	body := strings.TrimSpace(r.FormValue("body"))
+	if body == "" {
+		switch typ {
+		case "done":
+			body = "Ticket closed."
+		case "decision":
+			body = "Reopened to Running."
+		default:
+			http.Error(w, "draiver: a "+typ+" needs a message", http.StatusBadRequest)
+			return
+		}
+	}
+	if err := s.runDraiverLog(typ, id, att, body); err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Always 200: the badge flips in-place via the OOB swap. A Done attempt's log
+	// region keeps its poll attribute and self-cancels on its next /live poll (the
+	// 286 path), so we do not need to signal termination from this response.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(live)
 }
 
 // handleEnable is the board's one write (POST /ticket/{id}/{attempt}/enable): it
@@ -499,13 +780,6 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// dropping the button and recomputing the session-dot off the fresh state.
 	s.render(w, "card", a)
 }
-
-// draiverBinOverride points the enable shell-out at a specific draiver binary. It
-// is empty in production, where runDraiverEnable resolves the running executable
-// via os.Executable() (under `draiver webui`, that is draiver itself). Tests set
-// it to a freshly built binary, since under `go test` os.Executable() is the test
-// binary, not draiver.
-var draiverBinOverride string
 
 // runDraiverEnable opts an attempt into supervision by invoking the draiver CLI
 // rather than reimplementing the append in the web layer: `draiver ctl enable`
@@ -606,8 +880,10 @@ func agoPlural(n int, unit string) string {
 	return strconv.Itoa(n) + " " + unit + "s ago"
 }
 
-// toHTML renders trusted local markdown to HTML. goldmark's default config does
-// not pass through raw HTML, so this is safe to embed.
+// toHTML renders event/spec markdown to HTML. goldmark's default config does not
+// pass through raw HTML, and linkPolicy (wired in New) blanks any link/image/
+// autolink whose scheme is outside the http/https floor, so the result is safe to
+// embed even though bodies are agent-supplied, attacker-influenceable content.
 func (s *Server) toHTML(md string) template.HTML {
 	var buf bytes.Buffer
 	if err := s.md.Convert([]byte(md), &buf); err != nil {

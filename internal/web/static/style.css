@@ -47,6 +47,10 @@ body {
 .col-stuck { border-color: var(--alert); }
 .col-stuck h2 { color: var(--alert); }
 
+/* The card tile and its optional external "Review changes" action are siblings
+   inside .card-wrap (an <a> cannot nest in the tile's <a>); the action is
+   positioned over the tile's top-right corner and sits above it (z-index) so its
+   click opens the PR while the rest of the tile follows cardHref. */
 .card-wrap { position: relative; }
 .card {
   display: flex; flex-direction: column; gap: 2px;
@@ -70,6 +74,13 @@ body {
 }
 .enable-btn:hover { background: var(--dot-running); color: var(--panel-2); }
 .enable-btn:focus-visible { outline: 2px solid var(--dot-running); outline-offset: 2px; }
+.card-review {
+  position: absolute; bottom: 8px; right: 10px; z-index: 1;
+  font-size: 11px; text-decoration: none; white-space: nowrap;
+  color: var(--review); background: color-mix(in srgb, var(--review) 14%, var(--panel));
+  border: 1px solid var(--review); border-radius: 999px; padding: 1px 9px;
+}
+.card-review:hover { background: color-mix(in srgb, var(--review) 26%, var(--panel)); }
 .card .tid { font-weight: 600; font-size: 13px; }
 .card .att { color: var(--muted); font-weight: 500; }
 .card .title { color: var(--muted); font-size: 13px; }
@@ -108,6 +119,20 @@ body {
 .log-head { display: flex; align-items: baseline; gap: 12px; }
 .order-toggle { margin-left: auto; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
 .order-toggle:hover { border-color: var(--accent); }
+/* Compose box: append a typed entry from the detail page. */
+.log-compose { margin: 12px 0; display: flex; flex-direction: column; gap: 8px; }
+.compose-row { display: flex; gap: 8px; align-items: center; }
+.compose-type { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; }
+.compose-submit, .action-decision, .action-done { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.compose-submit:hover, .action-decision:hover { border-color: var(--accent); color: var(--accent); }
+.compose-body { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 14px; resize: vertical; }
+.compose-body:focus, .compose-type:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Review actions: the two state-changing verbs, shown only on a Review attempt. */
+.review-actions { display: flex; gap: 8px; margin: 0 0 12px; }
+.action-decision { border-color: var(--running); color: var(--running); }
+.action-done { border-color: var(--done); color: var(--done); }
+.action-done:hover { background: color-mix(in srgb, var(--done) 18%, transparent); }
+
 .timeline { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
 /* The DOM is always oldest-first; the toggle flips only the visual order (stored
    on .log-region, which survives htmx innerHTML swaps) so polling never resets
@@ -135,3 +160,12 @@ body {
 .resolved { color: var(--done); }
 .unresolved { color: var(--alert); font-weight: 600; }
 .refs, .artefacts { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+/* Review-link chips: an event's forge-neutral links, labelled by rel, rendered
+   below the body. Each opens in a new tab; the scheme is re-checked at render
+   (see safeLinks) so only http/https links reach the DOM. */
+.event-links { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.link-chip {
+  font-size: 12px; text-decoration: none; color: var(--accent);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
+}
+.link-chip:hover { border-color: var(--accent); }

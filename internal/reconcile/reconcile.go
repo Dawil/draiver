@@ -45,14 +45,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
-	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/limit"
@@ -65,10 +64,6 @@ import (
 	"github.com/Dawil/draiver/internal/watch"
 	"github.com/Dawil/draiver/internal/worktree"
 )
-
-// defaultAdapter is the adapter name assumed for an attempt whose attempt.md
-// records none — Claude Code is the first and reference adapter (Tier 0).
-const defaultAdapter = "claude-code"
 
 // defaultResumeConfirm is how long bringUp waits for a Resumed session to come
 // online before falling through to a fresh spawn. Long enough that a live resume
@@ -442,162 +437,6 @@ func (r *Reconciler) stateOf(key worktree.Key) project.State {
 	return a.State
 }
 
-// wired is a brought-up live session with the ingest machinery bound to its
-// stream: the handle owning the process, the session store, and the two gates
-// plus the watcher each of its events is dispatched through. admit obtains one
-// from bringUp — the single place the session and its watch/gate/protocol
-// pipeline are wired. Since the imperative verbs became daemon handoffs
-// (drvctl-016), admit is the only caller, so the client path cannot drift from
-// it: `start`/`restart` write a marker and the daemon does the bring-up.
-type wired struct {
-	handle    *manage.Handle
-	sess      *session.Store
-	protoGate *protocol.Gate
-	permGate  *gate.Gate
-	limitGate *limit.Gate
-	watcher   *watch.Watcher
-	repo      string // resolved repo path, recorded on the run for retire
-
-	// spawned reports whether bringUp started a fresh session (true) rather than
-	// resuming the recorded one (false). It drives the brief-on-reset coupling:
-	// the cold-start brief is (re)injected iff the session layer (L0) was
-	// discarded — i.e. a fresh spawn — so a resume continues its conversation
-	// without being force-fed a brief (drvctl-016).
-	spawned bool
-}
-
-// bringUp opens an attempt's session store, binds a manage.Handle, brings the
-// session up via the self-heal cascade (below), snapshots the protocol-gate
-// baseline, and constructs the permission gate and watcher — everything needed to
-// consume the live stream, but not yet consuming it. On any failure it unwinds
-// cleanly (reap + close) so a failed bring-up leaves nothing half-live. The
-// caller (admit) injects the cold-start brief once it is ready to consume the
-// stream — but only when bringUp spawned fresh (wired.spawned), the
-// brief-on-reset coupling.
-//
-// The cascade climbs from the highest surviving layer: if a session id is on
-// record it Resumes and confirms the resume came online; a recorded id that can
-// no longer be resumed launches a process that dies on arrival and never comes
-// online, so bringUp reaps it and falls through to a fresh Spawn on the same
-// worktree rather than looping on the dead id forever (drvctl-016). Spawn itself
-// creates the worktree if it is gone, so the worktree and attempt-log rungs of
-// the cascade fall out of Spawn's own idempotence.
-func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, error) {
-	adapterName := a.Tool
-	if adapterName == "" {
-		adapterName = defaultAdapter
-	}
-	newAdapter, err := r.opt.Adapters(adapterName)
-	if err != nil {
-		return nil, fmt.Errorf("resolve adapter %q: %w", adapterName, err)
-	}
-
-	// Resolve this attempt's own repo and get-or-create its Manager. A missing or
-	// non-git repo fails *this* attempt's bring-up with an actionable error naming
-	// the ticket and path; admit logs it and the tick moves on to other attempts.
-	repo, err := r.repoFor(a)
-	if err != nil {
-		return nil, err
-	}
-	wm, err := r.managerFor(repo)
-	if err != nil {
-		return nil, fmt.Errorf("attempt %s/%s repo %q is missing or not a git working tree: %w", a.Ticket, a.ID, repo, err)
-	}
-
-	sess, err := session.Open(r.opt.Root, a.Ticket, a.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	handle, err := manage.New(sess, wm, newAdapter, manage.Config{
-		Ticket:  a.Ticket,
-		Attempt: a.ID,
-		Adapter: adapterName,
-		Model:   a.Model,
-		Spec:    r.opt.BaseSpec,
-	})
-	if err != nil {
-		_ = sess.Close()
-		return nil, err
-	}
-
-	// A recorded session id means this attempt already ran: reuse the cattle
-	// handle and Resume rather than Spawn a second, unrelated session. But a
-	// recorded id is not proof the id is still resumable, so a resume is trusted
-	// only once it comes online; otherwise the cascade falls through to a fresh
-	// spawn on the same worktree (the self-heal that retires "stale id resumed
-	// forever").
-	resuming := false
-	if id, err := sess.ReadIdentity(); err == nil && id.SessionID != "" {
-		resuming = true
-	}
-	spawned := false
-	if resuming {
-		if err := handle.Resume(ctx); err != nil {
-			// The recorded id could not even be launched; fall through to a fresh
-			// spawn rather than failing the whole bring-up.
-			r.opt.Logf("reconcile: resume %s/%s failed to launch, spawning fresh: %v", a.Ticket, a.ID, err)
-			resuming = false
-		} else if confirmed, cerr := r.confirmOnline(ctx, handle); cerr != nil {
-			// ctx was cancelled while confirming; unwind cleanly.
-			_ = handle.Kill()
-			_ = sess.Close()
-			return nil, cerr
-		} else if !confirmed {
-			// Process started but never came online — an unresumable id. Reap it and
-			// fall through; the following Spawn overwrites the dead id with a fresh one.
-			r.opt.Logf("reconcile: resume %s/%s never came online, spawning fresh on the same worktree", a.Ticket, a.ID)
-			_ = handle.Kill()
-			resuming = false
-		}
-	}
-	if !resuming {
-		if err := handle.Spawn(ctx); err != nil {
-			_ = sess.Close()
-			return nil, err
-		}
-		spawned = true
-	}
-
-	// The protocol gate's baseline is the log tail *at session start*, so a
-	// justifying decision/gotcha must be logged during this session. Snapshot it
-	// now, right after the session came up and before it does any work.
-	protoGate, err := protocol.New(r.opt.Root, a.Ticket, a.ID, r.opt.ProtoPolicy, handle)
-	if err != nil {
-		_ = handle.Kill()
-		_ = sess.Close()
-		return nil, fmt.Errorf("protocol gate: %w", err)
-	}
-	permGate := gate.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.PermPolicy, handle, handle.Kill)
-	limitGate := limit.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.ContextLimit, handle.Kill)
-	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
-
-	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, watcher: watcher, repo: repo, spawned: spawned}, nil
-}
-
-// confirmOnline waits for a just-Resumed session to come online — to emit its
-// first system/init frame — bounding the wait at ResumeConfirm. It returns
-// (true, nil) once the session signals online, (false, nil) if the window
-// elapses first (the caller reaps and falls through to a fresh spawn), or a
-// non-nil error if ctx is cancelled while waiting (the caller aborts the
-// bring-up). An adapter that cannot signal online (does not implement
-// agent.Onliner, so Handle.Online is nil) is assumed online, preserving the
-// pre-cascade behaviour for adapters without the capability.
-func (r *Reconciler) confirmOnline(ctx context.Context, handle *manage.Handle) (bool, error) {
-	online := handle.Online()
-	if online == nil {
-		return true, nil
-	}
-	select {
-	case <-online:
-		return true, nil
-	case <-time.After(r.opt.ResumeConfirm):
-		return false, nil
-	case <-ctx.Done():
-		return false, ctx.Err()
-	}
-}
-
 // admit brings up a session for a desired attempt and attaches the ingest
 // goroutine to its live stream, then injects the cold-start brief — the daemon's
 // background path. bringUp does the wiring (and its clean unwind on failure); a
@@ -618,19 +457,11 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 	r.runs[key] = rn
 	r.mu.Unlock()
 
-	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.watcher, stream)
+	go r.ingest(ictx, key, rn, w.protoGate, w.permGate, w.limitGate, w.completeGate, w.watcher, stream)
 
-	// Inject the cold-start brief last, so the stream is already being consumed
-	// when the agent starts producing — but only on a fresh spawn (L0 discarded).
-	// A resume continues its own conversation and must not be force-fed a brief
-	// (the brief-on-reset coupling, drvctl-016). A brief that fails to
-	// build/deliver does not tear the live session down — it is logged and the
-	// session works on.
-	if w.spawned {
-		if err := protocol.InjectBrief(ctx, r.opt.Root, a.Ticket, a.ID, w.handle); err != nil {
-			r.opt.Logf("reconcile: inject brief %s/%s: %v", a.Ticket, a.ID, err)
-		}
-	}
+	// Drive the session last, so the stream is already being consumed when the
+	// agent starts producing (bringUp-vs-resume brief decision lives in drive).
+	r.drive(ctx, a, w)
 	return nil
 }
 
@@ -683,7 +514,7 @@ func (r *Reconciler) escalateNoRepo(a project.Attempt) {
 // retire/drain do — so a session that exits on its own leaves a spent entry that
 // keeps the next tick from re-admitting it (Tier 0 has no respawn ceiling, so
 // re-admitting a crashed session would be an unbounded loop).
-func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, stream <-chan agent.Event) {
+func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, stream <-chan agent.Event) {
 	defer close(rn.done)
 	for {
 		select {
@@ -693,7 +524,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 			if !ok {
 				return
 			}
-			r.dispatch(ctx, key, pg, permGate, lg, w, ev)
+			r.dispatch(ctx, key, pg, permGate, lg, cg, w, ev)
 		}
 	}
 }
@@ -705,7 +536,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 // answering; a cleared request falls through to the permission gate, which allows
 // it or escalates-and-halts. Ordering protocol → permission is what keeps the two
 // from double-answering the agent.
-func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, w *watch.Watcher, ev agent.Event) {
+func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, ev agent.Event) {
 	if _, err := w.Process(ev); err != nil {
 		r.opt.Logf("reconcile: watch %s/%s: %v", key.Ticket, key.Attempt, err)
 	}
@@ -719,6 +550,21 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 	} else if out == limit.Stopped {
 		r.opt.Logf("reconcile: context auto-stop %s/%s at %d tokens", key.Ticket, key.Attempt, ev.Usage.ContextTokens)
 		return
+	}
+
+	// Turn-end guard: a session that ends a success turn without having claimed
+	// review or filed an escalation is nudged once, then escalated-and-halted to a
+	// human — so it can never silently stop at "done" and strand the attempt in
+	// Running + enabled (drvctl-022). watch.Process above has already promoted any
+	// review/escalate the agent ran this turn, so the gate reads a log that reflects
+	// a genuine hand-off. An Escalated outcome reaped the session; nothing more to do.
+	if out, err := cg.Consider(ctx, ev); err != nil {
+		r.opt.Logf("reconcile: completion gate %s/%s: %v", key.Ticket, key.Attempt, err)
+	} else if out == completion.Escalated {
+		r.opt.Logf("reconcile: completion auto-stop %s/%s: success turn with no review/escalation filed", key.Ticket, key.Attempt)
+		return
+	} else if out == completion.Nudged {
+		r.opt.Logf("reconcile: completion nudge %s/%s: reminded to claim review or escalate", key.Ticket, key.Attempt)
 	}
 
 	if ev.Kind != agent.EventPermission {
@@ -1087,496 +933,4 @@ func (r *Reconciler) Snapshot() ([]Status, error) {
 		out = append(out, s)
 	}
 	return out, nil
-}
-
-// --- client verbs -----------------------------------------------------------
-//
-// Start/Stop/Restart are the imperative overrides the `draiver ctl` client
-// exposes — the "systemctl" verbs to the reconcile loop's "PID 1". Start and
-// Restart are control-plane actions: they do not bring a session up themselves
-// (an unsupervised orphan that dies with the invoking shell), they hand the
-// attempt off to a running `ctl up` by writing the transient desired-marker the
-// loop reconciles — so the self-heal cascade and brief-on-reset coupling live in
-// the one daemon-shared bringUp and the client path cannot drift from it
-// (drvctl-016). Stop is a direct reap (it only needs the recorded pid, and
-// reaping a process wants no supervisor) that also clears the marker, so a
-// stopped attempt leaves the imperative fleet and stays stopped.
-
-// ErrNoController is returned by the imperative handoff verbs when no `ctl up` is
-// running to hand the attempt off to — the "requires PID 1" gate that keeps a
-// backgrounded start/restart from spawning an unsupervised orphan (drvctl-016).
-var ErrNoController = errors.New("no running `ctl up` (start the supervisor with `ctl up` first)")
-
-// requireController returns the live controller or ErrNoController — the
-// require-pid-1 gate shared by the handoff verbs (start/restart). It refuses
-// rather than let a verb act with no supervisor to own the resulting session.
-func (r *Reconciler) requireController() (Controller, error) {
-	ctrl, ok := r.liveController()
-	if !ok {
-		return Controller{}, ErrNoController
-	}
-	return ctrl, nil
-}
-
-// handOff hands an attempt to the live controller so the daemon's next tick
-// brings it up (or back up) through the shared bringUp cascade. For a not-yet-
-// desired (disabled) attempt it writes the transient desired-marker stamped with
-// the controller's boot nonce — the stamp is what makes the handoff transient (a
-// restarted daemon has a new nonce and sweeps it). An already-enabled attempt is
-// left unmarked: the durable enable bit already makes it desired, and because
-// desired() short-circuits Enabled before reading the marker, a redundant marker
-// would outlive a later `disable` and leave the attempt stuck desired. Such a
-// target is re-admitted on the enable bit alone (reclaimSpent), so no marker is
-// needed — decision #29 (drvctl-016).
-func (r *Reconciler) handOff(ctrl Controller, ticket, attempt string) error {
-	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
-	if err != nil {
-		return err
-	}
-	if a.Enabled {
-		return nil
-	}
-	return writeDesiredMarker(r.opt.Root, ticket, attempt, desiredMarker{Nonce: ctrl.Nonce, Stamp: r.opt.Now()})
-}
-
-// StartResult reports how an imperative Start was handed off, so the client can
-// print a truthful message: which supervisor now owns the attempt, and — for
-// start --new-attempt — the forked id it created.
-type StartResult struct {
-	// ControllerPID is the pid of the running `ctl up` the attempt was handed to.
-	ControllerPID int
-	// Attempt is the attempt actually handed off: the target, or the fork's new id
-	// when Forked.
-	Attempt string
-	// Forked and From are set by start --new-attempt — a new attempt was created
-	// from From and handed off, leaving the parent as it was (drvctl-016).
-	Forked bool
-	From   string
-}
-
-// Start hands one attempt off to a running `ctl up` to bring up in the
-// background, rather than driving a session itself. It requires a live
-// controller (ErrNoController otherwise) and writes a transient desired-marker
-// stamped with that controller's nonce; the daemon's next tick unions the
-// marker into its desired set and admits the attempt through the same cascade
-// (resume the recorded session, else spawn fresh) and brief-on-reset coupling
-// its enabled fleet uses. The marker is transient: it is swept if the daemon
-// restarts (new nonce), so an imperative start dies with its supervisor —
-// distinct from `enable`, the durable, restart-surviving opt-in. Streaming is
-// no longer part of Start; watch the handed-off session with `ctl logs -f`.
-func (r *Reconciler) Start(ticket, attempt string) (StartResult, error) {
-	if _, err := project.LoadAttempt(r.opt.Root, ticket, attempt); err != nil {
-		return StartResult{}, err
-	}
-	ctrl, err := r.requireController()
-	if err != nil {
-		return StartResult{}, err
-	}
-	if err := r.handOff(ctrl, ticket, attempt); err != nil {
-		return StartResult{}, err
-	}
-	return StartResult{ControllerPID: ctrl.PID, Attempt: attempt}, nil
-}
-
-// StartNewAttempt forks a new attempt off the target and hands the *fork* to the
-// daemon, leaving the parent exactly as it was — a parallel branch, not a reset
-// (decision #23). Where `restart --new-attempt` abandons the current path (it
-// reaps and parks the parent), `start --new-attempt` opens a second path
-// alongside it: the parent keeps running if it was, the child starts fresh. It
-// requires pid 1 before forking, so a fork is never created with no supervisor
-// to run it.
-func (r *Reconciler) StartNewAttempt(ticket, parent string) (StartResult, error) {
-	if _, err := project.LoadAttempt(r.opt.Root, ticket, parent); err != nil {
-		return StartResult{}, err
-	}
-	ctrl, err := r.requireController()
-	if err != nil {
-		return StartResult{}, err
-	}
-	newID, err := r.forkAttempt(ticket, parent)
-	if err != nil {
-		return StartResult{}, err
-	}
-	r.recordStartFork(ticket, parent, newID)
-	if err := r.handOff(ctrl, ticket, newID); err != nil {
-		return StartResult{}, err
-	}
-	return StartResult{ControllerPID: ctrl.PID, Attempt: newID, Forked: true, From: parent}, nil
-}
-
-// EnableResult reports an `enable --now` handoff: the attempt is now durably
-// enabled and the running supervisor will bring it up.
-type EnableResult struct {
-	// ControllerPID is the pid of the `ctl up` that will bring the attempt up.
-	ControllerPID int
-	// Seq is the enable event's sequence number in the attempt log.
-	Seq int
-}
-
-// EnableNow is the imperative half of `enable --now`: it couples the durable
-// enable opt-in with an immediate supervised start. Like start/restart it
-// requires a live `ctl up` (ErrNoController otherwise), checked UP FRONT so a
-// no-daemon invocation persists nothing — the caller can fall back to plain
-// `enable` to record the preference for a later daemon, or start one with
-// `ctl up`. With a controller present it appends the durable `enable` event;
-// the enable bit alone makes the attempt desired, so the daemon's next tick
-// brings it up through the same cascade the enabled fleet uses. No transient
-// marker is written: enable is the durable opt-in, and a redundant marker on an
-// enabled attempt would outlive a later `disable` (handOff skips it for the same
-// reason — decision #29). This makes enable --now the PERSISTENT counterpart of
-// `start`: start is transient (swept when the daemon restarts), enable --now
-// survives and drives auto-restart.
-func (r *Reconciler) EnableNow(ticket, attempt string) (EnableResult, error) {
-	if _, err := project.LoadAttempt(r.opt.Root, ticket, attempt); err != nil {
-		return EnableResult{}, err
-	}
-	ctrl, err := r.requireController()
-	if err != nil {
-		return EnableResult{}, err
-	}
-	// Same body as plain `enable` so the durable log is uniform regardless of
-	// which path recorded it — the --now is a CLI convenience, not a durable
-	// distinction.
-	e, err := ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
-		Type:  "enable",
-		Actor: r.opt.Actor,
-		Body:  fmt.Sprintf("Supervision enabled for %s/%s.", ticket, attempt),
-	})
-	if err != nil {
-		return EnableResult{}, err
-	}
-	return EnableResult{ControllerPID: ctrl.PID, Seq: e.Seq}, nil
-}
-
-// StopResult reports what Stop did, so the client can print a truthful message.
-type StopResult struct {
-	// PID is the process Stop found on record (0 if none / already cleared).
-	PID int
-	// Signaled is true when a live process was told to stop.
-	Signaled bool
-	// AlreadyStopped is true when there was no live process to signal.
-	AlreadyStopped bool
-}
-
-// reap terminates an attempt's recorded session process and clears the now-stale
-// pid from session.json, keeping the session id, worktree, and log intact — the
-// cattle handle survives for a later Resume. It is the teardown shared by the
-// public Stop verb and restart's flush, and deliberately does NOT touch the
-// desired-marker: Stop removes it to leave the fleet, while restart rewrites it
-// to re-request the bring-up. It works on any recorded session regardless of who
-// started it (the daemon or a re-adopted foreign process), because all it needs
-// is the pid on disk. Reaping an attempt with no session, or one already
-// stopped, is not an error: the goal state (not running) already holds.
-func (r *Reconciler) reap(ticket, attempt string) (StopResult, error) {
-	sess, err := session.Open(r.opt.Root, ticket, attempt)
-	if err != nil {
-		return StopResult{}, err
-	}
-	defer sess.Close()
-
-	id, err := sess.ReadIdentity()
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return StopResult{AlreadyStopped: true}, nil // never had a session
-		}
-		return StopResult{}, err
-	}
-
-	res := StopResult{PID: id.PID}
-	if id.PID != 0 && r.opt.Proc.Alive(id.PID) {
-		if err := r.opt.Proc.Terminate(id.PID); err != nil {
-			return res, fmt.Errorf("reconcile: stop %s/%s (pid %d): %w", ticket, attempt, id.PID, err)
-		}
-		res.Signaled = true
-	} else {
-		res.AlreadyStopped = true
-	}
-
-	if id.PID != 0 {
-		id.PID = 0
-		if err := sess.WriteIdentity(id); err != nil {
-			return res, fmt.Errorf("reconcile: clear pid %s/%s: %w", ticket, attempt, err)
-		}
-	}
-	return res, nil
-}
-
-// Stop reaps an attempt's recorded session (see reap) and then clears any
-// desired-marker it carried, so the attempt leaves the imperative fleet and a
-// stopped attempt stays stopped — the symmetric counterpart of `start` writing
-// the marker. Without this, a still-desired attempt (enabled, or imperatively
-// started) would be re-admitted by the daemon on the next tick. Stopping an
-// attempt with no session, or one already stopped, is not an error: the goal
-// state (not running) already holds.
-func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
-	res, err := r.reap(ticket, attempt)
-	if err != nil {
-		return res, err
-	}
-	if err := removeDesiredMarker(r.opt.Root, ticket, attempt); err != nil {
-		return res, fmt.Errorf("reconcile: clear desired marker %s/%s: %w", ticket, attempt, err)
-	}
-	return res, nil
-}
-
-// FlushLevel selects how deep restart's teardown reaps before the start cascade
-// climbs back — a point on the degree axis of drvctl-016's state stack. The
-// levels are ordinal and cumulative: a deeper level implies every shallower
-// flush. Each step discards one more volatile layer stacked on the durable ticket
-// floor (L3):
-//
-//	FlushNone      reap the process only; the cascade Resumes the same session (L0 kept).
-//	FlushSession   + discard the session conversation (L0); the cascade spawns a
-//	               fresh session on the surviving worktree, cold-started from the brief.
-//	FlushWorktree  + discard the worktree checkout and branch (L1); the cascade
-//	               rebuilds the worktree from HEAD before the fresh spawn.
-//	FlushAttempt   + discard the attempt (L2) — this FORKS a new attempt (new id,
-//	               `from` provenance) and climbs into it; the prior attempt's log is
-//	               preserved untouched as an immutable record.
-type FlushLevel int
-
-const (
-	FlushNone FlushLevel = iota
-	FlushSession
-	FlushWorktree
-	FlushAttempt
-)
-
-// RestartResult reports what a Restart flushed, which attempt the daemon will
-// bring back up — the same attempt for an in-place restart, or the new fork's id
-// when the depth reached FlushAttempt — and which controller it was handed to.
-// The client renders it to report the plan (in particular a fork's new id and
-// the parked parent) up front.
-type RestartResult struct {
-	Level         FlushLevel
-	Ticket        string
-	Attempt       string // the attempt handed off (the fork's id for FlushAttempt)
-	Forked        bool   // true when FlushAttempt created a new attempt
-	From          string // the parent attempt id, set when Forked
-	ControllerPID int    // the `ctl up` the restart handed the attempt off to
-}
-
-// Restart reaps the current session, flushes volatile state to the chosen depth,
-// then hands the attempt off to a running `ctl up` to bring back up in the
-// background — the same imperative-transient handoff `start` uses (drvctl-016
-// Phase C2). It requires pid 1 (ErrNoController otherwise) and returns without
-// blocking on a session; watch the brought-up attempt with `ctl logs -f`.
-//
-// level selects how deep the teardown flushes before the daemon's start cascade
-// climbs back — the degree axis (see FlushLevel). FlushNone is the clean
-// "continue" the old hybrid restart failed to be: the cascade Resumes the same
-// session and does not re-brief. FlushAttempt is the one branch point where
-// restart stops mutating in place and forks a new attempt, parking the parent
-// (disable + marker sweep) so the daemon runs the fork and not both (decision
-// #23); the fork is what RestartResult.Forked/From report.
-//
-// The reap keeps the desired-marker (unlike the public Stop, which clears it);
-// the handoff below rewrites it. For an in-place restart that rewritten marker
-// is the re-admit signal the daemon honours over the spent, intentionally-
-// stopped run (see readmittable).
-func (r *Reconciler) Restart(ctx context.Context, ticket, attempt string, level FlushLevel) (RestartResult, error) {
-	ctrl, err := r.requireController()
-	if err != nil {
-		return RestartResult{}, err
-	}
-
-	// The shallowest teardown always happens: reap the running process, keeping the
-	// durable layers (and the marker) for the flush/cascade to act on.
-	if _, err := r.reap(ticket, attempt); err != nil {
-		return RestartResult{}, err
-	}
-
-	res := RestartResult{Level: level, Ticket: ticket, Attempt: attempt, ControllerPID: ctrl.PID}
-
-	switch {
-	case level >= FlushAttempt:
-		// Stop mutating in place and branch: fork a new attempt and climb into it.
-		newID, err := r.forkAttempt(ticket, attempt)
-		if err != nil {
-			return RestartResult{}, err
-		}
-		r.recordFork(ticket, attempt, newID)
-		// Park the parent so the daemon does not run it alongside the child
-		// (decision #23): restart --new-attempt abandons this path for a fresh one.
-		if err := r.parkAttempt(ticket, attempt); err != nil {
-			return RestartResult{}, err
-		}
-		res.Attempt, res.Forked, res.From = newID, true, attempt
-	case level >= FlushWorktree:
-		a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
-		if err != nil {
-			return RestartResult{}, err
-		}
-		if err := r.flushSession(ticket, attempt); err != nil {
-			return RestartResult{}, err
-		}
-		if err := r.flushWorktree(ctx, a); err != nil {
-			return RestartResult{}, err
-		}
-		r.recordFlush(ticket, attempt, FlushWorktree)
-	case level >= FlushSession:
-		if err := r.flushSession(ticket, attempt); err != nil {
-			return RestartResult{}, err
-		}
-		r.recordFlush(ticket, attempt, FlushSession)
-	}
-
-	// Hand the (possibly new) target off to the daemon.
-	if err := r.handOff(ctrl, res.Ticket, res.Attempt); err != nil {
-		return RestartResult{}, err
-	}
-	return res, nil
-}
-
-// parkAttempt takes an attempt out of both desired sets: it appends a `disable`
-// event (leaving the declarative fleet) and sweeps any imperative desired-marker.
-// It is how `restart --new-attempt` retires the parent after forking a child off
-// it, so the daemon runs the fork and not both (decision #23). The parent's log
-// is untouched (recordFork already noted the branch on it); the daemon's normal
-// disable→retire reaps its session and reclaims a clean worktree, and the session
-// id survives on disk (Kill keeps the cattle handle) so the parked attempt stays
-// resumable.
-func (r *Reconciler) parkAttempt(ticket, attempt string) error {
-	if _, err := ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
-		Type:  "disable",
-		Actor: r.opt.Actor,
-		Body:  fmt.Sprintf("Parked %s/%s on fork: restart --new-attempt forked a new attempt from it, so it leaves the supervised fleet. Its log is preserved as an immutable record of the path taken so far.", ticket, attempt),
-	}); err != nil {
-		return fmt.Errorf("reconcile: park %s/%s on fork: %w", ticket, attempt, err)
-	}
-	if err := removeDesiredMarker(r.opt.Root, ticket, attempt); err != nil {
-		return fmt.Errorf("reconcile: sweep marker for parked %s/%s: %w", ticket, attempt, err)
-	}
-	return nil
-}
-
-// flushSession discards an attempt's session conversation (L0): it clears the
-// recorded session id so the start cascade cannot Resume the old conversation and
-// instead Spawns a fresh session on the surviving worktree (which then cold-starts
-// from the brief). The pid was already cleared by the preceding Stop. An attempt
-// with no session on record — or one whose id is already empty — is a no-op: there
-// is no conversation to discard. Only the id is cleared; the meter and stream tee
-// carry across exactly as they do when the Phase-A cascade falls through a dead id
-// to a fresh spawn.
-func (r *Reconciler) flushSession(ticket, attempt string) error {
-	sess, err := session.Open(r.opt.Root, ticket, attempt)
-	if err != nil {
-		return err
-	}
-	defer sess.Close()
-
-	id, err := sess.ReadIdentity()
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil // no session on record — nothing to flush
-		}
-		return err
-	}
-	if id.SessionID == "" {
-		return nil
-	}
-	id.SessionID = ""
-	id.PID = 0
-	return sess.WriteIdentity(id)
-}
-
-// flushWorktree discards an attempt's worktree (L1): it force-removes the checkout
-// and deletes the per-attempt branch, so the start cascade rebuilds a fresh
-// worktree from HEAD rather than re-attaching to the surviving branch. The force
-// is deliberate — --new-worktree is an explicit request to discard the checkout,
-// uncommitted work and all. A worktree that was never created is tolerated as a
-// no-op by Remove.
-func (r *Reconciler) flushWorktree(ctx context.Context, a project.Attempt) error {
-	repo, err := r.repoFor(a)
-	if err != nil {
-		return err
-	}
-	wm, err := r.managerFor(repo)
-	if err != nil {
-		return fmt.Errorf("attempt %s/%s repo %q is missing or not a git working tree: %w", a.Ticket, a.ID, repo, err)
-	}
-	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
-	if err := wm.Remove(ctx, key, worktree.RemoveOptions{Force: true, DeleteBranch: true}); err != nil {
-		return fmt.Errorf("flush worktree %s/%s: %w", a.Ticket, a.ID, err)
-	}
-	return nil
-}
-
-// forkAttempt branches a new attempt off parent (the L2 flush): it inherits the
-// parent's tool/model/repo and records `from` provenance, leaving the parent's log
-// untouched as the immutable record of the path taken so far. It returns the new
-// attempt's id, which the start cascade then cold-starts fresh (no session, no
-// worktree — Spawn builds both). Repo is inherited so the fork targets the same
-// working tree, mirroring `attempt new --from`.
-func (r *Reconciler) forkAttempt(ticket, parent string) (string, error) {
-	pm, err := attempt.LoadMeta(r.opt.Root, ticket, parent)
-	if err != nil {
-		return "", err
-	}
-	m, err := attempt.Create(r.opt.Root, ticket, attempt.New{
-		Tool:  pm.Tool,
-		Model: pm.Model,
-		Repo:  pm.Repo,
-		Actor: r.opt.Actor,
-		From:  parent,
-	})
-	if err != nil {
-		return "", err
-	}
-	return m.ID, nil
-}
-
-// recordFork appends a note to the parent attempt's log recording that a restart
-// forked a new attempt from it, so the branch point — the one place restart lands
-// on a *different* attempt — is visible on the board and to a resumed agent.
-// Best-effort: a note that cannot be written is logged operationally, never
-// failing the restart.
-func (r *Reconciler) recordFork(ticket, parent, child string) {
-	body := fmt.Sprintf("Forked a new attempt %s/%s from this one (restart --new-attempt); this attempt's log is preserved as an immutable record of the path taken so far.", ticket, child)
-	if _, err := ticketlog.Append(r.opt.Root, ticket, parent, event.Event{
-		Type:  "note",
-		Actor: r.opt.Actor,
-		Body:  body,
-	}); err != nil {
-		r.opt.Logf("reconcile: record fork %s/%s: %v", ticket, parent, err)
-	}
-}
-
-// recordStartFork notes on the parent that `start --new-attempt` branched a new
-// attempt off it while leaving it running — the parallel-branch counterpart of
-// recordFork (which restart uses when it instead parks the parent). Best-effort,
-// like recordFork.
-func (r *Reconciler) recordStartFork(ticket, parent, child string) {
-	body := fmt.Sprintf("Branched a new attempt %s/%s from this one (start --new-attempt); this attempt is left running alongside the fork.", ticket, child)
-	if _, err := ticketlog.Append(r.opt.Root, ticket, parent, event.Event{
-		Type:  "note",
-		Actor: r.opt.Actor,
-		Body:  body,
-	}); err != nil {
-		r.opt.Logf("reconcile: record start-fork %s/%s: %v", ticket, parent, err)
-	}
-}
-
-// recordFlush appends a note recording an in-place restart's teardown depth, so a
-// destructive reset (especially --new-worktree, which discards uncommitted work) is
-// visible on the board rather than silent. FlushNone and FlushAttempt are recorded
-// elsewhere (a bare restart is an unremarkable continue; a fork is recorded on the
-// parent). Best-effort, like recordFork.
-func (r *Reconciler) recordFlush(ticket, attempt string, level FlushLevel) {
-	var what string
-	switch level {
-	case FlushSession:
-		what = "discarded the session conversation (restart --new-session); a fresh session will cold-start from the brief on the same worktree"
-	case FlushWorktree:
-		what = "discarded the session conversation and the worktree checkout+branch (restart --new-worktree); the worktree will be rebuilt from HEAD and the session cold-started from the brief"
-	default:
-		return
-	}
-	if _, err := ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
-		Type:  "note",
-		Actor: r.opt.Actor,
-		Body:  "Restart flush: " + what + ".",
-	}); err != nil {
-		r.opt.Logf("reconcile: record flush %s/%s: %v", ticket, attempt, err)
-	}
 }

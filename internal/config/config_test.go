@@ -91,6 +91,27 @@ func TestLoad_PermissionsOmittedIsNil(t *testing.T) {
 	}
 }
 
+func TestLoad_ReviewLinkHosts(t *testing.T) {
+	// Omitted → nil (empty = any host, the opt-in-off default).
+	c, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ReviewLinkHosts != nil {
+		t.Errorf("default ReviewLinkHosts = %v, want nil", c.ReviewLinkHosts)
+	}
+
+	// Set → used verbatim, alongside the existing Permissions field.
+	path := writeConfig(t, `{"review_link_hosts": ["bitbucket.mycorp.com", "github.com"]}`)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.ReviewLinkHosts, []string{"bitbucket.mycorp.com", "github.com"}) {
+		t.Errorf("ReviewLinkHosts = %v, want the two configured hosts", c.ReviewLinkHosts)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")

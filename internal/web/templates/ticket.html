@@ -44,6 +44,46 @@
         <h2>Log <span class="count" id="log-count">{{len .Events}}</span></h2>
         <button type="button" class="order-toggle" data-testid="log-order-toggle" aria-pressed="false">Newest first</button>
       </div>
+
+      {{/* Compose box: append a typed entry from the page. The type is a curated
+           allow-list (server-enforced) so a human can't hand-type a lifecycle
+           type that owns its own flow. The response is the attempt-live fragment,
+           swapped into the log region below; its OOB copies refresh the header
+           badge and the count, so one post updates every live region. */}}
+      <form class="log-compose" data-testid="log-compose"
+        hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
+        hx-target="[data-testid=log-region]" hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) this.reset()">
+        <div class="compose-row">
+          <select name="type" class="compose-type" data-testid="compose-type" aria-label="Entry type">
+            <option value="note">note</option>
+            <option value="gotcha">gotcha</option>
+            <option value="decision">decision</option>
+          </select>
+          <button type="submit" class="compose-submit" data-testid="compose-submit">Add entry</button>
+        </div>
+        <textarea name="body" class="compose-body" data-testid="compose-body" rows="2"
+          placeholder="Record a note, a gotcha, or a decision (markdown)…"></textarea>
+      </form>
+
+      {{if eq .Attempt.State "Review"}}
+      {{/* Review actions. Decision reopens the attempt to Running (reversible, so
+           it fires directly); Done is terminal and immutable, so it confirms
+           first. Both post a fixed type and pull the compose textarea as the
+           recorded reason (empty falls back to a server default). */}}
+      <div class="review-actions" data-testid="review-actions">
+        <button type="button" class="action-decision" data-testid="action-decision"
+          hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
+          hx-vals='{"type":"decision"}' hx-include="[data-testid=compose-body]"
+          hx-target="[data-testid=log-region]" hx-swap="innerHTML">Decision — reopen to Running</button>
+        <button type="button" class="action-done" data-testid="action-done"
+          hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
+          hx-vals='{"type":"done"}' hx-include="[data-testid=compose-body]"
+          hx-confirm="Mark this attempt Done? This is terminal and cannot be undone."
+          hx-target="[data-testid=log-region]" hx-swap="innerHTML">Done — close</button>
+      </div>
+      {{end}}
+
       <div class="log-region" data-testid="log-region" data-order="newest"
         {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
         {{template "attempt-log" .}}
@@ -113,6 +153,7 @@
             <time class="ts" data-testid="ts-{{.Seq}}" datetime="{{.TSISO}}" title="{{.TSFull}}">{{.TSRel}}</time>
           </div>
           <div class="prose event-body">{{.BodyHTML}}</div>
+          {{if .Links}}<p class="event-links" data-testid="event-links-{{.Seq}}">{{range .Links}}<a class="link-chip" href="{{.Href}}" target="_blank" rel="noopener noreferrer">{{if .Rel}}{{.Rel}}{{else}}link{{end}} ↗</a>{{end}}</p>{{end}}
           {{if .IsEsc}}
             {{if .Resolved}}
               <p class="link-note resolved" data-testid="resolved-{{.Seq}}">→ resolved by #{{.ResolvedBy}}</p>

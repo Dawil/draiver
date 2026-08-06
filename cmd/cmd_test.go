@@ -21,6 +21,7 @@ func run(t *testing.T, args ...string) (string, int) {
 	dataFlag, actorFlag, attemptFlag = "", "", ""
 	logType = ""
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
+	logURLs, logLinks, reviewURLs, reviewLinks = nil, nil, nil, nil
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
 	newTool, newModel, newRepo = "", "", ""
 	attemptTool, attemptModel, attemptFrom, attemptRepo = "", "", "", ""

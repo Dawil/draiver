@@ -20,6 +20,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no daemon the enable simply waits (no control socket in the web process).
   The write is attributable (`--actor` / `$DRAIVER_ACTOR`, else `human:webui`) and
   same-origin guarded; it is idempotent (an already-enabled attempt is a no-op).
+- **Compose typed log entries from the webui, with Review → Decision / Done
+  actions (drvweb-006).** The attempt detail page gains a compose box — a type
+  `<select>` (`note`, `gotcha`, `decision`) plus a markdown body — that appends a
+  typed event to the attempt without dropping to a terminal, and two Review-gated
+  buttons: **Decision** (reopens a Review attempt to Running) and **Done** (closes
+  it), both driven by the existing lifecycle `Derive`. This makes the board a
+  write surface for the first time: `POST /ticket/{id}/{attempt}/log` performs
+  the append by shelling the draiver CLI (`draiver log --type …`, and `draiver
+  done` for the terminal action) rather than reimplementing it in the web layer,
+  so the webui and a human at a terminal share one append path. It passes a
+  resolved actor (`$DRAIVER_ACTOR`, else `human:$USER`, else `human:web`) through
+  as `--actor` so a web-composed entry is attributable exactly like a CLI one. The
+  type is checked against a curated allow-list `{note, gotcha, decision, done}`,
+  so lifecycle types with their own flows (`escalation`/`resolution`/`review`/
+  `enable`/`disable`) can never be hand-typed (400, nothing appended). The
+  state-changing POST is guarded by an Origin/Referer same-host check (403 on
+  cross-origin; header-less non-browser clients pass). One response re-renders the
+  log region and OOB-swaps the state badge and log count, so a Decision/Done
+  visibly flips the badge, and a Done then self-cancels the log poll on its next
+  `/live` tick (286). The `web` package is now read-mostly rather than read-only.
+- **Forge-neutral review links on the event log (`review --url`, drv-007).** An
+  event can now carry one or more opaque review links — a draft PR, merge request,
+  or diff URL — set by the agent at the moment it claims review, on the append-only,
+  hash-chained log with full provenance. The schema gains `Links []Link`
+  (`{Rel, Href}`, `yaml:"links,omitempty"`), included in the hashable projection so
+  links are tamper-evident under `draiver audit`; `omitempty` keeps existing
+  link-less events hashing identically, so there is no migration. `draiver review`
+  and `draiver log` gain a repeatable `--url <uri>` (rel defaults to `pr`) and an
+  explicit `--link <rel>=<uri>` for other rels (`mr`, `diff`, `ci`, …). `Rel` is an
+  uninterpreted free label — draiver never parses the host or path and carries no
+  forge-specific code. At append time `Href` must parse as an absolute URL whose
+  scheme is in a **hardcoded `{http, https}` allowlist** (a safety floor,
+  deliberately not operator-configurable — an editable scheme list reopens
+  `javascript:`/`file:`/`data:`); a rejected link fails the command and writes
+  nothing. `config.Config` gains an optional `review_link_hosts` allowlist
+  alongside `Permissions` — empty (the default) admits any http/https host, so the
+  host policy is opt-in and off by default. draiver never fetches the URL.
+- **Review links surfaced as one-click actions on the board (drvweb-004).** A
+  Review-column card whose latest `review` event carries a link now shows a
+  distinct **"Review changes ↗"** action — the primary link (`rel` `pr`/`mr`, else
+  the first) — opening the PR/diff in a new tab (`target="_blank"
+  rel="noopener noreferrer"`), *additional to* and visually separate from the
+  existing internal deep-link. No link → no button (a direct-merge flow degrades to
+  nothing). The action is scoped to the Review column, so a reopened or blocked
+  attempt never shows a stale PR button. On the attempt detail timeline, every
+  event renders its links as chips labelled by `rel`, below the body. Links are
+  rendered **safely**: the http/https scheme allowlist is **re-checked at render**
+  (defense in depth, independent of the append-time check), and the board never
+  fetches or previews the URL.
+- **Sanitizer hardening for rendered markdown bodies (drvweb-004).** Audited the
+  bare `goldmark.New()` renderer: its default already blanks `javascript:`,
+  `vbscript:`, `file:`, and non-image `data:` link hrefs and omits raw HTML, but it
+  admits `data:image/{png,gif,jpeg,webp}` links and autolinks. Added a goldmark AST
+  transformer (`linkPolicy`) that enforces an http/https-or-relative scheme floor on
+  every body link/image/autolink, closing that carve-out so a `data:`/`javascript:`
+  link in an event body can never produce a live href.
 
 ### Changed
 
@@ -60,6 +116,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spent-but-still-desired run is re-admitted by the daemon. `start --new-attempt`
   forks a parallel branch and leaves the parent running; `restart --new-attempt`
   parks the parent so only the fork runs.
+
+### Fixed
+
+- **Resumed sessions get a driving turn again, and a session can no longer stop
+  at `result: success` without handing off (`draiverctl`, drvctl-022).** drvctl-016's
+  brief-on-reset coupling gated the sole driving prompt behind `if w.spawned`, so a
+  resumed headless `stream-json` session — which produces nothing until it receives a
+  user turn — came online, restored its context, and idled forever, never continuing
+  the work and never filing a `review` or `escalation`. From the supervisor's stream
+  the attempt "got to `result: success` and stopped" with nothing filed, stranding it
+  in Running + enabled; this broke every resume path, including the core
+  `escalate → resolve → resume` arc. **Part A** restores drive keyed on session
+  identity: `admit` branches on `wired.spawned` — a fresh spawn (empty context) still
+  gets the full cold-start brief, while a resume (recorded id came back online, context
+  intact) gets a new short `protocol.InjectResumeNudge` that points to `draiver brief
+  <ticket>` and restates the log/hand-off obligation without re-dumping spec + log.
+  **Part B** adds defense in depth: a new `internal/completion.Gate`, constructed in
+  `bringUp` and threaded through `ingest`/`dispatch`, reacts to `agent.EventTurnEnd`
+  with `Turn == "success"`; using the same log-tail-vs-baseline check the protocol gate
+  uses, it looks for a `review`/`escalation` newer than the session baseline, injects a
+  one-shot nudge if the obligation is unmet, and escalates-and-halts to a human on a
+  later still-unmet success turn — so a stalled "done" lands on the board instead of
+  idling. The gate latches so it cannot loop.
 
 ## [0.2.2] - 2026-08-06
 

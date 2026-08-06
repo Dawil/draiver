@@ -8,17 +8,29 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 )
 
+var (
+	reviewURLs  []string
+	reviewLinks []string
+)
+
 var reviewCmd = &cobra.Command{
 	Use:   "review TICKET [CLAIM]",
 	Short: "Claim a ticket is done (a claim, not a fact, for a human to verify)",
-	Args:  cobra.RangeArgs(1, 2),
+	Long: "review claims the ticket is complete for a human to verify. Attach the\n" +
+		"review link — the draft PR, merge request, or diff URL where the change can\n" +
+		"be seen — with --url (rel defaults to pr) or --link rel=uri for other rels.",
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
 		body := "Agent claims the ticket is complete; ready for review."
 		if len(args) == 2 {
 			body = args[1]
 		}
-		e, att, err := appendEvent(id, event.Event{Type: "review", Body: body})
+		links, err := buildLinks(reviewURLs, reviewLinks)
+		if err != nil {
+			return err
+		}
+		e, att, err := appendEvent(id, event.Event{Type: "review", Body: body, Links: links})
 		if err != nil {
 			return err
 		}
@@ -28,5 +40,6 @@ var reviewCmd = &cobra.Command{
 }
 
 func init() {
+	addLinkFlags(reviewCmd, &reviewURLs, &reviewLinks)
 	rootCmd.AddCommand(reviewCmd)
 }

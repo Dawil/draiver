@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,10 +19,11 @@ import (
 )
 
 // TestMain builds the real draiver binary once and points draiverBinOverride at
-// it, so the enable tests drive the CLI end-to-end (a real `ctl enable` appending
-// to disk) rather than a stub — genuine coverage of "the write goes through the
-// draiver CLI" (decision #7). Under `go test`, os.Executable() is the test
-// binary, not draiver, so the override is required.
+// it, so the web write tests drive the CLI end-to-end rather than a stub: the
+// log append/decision/done tests exercise a real `draiver log`/`draiver done`,
+// and the enable tests a real `ctl enable` appending to disk — genuine coverage
+// of "the write goes through the draiver CLI" (decision #7). Under `go test`,
+// os.Executable() is the test binary, not draiver, so the override is required.
 func TestMain(m *testing.M) {
 	os.Exit(func() int {
 		dir, err := os.MkdirTemp("", "draiver-web-bin")
@@ -736,6 +738,9 @@ func TestRelativeAgeBuckets(t *testing.T) {
 	}
 }
 
+// TestReadOnlyNoWriteRoutes pins that the view routes stay GET-only: the sole
+// write path is POST .../log (see the log-append tests), so posting to a page or
+// the board is still a 405.
 func TestReadOnlyNoWriteRoutes(t *testing.T) {
 	h := newServer(t)
 	for _, path := range []string{"/", "/board", "/ticket/PROJ-1", "/ticket/PROJ-1/0001"} {
@@ -743,6 +748,388 @@ func TestReadOnlyNoWriteRoutes(t *testing.T) {
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, path, nil))
 		if rr.Code != http.StatusMethodNotAllowed {
 			t.Errorf("POST %s = %d, expected 405 (read-only)", path, rr.Code)
+		}
+	}
+}
+
+// seedReview writes a Review attempt (created + a review claim carrying links).
+// ticketlog.Append deliberately does not validate links (that is the CLI layer),
+// so a link with any scheme can be seeded here to exercise the render-time floor.
+func seedReview(t *testing.T, root store.Root, id, att string, links []event.Link) {
+	t.Helper()
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: "+id+"\n---\n\nspec"), 0o644)
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "review", Actor: "agent:x", Body: "done", Links: links}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newServerOver(t *testing.T, root store.Root) http.Handler {
+	t.Helper()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.Handler()
+}
+
+// postLog posts a compose form to an attempt's log-append route. It sets a
+// same-origin Origin header so the CSRF guard passes, mirroring a real htmx post.
+func postLog(t *testing.T, h http.Handler, id, att, typ, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{"type": {typ}, "body": {body}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/"+id+"/"+att+"/log", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// stateOf reads an attempt's derived control state straight from the log, so a
+// test asserts on the domain truth rather than the rendered badge.
+func stateOf(t *testing.T, root store.Root, id, att string) project.State {
+	t.Helper()
+	a, err := project.LoadAttempt(root, id, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.State
+}
+
+// TestComposeBoxAppendsTypedEntry pins the base compose contract: the detail page
+// carries a compose control, and posting a curated type appends exactly one event
+// of that type, returned in the live fragment without a full reload.
+func TestComposeBoxAppendsTypedEntry(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	// The control and its allow-listed options render on the detail page.
+	page := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="log-compose"`,
+		`data-testid="compose-type"`,
+		`data-testid="compose-body"`,
+		`data-testid="compose-submit"`,
+		`value="note"`, `value="gotcha"`, `value="decision"`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("detail page missing compose hook %q", want)
+		}
+	}
+
+	before, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	rr := postLog(t, h, "PROJ-3", "0001", "gotcha", "the cache key ignores tenant")
+	if rr.Code != 200 {
+		t.Fatalf("POST log = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	if len(after) != len(before)+1 {
+		t.Fatalf("expected exactly one new event, got %d -> %d", len(before), len(after))
+	}
+	last := after[len(after)-1]
+	if last.Type != "gotcha" || last.Body != "the cache key ignores tenant" {
+		t.Errorf("appended event = %+v, want gotcha with the posted body", last)
+	}
+	// The response is the live fragment: the new entry plus the OOB badge/count.
+	out := rr.Body.String()
+	for _, want := range []string{"the cache key ignores tenant", `id="state-badge"`, `hx-swap-oob="true"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("live fragment missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "<html") {
+		t.Errorf("log-append response must be a fragment, not a full page")
+	}
+}
+
+// TestComposeAppendStampsActor pins that a web-composed entry is attributable:
+// the server stamps its resolved actor identity, not an empty one.
+func TestComposeAppendStampsActor(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := postLog(t, s.Handler(), "PROJ-3", "0001", "note", "context"); rr.Code != 200 {
+		t.Fatalf("POST log = %d", rr.Code)
+	}
+	events, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	last := events[len(events)-1]
+	if last.Actor == "" || !strings.HasPrefix(last.Actor, "human:") {
+		t.Errorf("web-composed event actor = %q, want a resolved human: identity", last.Actor)
+	}
+}
+
+// TestReviewDecisionReopensToRunning pins the first-class Review → Running verb:
+// posting a decision on a Review attempt appends it and the derived state falls
+// back to Running (Derive: a decision is the latest lifecycle marker).
+func TestReviewDecisionReopensToRunning(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stateOf(t, root, "PROJ-2", "0001"); got != project.Review {
+		t.Fatalf("seed PROJ-2/0001 = %q, want Review", got)
+	}
+	rr := postLog(t, s.Handler(), "PROJ-2", "0001", "decision", "spec was misread; more work needed")
+	if rr.Code != 200 {
+		t.Fatalf("POST decision = %d", rr.Code)
+	}
+	if got := stateOf(t, root, "PROJ-2", "0001"); got != project.Running {
+		t.Errorf("after decision, state = %q, want Running (reopened)", got)
+	}
+	// The OOB badge in the response reflects the reopened state.
+	if !strings.Contains(rr.Body.String(), "state-Running") {
+		t.Errorf("live fragment badge should flip to Running\n%s", rr.Body.String())
+	}
+}
+
+// TestReviewDoneClosesAttempt pins the terminal Review verb: posting done appends
+// it and the attempt moves to Done (and its live poll then self-cancels at 286).
+func TestReviewDoneClosesAttempt(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	if rr := postLog(t, h, "PROJ-2", "0001", "done", "verified, shipping"); rr.Code != 200 {
+		t.Fatalf("POST done = %d", rr.Code)
+	}
+	if got := stateOf(t, root, "PROJ-2", "0001"); got != project.Done {
+		t.Errorf("after done, state = %q, want Done", got)
+	}
+	// The now-terminal attempt's live fragment self-cancels the poll with 286.
+	if rr := get(t, h, "/ticket/PROJ-2/0001/live"); rr.Code != 286 {
+		t.Errorf("Done attempt live = %d, want 286 (stop polling)", rr.Code)
+	}
+}
+
+// TestComposeRejectsOutOfSetType pins the allow-list: a lifecycle type that owns
+// its own flow (escalation/resolution/review/enable/disable) cannot be smuggled
+// in through the generic compose route, and nothing is appended.
+func TestComposeRejectsOutOfSetType(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	for _, typ := range []string{"escalation", "resolution", "review", "enable", "disable", "created", "bogus"} {
+		before, _ := ticketlog.Read(root, "PROJ-3", "0001")
+		rr := postLog(t, h, "PROJ-3", "0001", typ, "should not land")
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("POST type=%q = %d, want 400", typ, rr.Code)
+		}
+		after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+		if len(after) != len(before) {
+			t.Errorf("type=%q was rejected but still appended an event", typ)
+		}
+	}
+}
+
+// TestReviewActionsRenderOnlyInReview pins that the Decision/Done buttons appear
+// exactly when the attempt is in Review and are absent otherwise.
+func TestReviewActionsRenderOnlyInReview(t *testing.T) {
+	h := newServer(t)
+	// PROJ-2/0001 is Review: both actions present.
+	review := get(t, h, "/ticket/PROJ-2/0001").Body.String()
+	for _, want := range []string{`data-testid="review-actions"`, `data-testid="action-decision"`, `data-testid="action-done"`} {
+		if !strings.Contains(review, want) {
+			t.Errorf("Review attempt missing %q", want)
+		}
+	}
+	// PROJ-3/0001 is Running: no review actions.
+	running := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+	for _, absent := range []string{`data-testid="review-actions"`, `data-testid="action-decision"`, `data-testid="action-done"`} {
+		if strings.Contains(running, absent) {
+			t.Errorf("non-Review attempt should not render %q", absent)
+		}
+	}
+}
+
+// TestLogAppendRejectsCrossOrigin pins the CSRF guard: a POST whose Origin names
+// a different host is refused with 403 and nothing is appended.
+func TestLogAppendRejectsCrossOrigin(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	form := url.Values{"type": {"note"}, "body": {"forged"}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-3/0001/log", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://evil.example")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin POST = %d, want 403", rr.Code)
+	}
+	after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	if len(after) != len(before) {
+		t.Errorf("cross-origin POST must not append an event")
+	}
+}
+
+// TestLogAppendUnknownAttempt404 pins that posting to a non-existent attempt is a
+// 404, not a silent no-op or a 500.
+func TestLogAppendUnknownAttempt404(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := postLog(t, s.Handler(), "PROJ-3", "9999", "note", "x"); rr.Code != 404 {
+		t.Errorf("POST to unknown attempt = %d, want 404", rr.Code)
+	}
+}
+
+// TestReviewCardSurfacesPrimaryReviewLink pins that a Review card with links shows
+// the external "Review changes" action pointing at the primary (rel pr/mr) link —
+// not merely the first — opening in a new tab with rel="noopener noreferrer", and
+// that the internal deep-link stays alongside it as a separate affordance.
+func TestReviewCardSurfacesPrimaryReviewLink(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	// Links out of primary order: a diff first, the PR second. The primary must be
+	// the pr/mr link regardless of position.
+	seedReview(t, root, "REV-1", "0001", []event.Link{
+		{Rel: "diff", Href: "https://example.com/diff/9"},
+		{Rel: "pr", Href: "https://example.com/pr/1"},
+	})
+	body := get(t, newServerOver(t, root), "/board").Body.String()
+	want := `data-testid="review-link-REV-1-0001" href="https://example.com/pr/1" target="_blank" rel="noopener noreferrer"`
+	if !strings.Contains(body, want) {
+		t.Errorf("review card action missing/mismatched:\nwant %q\n%s", want, body)
+	}
+	if !strings.Contains(body, "Review changes") {
+		t.Errorf("review action label 'Review changes' missing")
+	}
+	// The internal deep-link is unchanged and separate from the external action.
+	if !strings.Contains(body, `data-testid="attempt-link-REV-1-0001" href="/ticket/REV-1/0001#event-2"`) {
+		t.Errorf("internal deep-link should remain alongside the external action:\n%s", body)
+	}
+}
+
+// TestReviewCardNoLinkNoButton pins that a Review attempt with no links renders no
+// external action (the direct-merge flow degrades to nothing).
+func TestReviewCardNoLinkNoButton(t *testing.T) {
+	// seedBoard's Review attempt (PROJ-2/0001) carries no links.
+	body := get(t, newServer(t), "/board").Body.String()
+	if strings.Contains(body, `data-testid="review-link-PROJ-2-0001"`) {
+		t.Errorf("link-less Review card should render no action button:\n%s", body)
+	}
+	if strings.Contains(body, "Review changes") {
+		t.Errorf("no review link -> no 'Review changes' action")
+	}
+}
+
+// TestReviewLinkScopedToReviewColumn pins that the card action is scoped to the
+// Review column: an attempt reopened to Running (a decision after a review) keeps
+// the review event's link on its timeline chips but shows no stale card action.
+func TestReviewLinkScopedToReviewColumn(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("REO-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("REO-1"), []byte("---\nid: REO-1\ntitle: Reopened\n---\n\nspec"), 0o644)
+	ticketlog.Append(root, "REO-1", "0001", event.Event{Type: "created", Actor: "a", Body: "start"})
+	ticketlog.Append(root, "REO-1", "0001", event.Event{Type: "review", Actor: "agent:x", Body: "done",
+		Links: []event.Link{{Rel: "pr", Href: "https://example.com/pr/9"}}})
+	// A decision after the review reopens the attempt (Review -> Running).
+	ticketlog.Append(root, "REO-1", "0001", event.Event{Type: "decision", Actor: "human:d", Body: "reopening: missing tests"})
+	h := newServerOver(t, root)
+
+	if board := get(t, h, "/board").Body.String(); strings.Contains(board, `data-testid="review-link-REO-1-0001"`) {
+		t.Errorf("card action must be scoped to Review; a reopened (Running) card showed it:\n%s", board)
+	}
+	// The owning event's chips still render on the detail timeline regardless of state.
+	if detail := get(t, h, "/ticket/REO-1/0001").Body.String(); !strings.Contains(detail, `data-testid="event-links-2"`) {
+		t.Errorf("detail timeline should still render the review event's chips:\n%s", detail)
+	}
+}
+
+// TestDetailTimelineRendersLinkChips pins that an event's links render as chips
+// below the body, labelled by rel, each opening in a new tab safely.
+func TestDetailTimelineRendersLinkChips(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	seedReview(t, root, "REV-2", "0001", []event.Link{
+		{Rel: "pr", Href: "https://example.com/pr/2"},
+		{Rel: "ci", Href: "https://ci.example.com/run/7"},
+	})
+	body := get(t, newServerOver(t, root), "/ticket/REV-2/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="event-links-2"`,
+		`href="https://example.com/pr/2" target="_blank" rel="noopener noreferrer"`,
+		`href="https://ci.example.com/run/7" target="_blank" rel="noopener noreferrer"`,
+		`>pr ↗</a>`,
+		`>ci ↗</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail chip missing %q\n%s", want, body)
+		}
+	}
+}
+
+// TestRenderTimeSchemeRecheckDropsBadLinks pins the defense-in-depth floor: a link
+// whose scheme is disallowed (seeded past append-time validation) becomes neither
+// a card action nor a chip, and its dangerous href never reaches a served page.
+func TestRenderTimeSchemeRecheckDropsBadLinks(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	seedReview(t, root, "BAD-1", "0001", []event.Link{
+		{Rel: "pr", Href: "javascript:alert(1)"},
+		{Rel: "diff", Href: "data:text/html,<script>alert(1)</script>"},
+	})
+	h := newServerOver(t, root)
+	boardOut := get(t, h, "/board").Body.String()
+	detailOut := get(t, h, "/ticket/BAD-1/0001").Body.String()
+
+	if strings.Contains(boardOut, `data-testid="review-link-BAD-1-0001"`) {
+		t.Errorf("bad-scheme link must not become a card action:\n%s", boardOut)
+	}
+	if strings.Contains(detailOut, `data-testid="event-links-2"`) {
+		t.Errorf("bad-scheme links must not render chips:\n%s", detailOut)
+	}
+	for _, bad := range []string{"javascript:alert(1)", "data:text/html"} {
+		if strings.Contains(boardOut, bad) || strings.Contains(detailOut, bad) {
+			t.Errorf("dangerous href %q leaked into a served page", bad)
+		}
+	}
+}
+
+// TestBodyLinkSchemesSanitizedAtRender pins the goldmark URL policy (linkPolicy):
+// an allowed https body link renders live, while javascript:, non-image data:,
+// and — the gap goldmark's default admits — data:image/* links and autolinks
+// never produce a live href.
+func TestBodyLinkSchemesSanitizedAtRender(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("MDX-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("MDX-1"), []byte("---\nid: MDX-1\ntitle: t\n---\n\nspec"), 0o644)
+	body := "js [a](javascript:alert(1)) data [b](data:text/html,x) " +
+		"img [c](data:image/png;base64,AAAA) auto <data:image/png;base64,BBBB> " +
+		"ok [d](https://example.com/pr/1)"
+	ticketlog.Append(root, "MDX-1", "0001", event.Event{Type: "note", Actor: "a", Body: body})
+	out := get(t, newServerOver(t, root), "/ticket/MDX-1/0001").Body.String()
+
+	if !strings.Contains(out, `href="https://example.com/pr/1"`) {
+		t.Errorf("allowed https body link should render live:\n%s", out)
+	}
+	for _, bad := range []string{`href="javascript:`, `href="data:text/html`, `href="data:image/png`} {
+		if strings.Contains(out, bad) {
+			t.Errorf("disallowed scheme produced a live href %q:\n%s", bad, out)
 		}
 	}
 }

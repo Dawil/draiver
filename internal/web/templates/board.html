@@ -22,13 +22,14 @@
 </div>
 {{end}}
 
-{{/* card is a tile plus, for a Running attempt not yet enabled, a green play
-     button that enables it into daemon supervision. The button is a SIBLING of
-     the card <a> inside .card-wrap (not nested), so a play click posts the enable
-     without also following the card's href — no JS stop-propagation. handleEnable
-     answers with this same template, so the htmx swap drops the button and reflows
-     the session-dot in place. */}}
-{{define "card"}}
+{{/* A card is a single link (cardHref) for the whole tile. Two optional siblings
+     sit over the tile inside .card-wrap (neither can nest in the card <a>): a
+     Running-not-yet-enabled attempt's green play button, which posts the enable
+     without also following the card's href (handleEnable answers with this same
+     template, so the htmx swap drops the button and reflows the session-dot in
+     place); and, on Review-column cards with a scheme-checked review link, an
+     external "Review changes" action (see reviewLink). */}}
+{{define "card"}}{{$a := .}}
 <div class="card-wrap" data-testid="card-{{.Ticket}}-{{.ID}}">
   <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
     <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
@@ -48,6 +49,7 @@
     </button>
   </form>
   {{end}}
+  {{with reviewLink $a}}<a class="card-review" data-testid="review-link-{{$a.Ticket}}-{{$a.ID}}" href="{{.Href}}" target="_blank" rel="noopener noreferrer">Review changes ↗</a>{{end}}
 </div>
 {{end}}
 
