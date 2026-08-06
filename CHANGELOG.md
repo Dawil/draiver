@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Forge-neutral review links on the event log (`review --url`, drv-007).** An
+  event can now carry one or more opaque review links — a draft PR, merge request,
+  or diff URL — set by the agent at the moment it claims review, on the append-only,
+  hash-chained log with full provenance. The schema gains `Links []Link`
+  (`{Rel, Href}`, `yaml:"links,omitempty"`), included in the hashable projection so
+  links are tamper-evident under `draiver audit`; `omitempty` keeps existing
+  link-less events hashing identically, so there is no migration. `draiver review`
+  and `draiver log` gain a repeatable `--url <uri>` (rel defaults to `pr`) and an
+  explicit `--link <rel>=<uri>` for other rels (`mr`, `diff`, `ci`, …). `Rel` is an
+  uninterpreted free label — draiver never parses the host or path and carries no
+  forge-specific code. At append time `Href` must parse as an absolute URL whose
+  scheme is in a **hardcoded `{http, https}` allowlist** (a safety floor,
+  deliberately not operator-configurable — an editable scheme list reopens
+  `javascript:`/`file:`/`data:`); a rejected link fails the command and writes
+  nothing. `config.Config` gains an optional `review_link_hosts` allowlist
+  alongside `Permissions` — empty (the default) admits any http/https host, so the
+  host policy is opt-in and off by default. draiver never fetches the URL.
+
 ### Changed
 
 - **Session lifecycle verbs recast around a state-stack "degree axis", and the

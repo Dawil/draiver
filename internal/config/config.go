@@ -49,6 +49,14 @@ type Config struct {
 	// is escalating a few sensitive tools (e.g. {"WebFetch": "escalate"}) while the
 	// rest stay auto-approved. Validated into a gate.Policy by the caller.
 	Permissions map[string]string `json:"permissions"`
+
+	// ReviewLinkHosts is an optional allowlist of hosts a review link (an event's
+	// Links) may point at — the genuinely per-deployment policy, e.g. "review links
+	// may only point at bitbucket.mycorp.com". Empty (the default) admits any
+	// http/https host, so it is opt-in and off by default. It sits alongside
+	// Permissions and layers on top of the hardcoded {http, https} scheme floor,
+	// which it cannot loosen (see event.ValidateLink).
+	ReviewLinkHosts []string `json:"review_link_hosts"`
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -69,6 +77,7 @@ type file struct {
 	ContextLimit       *int              `json:"context_limit"`
 	PermissionsDefault *string           `json:"permissions_default"`
 	Permissions        map[string]string `json:"permissions"`
+	ReviewLinkHosts    []string          `json:"review_link_hosts"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -125,6 +134,9 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.Permissions != nil {
 		c.Permissions = f.Permissions
+	}
+	if f.ReviewLinkHosts != nil {
+		c.ReviewLinkHosts = f.ReviewLinkHosts
 	}
 	return c, nil
 }
