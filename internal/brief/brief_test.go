@@ -60,3 +60,35 @@ func TestBuildIncludesSpecLogAndEscalationPairing(t *testing.T) {
 		t.Errorf("spec frontmatter leaked into brief:\n%s", out)
 	}
 }
+
+// The brief must carry the how-to-log nudge itself, so a supervisor-driven
+// session is told to write log/note bodies in Markdown even when the onboarding
+// skill isn't loaded. This guards the injected-prompt seam, not the skill file.
+func TestBuildCarriesMarkdownWorkingInstruction(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	const id, att = "PROJ-2", "0001"
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: PROJ-2\ntitle: Thing\n---\n\n# Thing\n\nDo it."), 0o644)
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := Build(root, id, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The exact nudge (single-sourced from the const) and its concrete cues.
+	for _, want := range []string{
+		workingInstructions,
+		"Markdown",
+		"backtick",
+		"bullets",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("brief missing working instruction %q\n---\n%s", want, out)
+		}
+	}
+}
