@@ -22,16 +22,23 @@
 </div>
 {{end}}
 
-{{define "card"}}
-<a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
-  <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
-  <span class="title">{{.Title}}</span>
-  <span class="meta-row">
-    {{template "session-dot" .}}
-    {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
-    {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
-  </span>
-</a>
+{{/* A card is a single link (cardHref) for the whole tile. The optional external
+     "Review changes" action can't nest inside that <a> (invalid HTML), so it is a
+     sibling positioned over the tile via .card-wrap; only Review-column cards with
+     a scheme-checked review link render it (see reviewLink). */}}
+{{define "card"}}{{$a := .}}
+<div class="card-wrap">
+  <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
+    <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
+    <span class="title">{{.Title}}</span>
+    <span class="meta-row">
+      {{template "session-dot" .}}
+      {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
+      {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
+    </span>
+  </a>
+  {{with reviewLink $a}}<a class="card-review" data-testid="review-link-{{$a.Ticket}}-{{$a.ID}}" href="{{.Href}}" target="_blank" rel="noopener noreferrer">Review changes ↗</a>{{end}}
+</div>
 {{end}}
 
 {{/* session-dot renders an attempt's runtime-liveness dot (green running / wattle

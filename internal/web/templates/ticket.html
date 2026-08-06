@@ -113,6 +113,7 @@
             <time class="ts" data-testid="ts-{{.Seq}}" datetime="{{.TSISO}}" title="{{.TSFull}}">{{.TSRel}}</time>
           </div>
           <div class="prose event-body">{{.BodyHTML}}</div>
+          {{if .Links}}<p class="event-links" data-testid="event-links-{{.Seq}}">{{range .Links}}<a class="link-chip" href="{{.Href}}" target="_blank" rel="noopener noreferrer">{{if .Rel}}{{.Rel}}{{else}}link{{end}} ↗</a>{{end}}</p>{{end}}
           {{if .IsEsc}}
             {{if .Resolved}}
               <p class="link-note resolved" data-testid="resolved-{{.Seq}}">→ resolved by #{{.ResolvedBy}}</p>

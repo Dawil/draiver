@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing. `config.Config` gains an optional `review_link_hosts` allowlist
   alongside `Permissions` — empty (the default) admits any http/https host, so the
   host policy is opt-in and off by default. draiver never fetches the URL.
+- **Review links surfaced as one-click actions on the board (drvweb-004).** A
+  Review-column card whose latest `review` event carries a link now shows a
+  distinct **"Review changes ↗"** action — the primary link (`rel` `pr`/`mr`, else
+  the first) — opening the PR/diff in a new tab (`target="_blank"
+  rel="noopener noreferrer"`), *additional to* and visually separate from the
+  existing internal deep-link. No link → no button (a direct-merge flow degrades to
+  nothing). The action is scoped to the Review column, so a reopened or blocked
+  attempt never shows a stale PR button. On the attempt detail timeline, every
+  event renders its links as chips labelled by `rel`, below the body. Links are
+  rendered **safely**: the http/https scheme allowlist is **re-checked at render**
+  (defense in depth, independent of the append-time check), and the board never
+  fetches or previews the URL.
+- **Sanitizer hardening for rendered markdown bodies (drvweb-004).** Audited the
+  bare `goldmark.New()` renderer: its default already blanks `javascript:`,
+  `vbscript:`, `file:`, and non-image `data:` link hrefs and omits raw HTML, but it
+  admits `data:image/{png,gif,jpeg,webp}` links and autolinks. Added a goldmark AST
+  transformer (`linkPolicy`) that enforces an http/https-or-relative scheme floor on
+  every body link/image/autolink, closing that carve-out so a `data:`/`javascript:`
+  link in an event body can never produce a live href.
 
 ### Changed
 

@@ -47,12 +47,24 @@ body {
 .col-stuck { border-color: var(--alert); }
 .col-stuck h2 { color: var(--alert); }
 
+/* The card tile and its optional external "Review changes" action are siblings
+   inside .card-wrap (an <a> cannot nest in the tile's <a>); the action is
+   positioned over the tile's top-right corner and sits above it (z-index) so its
+   click opens the PR while the rest of the tile follows cardHref. */
+.card-wrap { position: relative; }
 .card {
   display: flex; flex-direction: column; gap: 2px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px; margin-bottom: 8px; text-decoration: none; color: var(--ink);
 }
 .card:hover { border-color: var(--accent); }
+.card-review {
+  position: absolute; bottom: 8px; right: 10px; z-index: 1;
+  font-size: 11px; text-decoration: none; white-space: nowrap;
+  color: var(--review); background: color-mix(in srgb, var(--review) 14%, var(--panel));
+  border: 1px solid var(--review); border-radius: 999px; padding: 1px 9px;
+}
+.card-review:hover { background: color-mix(in srgb, var(--review) 26%, var(--panel)); }
 .card .tid { font-weight: 600; font-size: 13px; }
 .card .att { color: var(--muted); font-weight: 500; }
 .card .title { color: var(--muted); font-size: 13px; }
@@ -118,3 +130,12 @@ body {
 .resolved { color: var(--done); }
 .unresolved { color: var(--alert); font-weight: 600; }
 .refs, .artefacts { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+/* Review-link chips: an event's forge-neutral links, labelled by rel, rendered
+   below the body. Each opens in a new tab; the scheme is re-checked at render
+   (see safeLinks) so only http/https links reach the DOM. */
+.event-links { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.link-chip {
+  font-size: 12px; text-decoration: none; color: var(--accent);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
+}
+.link-chip:hover { border-color: var(--accent); }

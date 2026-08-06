@@ -591,3 +591,167 @@ func TestReadOnlyNoWriteRoutes(t *testing.T) {
 		}
 	}
 }
+
+// seedReview writes a Review attempt (created + a review claim carrying links).
+// ticketlog.Append deliberately does not validate links (that is the CLI layer),
+// so a link with any scheme can be seeded here to exercise the render-time floor.
+func seedReview(t *testing.T, root store.Root, id, att string, links []event.Link) {
+	t.Helper()
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: "+id+"\n---\n\nspec"), 0o644)
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "review", Actor: "agent:x", Body: "done", Links: links}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newServerOver(t *testing.T, root store.Root) http.Handler {
+	t.Helper()
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.Handler()
+}
+
+// TestReviewCardSurfacesPrimaryReviewLink pins that a Review card with links shows
+// the external "Review changes" action pointing at the primary (rel pr/mr) link —
+// not merely the first — opening in a new tab with rel="noopener noreferrer", and
+// that the internal deep-link stays alongside it as a separate affordance.
+func TestReviewCardSurfacesPrimaryReviewLink(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	// Links out of primary order: a diff first, the PR second. The primary must be
+	// the pr/mr link regardless of position.
+	seedReview(t, root, "REV-1", "0001", []event.Link{
+		{Rel: "diff", Href: "https://example.com/diff/9"},
+		{Rel: "pr", Href: "https://example.com/pr/1"},
+	})
+	body := get(t, newServerOver(t, root), "/board").Body.String()
+	want := `data-testid="review-link-REV-1-0001" href="https://example.com/pr/1" target="_blank" rel="noopener noreferrer"`
+	if !strings.Contains(body, want) {
+		t.Errorf("review card action missing/mismatched:\nwant %q\n%s", want, body)
+	}
+	if !strings.Contains(body, "Review changes") {
+		t.Errorf("review action label 'Review changes' missing")
+	}
+	// The internal deep-link is unchanged and separate from the external action.
+	if !strings.Contains(body, `data-testid="attempt-link-REV-1-0001" href="/ticket/REV-1/0001#event-2"`) {
+		t.Errorf("internal deep-link should remain alongside the external action:\n%s", body)
+	}
+}
+
+// TestReviewCardNoLinkNoButton pins that a Review attempt with no links renders no
+// external action (the direct-merge flow degrades to nothing).
+func TestReviewCardNoLinkNoButton(t *testing.T) {
+	// seedBoard's Review attempt (PROJ-2/0001) carries no links.
+	body := get(t, newServer(t), "/board").Body.String()
+	if strings.Contains(body, `data-testid="review-link-PROJ-2-0001"`) {
+		t.Errorf("link-less Review card should render no action button:\n%s", body)
+	}
+	if strings.Contains(body, "Review changes") {
+		t.Errorf("no review link -> no 'Review changes' action")
+	}
+}
+
+// TestReviewLinkScopedToReviewColumn pins that the card action is scoped to the
+// Review column: an attempt reopened to Running (a decision after a review) keeps
+// the review event's link on its timeline chips but shows no stale card action.
+func TestReviewLinkScopedToReviewColumn(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("REO-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("REO-1"), []byte("---\nid: REO-1\ntitle: Reopened\n---\n\nspec"), 0o644)
+	ticketlog.Append(root, "REO-1", "0001", event.Event{Type: "created", Actor: "a", Body: "start"})
+	ticketlog.Append(root, "REO-1", "0001", event.Event{Type: "review", Actor: "agent:x", Body: "done",
+		Links: []event.Link{{Rel: "pr", Href: "https://example.com/pr/9"}}})
+	// A decision after the review reopens the attempt (Review -> Running).
+	ticketlog.Append(root, "REO-1", "0001", event.Event{Type: "decision", Actor: "human:d", Body: "reopening: missing tests"})
+	h := newServerOver(t, root)
+
+	if board := get(t, h, "/board").Body.String(); strings.Contains(board, `data-testid="review-link-REO-1-0001"`) {
+		t.Errorf("card action must be scoped to Review; a reopened (Running) card showed it:\n%s", board)
+	}
+	// The owning event's chips still render on the detail timeline regardless of state.
+	if detail := get(t, h, "/ticket/REO-1/0001").Body.String(); !strings.Contains(detail, `data-testid="event-links-2"`) {
+		t.Errorf("detail timeline should still render the review event's chips:\n%s", detail)
+	}
+}
+
+// TestDetailTimelineRendersLinkChips pins that an event's links render as chips
+// below the body, labelled by rel, each opening in a new tab safely.
+func TestDetailTimelineRendersLinkChips(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	seedReview(t, root, "REV-2", "0001", []event.Link{
+		{Rel: "pr", Href: "https://example.com/pr/2"},
+		{Rel: "ci", Href: "https://ci.example.com/run/7"},
+	})
+	body := get(t, newServerOver(t, root), "/ticket/REV-2/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="event-links-2"`,
+		`href="https://example.com/pr/2" target="_blank" rel="noopener noreferrer"`,
+		`href="https://ci.example.com/run/7" target="_blank" rel="noopener noreferrer"`,
+		`>pr ↗</a>`,
+		`>ci ↗</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail chip missing %q\n%s", want, body)
+		}
+	}
+}
+
+// TestRenderTimeSchemeRecheckDropsBadLinks pins the defense-in-depth floor: a link
+// whose scheme is disallowed (seeded past append-time validation) becomes neither
+// a card action nor a chip, and its dangerous href never reaches a served page.
+func TestRenderTimeSchemeRecheckDropsBadLinks(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	seedReview(t, root, "BAD-1", "0001", []event.Link{
+		{Rel: "pr", Href: "javascript:alert(1)"},
+		{Rel: "diff", Href: "data:text/html,<script>alert(1)</script>"},
+	})
+	h := newServerOver(t, root)
+	boardOut := get(t, h, "/board").Body.String()
+	detailOut := get(t, h, "/ticket/BAD-1/0001").Body.String()
+
+	if strings.Contains(boardOut, `data-testid="review-link-BAD-1-0001"`) {
+		t.Errorf("bad-scheme link must not become a card action:\n%s", boardOut)
+	}
+	if strings.Contains(detailOut, `data-testid="event-links-2"`) {
+		t.Errorf("bad-scheme links must not render chips:\n%s", detailOut)
+	}
+	for _, bad := range []string{"javascript:alert(1)", "data:text/html"} {
+		if strings.Contains(boardOut, bad) || strings.Contains(detailOut, bad) {
+			t.Errorf("dangerous href %q leaked into a served page", bad)
+		}
+	}
+}
+
+// TestBodyLinkSchemesSanitizedAtRender pins the goldmark URL policy (linkPolicy):
+// an allowed https body link renders live, while javascript:, non-image data:,
+// and — the gap goldmark's default admits — data:image/* links and autolinks
+// never produce a live href.
+func TestBodyLinkSchemesSanitizedAtRender(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("MDX-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("MDX-1"), []byte("---\nid: MDX-1\ntitle: t\n---\n\nspec"), 0o644)
+	body := "js [a](javascript:alert(1)) data [b](data:text/html,x) " +
+		"img [c](data:image/png;base64,AAAA) auto <data:image/png;base64,BBBB> " +
+		"ok [d](https://example.com/pr/1)"
+	ticketlog.Append(root, "MDX-1", "0001", event.Event{Type: "note", Actor: "a", Body: body})
+	out := get(t, newServerOver(t, root), "/ticket/MDX-1/0001").Body.String()
+
+	if !strings.Contains(out, `href="https://example.com/pr/1"`) {
+		t.Errorf("allowed https body link should render live:\n%s", out)
+	}
+	for _, bad := range []string{`href="javascript:`, `href="data:text/html`, `href="data:image/png`} {
+		if strings.Contains(out, bad) {
+			t.Errorf("disallowed scheme produced a live href %q:\n%s", bad, out)
+		}
+	}
+}

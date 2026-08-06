@@ -11,11 +11,18 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 )
@@ -75,14 +82,160 @@ func cardHref(a project.Attempt) string {
 	return base
 }
 
+// linkVM is a hyperlink surfaced on a served page — a board-card review action or
+// a detail-timeline chip. Rel is the opaque, forge-neutral label (pr, mr, diff,
+// ci, …) used only to pick a primary and to label a chip; Href is the URL, always
+// re-checked against the render-time scheme floor before it becomes a live href.
+type linkVM struct {
+	Rel  string
+	Href string
+}
+
+// allowedHREFScheme reports whether raw may be emitted as a live href on the
+// board: an absolute http/https URL. This is re-applied at render for every link
+// the board serves, independent of the append-time event.ValidateLink check —
+// defense in depth, so a link that reached disk by any path (an older event, a
+// hand-edited file) still cannot produce a javascript:/data:/file: href. The
+// board never fetches or previews raw; this is a scheme test, not an integration.
+func allowedHREFScheme(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return true
+	}
+	return false
+}
+
+// primaryLink picks the review link to feature on a card: the first whose rel is
+// "pr" or "mr" (a merge/pull request outranks a bare diff/ci link), else the
+// first link — considering only links that pass the render-time scheme floor. It
+// returns nil when no link survives.
+func primaryLink(links []event.Link) *linkVM {
+	var first *linkVM
+	for _, l := range links {
+		if !allowedHREFScheme(l.Href) {
+			continue
+		}
+		vm := linkVM{Rel: l.Rel, Href: l.Href}
+		if first == nil {
+			first = &vm
+		}
+		switch strings.ToLower(l.Rel) {
+		case "pr", "mr":
+			return &vm
+		}
+	}
+	return first
+}
+
+// reviewLink returns the primary review link to surface as a board card action,
+// or nil when there is none. It is scoped to the Review column: only a Review
+// attempt's latest `review` event is consulted, so a reopened (Running) or
+// blocked (Stuck) attempt never shows a stale PR button. A direct-merge flow with
+// no PR carries no link and the card degrades to no action.
+func reviewLink(a project.Attempt) *linkVM {
+	if a.State != project.Review {
+		return nil
+	}
+	for i := len(a.Events) - 1; i >= 0; i-- {
+		if a.Events[i].Type == "review" {
+			return primaryLink(a.Events[i].Links)
+		}
+	}
+	return nil
+}
+
+// safeLinks maps an event's links to chip view models, dropping any whose scheme
+// fails the render-time floor. The chips render as live hrefs, so the floor is
+// re-applied here (defense in depth) rather than trusting the stored value.
+func safeLinks(links []event.Link) []linkVM {
+	var out []linkVM
+	for _, l := range links {
+		if allowedHREFScheme(l.Href) {
+			out = append(out, linkVM{Rel: l.Rel, Href: l.Href})
+		}
+	}
+	return out
+}
+
+// linkPolicy is a goldmark AST transformer enforcing the render-time scheme floor
+// on markdown body hyperlinks. goldmark's default already blanks javascript:/
+// vbscript:/file: and non-image data: destinations, but it admits data:image/
+// {png,gif,jpeg,webp}; this closes that carve-out so a Link/Image destination is
+// http/https (or a scheme-less relative URL) only, and a disallowed autolink is
+// demoted to plain text. It is defense in depth, independent of the append-time
+// event.ValidateLink check.
+type linkPolicy struct{}
+
+func (linkPolicy) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	src := reader.Source()
+	var demote []*ast.AutoLink
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch v := n.(type) {
+		case *ast.Link:
+			if !bodyDestOK(v.Destination) {
+				v.Destination = nil
+			}
+		case *ast.Image:
+			if !bodyDestOK(v.Destination) {
+				v.Destination = nil
+			}
+		case *ast.AutoLink:
+			if !bodyDestOK(v.URL(src)) {
+				demote = append(demote, v)
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	// An autolink has no settable destination, so a disallowed one is replaced by
+	// its literal label as escaped text — no live href survives. Done after the
+	// walk so the tree is not mutated mid-traversal.
+	for _, a := range demote {
+		if p := a.Parent(); p != nil {
+			p.ReplaceChild(p, a, ast.NewString(a.Label(src)))
+		}
+	}
+}
+
+// bodyDestOK reports whether a markdown link/image/autolink destination may render
+// as a live href: a scheme-less relative URL (nothing to abuse) or an http/https
+// absolute URL. Everything else — javascript:, data:, vbscript:, file: — is
+// blanked or demoted by linkPolicy.
+func bodyDestOK(raw []byte) bool {
+	u, err := url.Parse(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "", "http", "https":
+		return true
+	}
+	return false
+}
+
 // New builds a Server over the given data root.
 func New(root store.Root) (*Server, error) {
-	s := &Server{root: root, md: goldmark.New(), alive: pidAlive}
+	// goldmark's default already blanks javascript:/vbscript:/file: and non-image
+	// data: link hrefs, but it admits data:image/{png,gif,jpeg,webp}. linkPolicy
+	// closes that carve-out so body links/images/autolinks are http/https (or
+	// relative) only — the render-time scheme floor, independent of the
+	// append-time event.ValidateLink check (defense in depth).
+	md := goldmark.New(goldmark.WithParserOptions(
+		parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
+	))
+	s := &Server{root: root, md: md, alive: pidAlive}
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
 			"stateLabel":  stateLabel,
 			"badge":       func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
 			"cardHref":    cardHref,
+			"reviewLink":  reviewLink,
 			"sessionDot":  s.sessionDot,
 			"paletteVars": paletteVars,
 		}).
@@ -204,6 +357,7 @@ type eventVM struct {
 	BodyHTML   template.HTML
 	Refs       []int
 	Artefacts  []string
+	Links      []linkVM
 	IsEsc      bool
 	Resolved   bool
 	ResolvedBy int
@@ -347,6 +501,7 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 			BodyHTML:  s.toHTML(e.Body),
 			Refs:      e.Refs,
 			Artefacts: e.Artefacts,
+			Links:     safeLinks(e.Links),
 		}
 		if e.Type == "escalation" {
 			ev.IsEsc = true
@@ -455,8 +610,10 @@ func agoPlural(n int, unit string) string {
 	return strconv.Itoa(n) + " " + unit + "s ago"
 }
 
-// toHTML renders trusted local markdown to HTML. goldmark's default config does
-// not pass through raw HTML, so this is safe to embed.
+// toHTML renders event/spec markdown to HTML. goldmark's default config does not
+// pass through raw HTML, and linkPolicy (wired in New) blanks any link/image/
+// autolink whose scheme is outside the http/https floor, so the result is safe to
+// embed even though bodies are agent-supplied, attacker-influenceable content.
 func (s *Server) toHTML(md string) template.HTML {
 	var buf bytes.Buffer
 	if err := s.md.Convert([]byte(md), &buf); err != nil {
