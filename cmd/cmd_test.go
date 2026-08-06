@@ -23,11 +23,12 @@ func run(t *testing.T, args ...string) (string, int) {
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
 	logURLs, logLinks, reviewURLs, reviewLinks = nil, nil, nil, nil
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
-	newTool, newModel, newRepo = "", "", ""
-	attemptTool, attemptModel, attemptFrom, attemptRepo = "", "", "", ""
+	newTool, newModel, newRepo, newBase = "", "", "", ""
+	attemptTool, attemptModel, attemptFrom, attemptRepo, attemptBase = "", "", "", "", ""
 	inboxMine = false
 	ctlLogsFollow, ctlLogsJSON = false, false
 	ctlStatusAll = false
+	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 
 	var out bytes.Buffer

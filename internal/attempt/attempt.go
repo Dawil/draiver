@@ -28,6 +28,7 @@ type Meta struct {
 	Tool    string    `yaml:"tool"`           // coding-agent adapter, e.g. claude-code
 	Model   string    `yaml:"model"`          // e.g. opus-4.8 (optional)
 	Repo    string    `yaml:"repo,omitempty"` // local path to the git working tree the attempt targets (drvctl-015)
+	Base    string    `yaml:"base,omitempty"` // branch the attempt lands back into: merge target / sync source (drvctl-021)
 	Actor   string    `yaml:"actor"`
 	Started time.Time `yaml:"started"`
 	From    string    `yaml:"from,omitempty"` // provenance: branched from this attempt
@@ -38,6 +39,7 @@ type New struct {
 	Tool  string
 	Model string
 	Repo  string
+	Base  string
 	Actor string
 	From  string
 	TS    time.Time // zero → now
@@ -66,6 +68,10 @@ func Create(root store.Root, ticket string, n New) (Meta, error) {
 	if n.Repo == "" {
 		return Meta{}, ErrRepoRequired
 	}
+	// Base is optional and stored trimmed. It records the branch this attempt lands
+	// back into; when omitted the commands layer defaults it to the bound repo's
+	// current branch, but a hand-made or legacy attempt may carry none.
+	n.Base = strings.TrimSpace(n.Base)
 	if err := os.MkdirAll(root.AttemptsDir(ticket), 0o755); err != nil {
 		return Meta{}, fmt.Errorf("attempt: ensure attempts dir: %w", err)
 	}
@@ -92,7 +98,7 @@ func Create(root store.Root, ticket string, n New) (Meta, error) {
 			return Meta{}, err
 		}
 		m := Meta{
-			ID: id, Ticket: ticket, Tool: n.Tool, Model: n.Model, Repo: n.Repo,
+			ID: id, Ticket: ticket, Tool: n.Tool, Model: n.Model, Repo: n.Repo, Base: n.Base,
 			Actor: n.Actor, Started: ts, From: n.From,
 		}
 		if err := writeMeta(root, m); err != nil {

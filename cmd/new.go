@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/worktree"
 )
 
 var (
@@ -21,6 +23,7 @@ var (
 	newTool     string
 	newModel    string
 	newRepo     string
+	newBase     string
 )
 
 var newCmd = &cobra.Command{
@@ -57,6 +60,12 @@ the imported frontmatter do (ambiguous). A rejected new writes nothing.`,
 		if strings.TrimSpace(newRepo) == "" {
 			return fmt.Errorf("%s", errNoRepo)
 		}
+		// Resolve the base branch before any side effect (like the title/repo checks),
+		// so a detached-HEAD repo with no --base is rejected leaving no orphan ticket.
+		base, err := resolveBase(cmd.Context(), newRepo, newBase)
+		if err != nil {
+			return err
+		}
 		if err := root.EnsureTicketDir(id); err != nil {
 			return err
 		}
@@ -68,6 +77,7 @@ the imported frontmatter do (ambiguous). A rejected new writes nothing.`,
 			Tool:  newTool,
 			Model: newModel,
 			Repo:  newRepo,
+			Base:  base,
 			Actor: resolveActor(),
 		})
 		if err != nil {
@@ -87,6 +97,41 @@ const errNoTitle = "a ticket title is required: pass --title, or --spec a file w
 // where to cut its worktree; a repo-less attempt would only fail later, at the
 // daemon, far from the person who could fix it here.
 const errNoRepo = "a repo path is required: pass --repo <local git working tree> so the supervisor knows where to cut this attempt's worktree"
+
+// resolveBase resolves the base branch a new attempt lands back into: an explicit
+// --base wins; otherwise it defaults to the branch the bound repo currently has
+// checked out (drvctl-021, the sibling of drvctl-017's repo capture). A
+// detached-HEAD repo has no branch to default from, so with no --base it errors
+// here — at creation, near the person who can fix it — rather than deferring the
+// failure to the first `ctl merge`. flagBase is trimmed; an explicit --base is
+// trusted as given (it need not exist yet — sync can create history under it).
+func resolveBase(ctx context.Context, repo, flagBase string) (string, error) {
+	if b := strings.TrimSpace(flagBase); b != "" {
+		return b, nil
+	}
+	head, ok, err := worktree.HeadBranch(ctx, repo)
+	switch {
+	case err != nil:
+		// The repo path is not a resolvable git working tree (git missing, or the
+		// path is not a repo). drvctl-017 keeps repo *validity* a daemon-time concern,
+		// not a creation-time one, so base defaulting follows suit: record no base and
+		// let `ctl merge`/`sync` surface it later, rather than hard-fail creation on a
+		// path the daemon would reject anyway.
+		return "", nil
+	case !ok:
+		// A real repo, but on a detached HEAD — there is a repo to consult yet no
+		// branch to default from, so require an explicit --base here, near the person
+		// who can fix it, per the spec.
+		return "", fmt.Errorf("%s", errNoBase)
+	default:
+		return head, nil
+	}
+}
+
+// errNoBase is returned when the base cannot be defaulted (the repo is on a
+// detached HEAD) and no --base was given. The base is the merge target / sync
+// source, so an attempt must record one to be landable (drvctl-021).
+const errNoBase = "a base branch is required: the repo is on a detached HEAD so it cannot be defaulted; pass --base <branch> (the branch this attempt lands back into)"
 
 // buildSpec produces the spec.md bytes for a new ticket and validates that the
 // title has exactly one source. It performs no side effects, so `new` can call
@@ -220,5 +265,6 @@ func init() {
 	newCmd.Flags().StringVar(&newTool, "tool", "", "coding-agent tool for the first attempt (e.g. claude-code)")
 	newCmd.Flags().StringVar(&newModel, "model", "", "model for the first attempt (e.g. opus-4.8)")
 	newCmd.Flags().StringVar(&newRepo, "repo", "", "required: local path to the git working tree this ticket's attempts target (the supervisor cuts each session's worktree from it)")
+	newCmd.Flags().StringVar(&newBase, "base", "", "branch this attempt lands back into via `ctl merge`/`ctl sync` (default: the repo's current branch)")
 	rootCmd.AddCommand(newCmd)
 }

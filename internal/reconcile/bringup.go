@@ -105,7 +105,12 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		Attempt: a.ID,
 		Adapter: adapterName,
 		Model:   a.Model,
-		Spec:    r.opt.BaseSpec,
+		// Cut the attempt's branch from its recorded base so a fresh land is a clean
+		// fast-forward (base is an ancestor by construction). Empty for a legacy
+		// attempt that recorded no base, which falls back to HEAD as before
+		// (drvctl-021).
+		Ref:  a.Base,
+		Spec: r.opt.BaseSpec,
 	})
 	if err != nil {
 		_ = sess.Close()

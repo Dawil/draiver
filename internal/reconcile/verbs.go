@@ -448,6 +448,7 @@ func (r *Reconciler) forkAttempt(ticket, parent string) (string, error) {
 		Tool:  pm.Tool,
 		Model: pm.Model,
 		Repo:  pm.Repo,
+		Base:  pm.Base,
 		Actor: r.opt.Actor,
 		From:  parent,
 	})

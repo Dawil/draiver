@@ -47,6 +47,7 @@ type Attempt struct {
 	Tool     string // from attempt.md
 	Model    string
 	Repo     string // local git working-tree path the attempt targets (from attempt.md)
+	Base     string // branch the attempt lands back into (from attempt.md; drvctl-021)
 
 	State           State
 	Enabled         bool // opted into daemon supervision (see DeriveEnabled)
@@ -153,7 +154,7 @@ func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
 	state, open := Derive(events)
 	return Attempt{
 		Ticket: ticket, ID: id, Title: title, Assignee: spec.Assignee,
-		Tool: am.Tool, Model: am.Model, Repo: am.Repo,
+		Tool: am.Tool, Model: am.Model, Repo: am.Repo, Base: am.Base,
 		State: state, Enabled: DeriveEnabled(events), Events: events, OpenEscalations: open,
 	}, nil
 }
