@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1003,5 +1004,233 @@ func TestBodyLinkSchemesSanitizedAtRender(t *testing.T) {
 		if strings.Contains(out, bad) {
 			t.Errorf("disallowed scheme produced a live href %q:\n%s", bad, out)
 		}
+	}
+}
+
+// --- inline escalation resolution (POST /ticket/{id}/{attempt}/resolve) ---
+
+// seedEscalation builds one attempt in a fresh root: `created` (#1) then one open
+// `escalation` (#2), so the attempt derives Stuck (NeedsMe). It is the fixture for
+// the resolve tests; extra escalations/resolutions are appended per test.
+func seedEscalation(t *testing.T) store.Root {
+	t.Helper()
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("ESC-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("ESC-1"), []byte("---\nid: ESC-1\ntitle: Escalated\n---\n\nspec"), 0o644)
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "escalation", Actor: "agent:x", Body: "which base image?"}); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// postResolve posts the resolve form for one escalation. It sets a same-origin
+// Origin header so the CSRF guard passes, mirroring a real htmx post.
+func postResolve(t *testing.T, h http.Handler, id, att string, seq int, answer string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{"seq": {strconv.Itoa(seq)}, "answer": {answer}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/"+id+"/"+att+"/resolve", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestResolveBoxRendersForOpenEscalationOnly pins the render contract: an open
+// escalation carries a resolution box (with the hx-preserve'd textarea so the 3s
+// poll never clobbers a half-typed answer), and once resolved it shows only the
+// "resolved by #N" note with no box.
+func TestResolveBoxRendersForOpenEscalationOnly(t *testing.T) {
+	root := seedEscalation(t)
+	h := newServerOver(t, root)
+
+	page := get(t, h, "/ticket/ESC-1/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="resolve-form-2"`,
+		`data-testid="resolve-input-2"`,
+		`id="resolve-input-2"`,
+		`hx-preserve="true"`,
+		`data-testid="resolve-submit-2"`,
+		"/ticket/ESC-1/0001/resolve",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("open escalation detail missing %q", want)
+		}
+	}
+
+	// Answer it out of band; the box must disappear, leaving only the resolved note.
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "resolution", Actor: "human:d", Refs: []int{2}, Body: "use alpine"}); err != nil {
+		t.Fatal(err)
+	}
+	page = get(t, h, "/ticket/ESC-1/0001").Body.String()
+	if !strings.Contains(page, `data-testid="resolved-2"`) {
+		t.Errorf("resolved escalation should show the resolved note")
+	}
+	if strings.Contains(page, `data-testid="resolve-form-2"`) {
+		t.Errorf("resolved escalation must not render a resolve box")
+	}
+}
+
+// TestResolvePostClearsStuck pins the happy path: posting an answer appends
+// exactly one resolution refing that escalation's seq, attributable to a human,
+// and the attempt leaves Stuck for Running in the same live fragment.
+func TestResolvePostClearsStuck(t *testing.T) {
+	root := seedEscalation(t)
+	h := newServerOver(t, root)
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.NeedsMe {
+		t.Fatalf("seed state = %q, want NeedsMe (Stuck)", got)
+	}
+
+	before, _ := ticketlog.Read(root, "ESC-1", "0001")
+	rr := postResolve(t, h, "ESC-1", "0001", 2, "use the alpine base image")
+	if rr.Code != 200 {
+		t.Fatalf("POST resolve = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+
+	after, _ := ticketlog.Read(root, "ESC-1", "0001")
+	if len(after) != len(before)+1 {
+		t.Fatalf("expected exactly one new event, got %d -> %d", len(before), len(after))
+	}
+	last := after[len(after)-1]
+	if last.Type != "resolution" {
+		t.Errorf("appended event type = %q, want resolution", last.Type)
+	}
+	if len(last.Refs) != 1 || last.Refs[0] != 2 {
+		t.Errorf("resolution refs = %v, want [2]", last.Refs)
+	}
+	if last.Body != "use the alpine base image" {
+		t.Errorf("resolution body = %q, want the posted answer", last.Body)
+	}
+	if !strings.HasPrefix(last.Actor, "human:") {
+		t.Errorf("resolution actor = %q, want a resolved human: identity", last.Actor)
+	}
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.Running {
+		t.Errorf("after resolve, state = %q, want Running", got)
+	}
+
+	out := rr.Body.String()
+	if !strings.Contains(out, "state-Running") {
+		t.Errorf("live fragment badge should leave Stuck for Running\n%s", out)
+	}
+	if !strings.Contains(out, `data-testid="resolved-2"`) {
+		t.Errorf("live fragment should flip the escalation to resolved\n%s", out)
+	}
+	if strings.Contains(out, `data-testid="resolve-form-2"`) {
+		t.Errorf("live fragment should no longer render the resolve box")
+	}
+	if strings.Contains(out, "<html") {
+		t.Errorf("resolve response must be a fragment, not a full page")
+	}
+}
+
+// TestResolvePostRejectsBadSeq pins the server-side guards, matching the CLI and
+// closing the gap it leaves: an unknown seq, a non-escalation seq, an
+// already-resolved seq, and an empty answer are all rejected and none append.
+func TestResolvePostRejectsBadSeq(t *testing.T) {
+	root := seedEscalation(t)
+	h := newServerOver(t, root)
+	// Pre-resolve #2 so the already-resolved path has a target.
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "escalation", Actor: "agent:x", Body: "second question?"}); err != nil {
+		t.Fatal(err) // #3, left open
+	}
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "resolution", Actor: "human:d", Refs: []int{2}, Body: "answered #2"}); err != nil {
+		t.Fatal(err) // #4 resolves #2
+	}
+
+	cases := []struct {
+		name   string
+		seq    int
+		answer string
+	}{
+		{"unknown seq", 99, "no such event"},
+		{"non-escalation seq", 1, "the created event is not an escalation"},
+		{"already-resolved seq", 2, "answered twice"},
+		{"empty answer", 3, "   "},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			before, _ := ticketlog.Read(root, "ESC-1", "0001")
+			rr := postResolve(t, h, "ESC-1", "0001", c.seq, c.answer)
+			if rr.Code < 400 || rr.Code >= 500 {
+				t.Errorf("POST resolve %s = %d, want a 4xx rejection\n%s", c.name, rr.Code, rr.Body.String())
+			}
+			after, _ := ticketlog.Read(root, "ESC-1", "0001")
+			if len(after) != len(before) {
+				t.Errorf("%s must not append an event (%d -> %d)", c.name, len(before), len(after))
+			}
+		})
+	}
+}
+
+// TestResolveTwoOpenEscalationsIndependent pins that with two open escalations,
+// each box answers exactly its own seq: resolving one leaves the other open (the
+// attempt stays Stuck) and only clears once both are answered.
+func TestResolveTwoOpenEscalationsIndependent(t *testing.T) {
+	root := seedEscalation(t)
+	// A second open escalation (#3) alongside #2.
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "escalation", Actor: "agent:x", Body: "and the DB url?"}); err != nil {
+		t.Fatal(err)
+	}
+	h := newServerOver(t, root)
+
+	// Both boxes render.
+	page := get(t, h, "/ticket/ESC-1/0001").Body.String()
+	for _, want := range []string{`data-testid="resolve-form-2"`, `data-testid="resolve-form-3"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("detail with two open escalations missing %q", want)
+		}
+	}
+
+	// Resolve #2 only: #3 stays open, attempt stays Stuck.
+	rr := postResolve(t, h, "ESC-1", "0001", 2, "alpine")
+	if rr.Code != 200 {
+		t.Fatalf("POST resolve #2 = %d\n%s", rr.Code, rr.Body.String())
+	}
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.NeedsMe {
+		t.Errorf("after resolving one of two, state = %q, want NeedsMe (still Stuck)", got)
+	}
+	out := rr.Body.String()
+	if !strings.Contains(out, `data-testid="resolved-2"`) {
+		t.Errorf("escalation #2 should be resolved\n%s", out)
+	}
+	if !strings.Contains(out, `data-testid="resolve-form-3"`) {
+		t.Errorf("escalation #3 should still carry its own box\n%s", out)
+	}
+	if strings.Contains(out, `data-testid="resolve-form-2"`) {
+		t.Errorf("escalation #2's box should be gone")
+	}
+
+	// Resolve #3: now the attempt clears.
+	if rr := postResolve(t, h, "ESC-1", "0001", 3, "from a fixture"); rr.Code != 200 {
+		t.Fatalf("POST resolve #3 = %d\n%s", rr.Code, rr.Body.String())
+	}
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.Running {
+		t.Errorf("after resolving both, state = %q, want Running", got)
+	}
+}
+
+// TestResolveCrossOriginRejected pins the CSRF guard on the resolve write: a POST
+// whose Origin names a different host is refused 403 and nothing is appended.
+func TestResolveCrossOriginRejected(t *testing.T) {
+	root := seedEscalation(t)
+	h := newServerOver(t, root)
+	before, _ := ticketlog.Read(root, "ESC-1", "0001")
+	form := url.Values{"seq": {"2"}, "answer": {"forged"}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/ESC-1/0001/resolve", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://evil.example")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin resolve = %d, want 403", rr.Code)
+	}
+	after, _ := ticketlog.Read(root, "ESC-1", "0001")
+	if len(after) != len(before) {
+		t.Errorf("cross-origin resolve must not append an event")
 	}
 }

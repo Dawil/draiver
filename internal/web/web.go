@@ -1,12 +1,14 @@
 // Package web serves the Draiver board: a self-contained HTMX server that
 // renders the four control states per ATTEMPT from the filesystem log. Each
 // attempt is its own card; one ticket can appear several times. It is
-// read-mostly — the one mutation it allows is appending a typed log event from
-// the attempt detail page (POST /ticket/{id}/{attempt}/log), which is how a
-// human records a note/gotcha/decision or acts on a Review claim (Decision to
-// reopen, Done to close). That single write is not reimplemented here: it shells
-// the draiver CLI (draiver log / draiver done), so the webui and a human at a
-// terminal share one append code path (see runDraiverLog).
+// read-mostly — its two mutations both come from the attempt detail page:
+// appending a typed log event (POST /ticket/{id}/{attempt}/log — a
+// note/gotcha/decision, or a Review action: Decision to reopen, Done to close),
+// and answering an open escalation (POST /ticket/{id}/{attempt}/resolve — the
+// board affordance for `draiver resolve`). Neither write is reimplemented here:
+// both shell the draiver CLI (draiver log / draiver done / draiver resolve), so
+// the webui and a human at a terminal share one append code path (see
+// runDraiverLog and runDraiverResolve).
 package web
 
 import (
@@ -90,6 +92,21 @@ func resolveWebActor() string {
 // os.Executable() is the test binary, not draiver.
 var draiverBinOverride string
 
+// draiverExe resolves the draiver binary the write shell-outs invoke:
+// draiverBinOverride when set (tests, where os.Executable() is the test binary,
+// not draiver), else the running executable — under `draiver webui` that is
+// draiver itself.
+func draiverExe() (string, error) {
+	if draiverBinOverride != "" {
+		return draiverBinOverride, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate draiver binary: %w", err)
+	}
+	return exe, nil
+}
+
 // runDraiverLog appends a web-composed event by invoking the draiver CLI rather
 // than reimplementing the append in the web layer: note/gotcha/decision go
 // through `draiver log --type T`, and the terminal action through `draiver done`
@@ -99,12 +116,9 @@ var draiverBinOverride string
 // "-" is never parsed as a flag. On failure it surfaces the CLI's combined
 // output for a legible error.
 func (s *Server) runDraiverLog(typ, id, att, body string) error {
-	exe := draiverBinOverride
-	if exe == "" {
-		var err error
-		if exe, err = os.Executable(); err != nil {
-			return fmt.Errorf("locate draiver binary: %w", err)
-		}
+	exe, err := draiverExe()
+	if err != nil {
+		return err
 	}
 	var args []string
 	if typ == "done" {
@@ -116,6 +130,27 @@ func (s *Server) runDraiverLog(typ, id, att, body string) error {
 	cmd := exec.Command(exe, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runDraiverResolve answers an escalation by invoking `draiver resolve` rather
+// than reimplementing the resolution append in the web layer — the same verb a
+// human runs at a terminal, so the board and the CLI share one write path (see
+// runDraiverLog). The escalation seq and the answer go as positional args after
+// "--" so an answer beginning with "-" is never parsed as a flag; the server's
+// data root, actor, and target attempt go as explicit flags. On failure it
+// surfaces the CLI's combined output for a legible error.
+func (s *Server) runDraiverResolve(id, att string, seq int, answer string) error {
+	exe, err := draiverExe()
+	if err != nil {
+		return err
+	}
+	args := []string{"resolve", "--data", s.root.Dir, "--actor", s.actor, "--attempt", att,
+		"--", id, strconv.Itoa(seq), answer}
+	cmd := exec.Command(exe, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver resolve: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -368,6 +403,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -730,6 +766,94 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 	// 286 path), so we do not need to signal termination from this response.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(live)
+}
+
+// handleResolve answers an open escalation from the attempt timeline (POST
+// /ticket/{id}/{attempt}/resolve) and returns the re-rendered live fragment, so
+// the escalation flips to "resolved by #N", the state badge leaves Stuck, and the
+// count bump all land from one swap. It is the board affordance for `draiver
+// resolve`: the write goes through the CLI (runDraiverResolve), not a re-appended
+// event here, so the board and a terminal share one resolution path.
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	seq, err := strconv.Atoi(strings.TrimSpace(r.FormValue("seq")))
+	if err != nil {
+		http.Error(w, "draiver: escalation seq must be an integer", http.StatusBadRequest)
+		return
+	}
+	answer := strings.TrimSpace(r.FormValue("answer"))
+	if answer == "" {
+		http.Error(w, "draiver: a resolution needs an answer", http.StatusBadRequest)
+		return
+	}
+	// Guard against the derived truth, never the posted seq: it must name an open
+	// escalation on THIS attempt. This rejects an unknown/non-escalation seq and an
+	// already-resolved one (a double-submit or forged post) before the shell-out —
+	// the resolve box only renders for open escalations, and `draiver resolve`
+	// re-checks seq+type once more when it runs.
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if ok, status, msg := classifyResolveTarget(a, seq); !ok {
+		http.Error(w, "draiver: "+msg, status)
+		return
+	}
+	if err := s.runDraiverResolve(id, att, seq, answer); err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(live)
+}
+
+// classifyResolveTarget validates a posted seq against the derived attempt before
+// the resolve shell-out, without trusting the form. It mirrors the CLI's own
+// checks (cmd/resolve.go) and adds the one the CLI lacks: an unknown or
+// non-escalation seq is a bad request, an escalation that already has a later
+// resolution is a conflict (a double-submit or forged post), and an open
+// escalation passes. It reads derived state (Events for seq/type, OpenEscalations
+// for openness) — it does not re-append; the write itself stays in the CLI.
+func classifyResolveTarget(a project.Attempt, seq int) (ok bool, status int, msg string) {
+	var esc *event.Event
+	for i := range a.Events {
+		if a.Events[i].Seq == seq {
+			esc = &a.Events[i]
+			break
+		}
+	}
+	if esc == nil {
+		return false, http.StatusBadRequest, fmt.Sprintf("no event #%d on %s/%s", seq, a.Ticket, a.ID)
+	}
+	if esc.Type != "escalation" {
+		return false, http.StatusBadRequest, fmt.Sprintf("event #%d on %s/%s is a %q, not an escalation", seq, a.Ticket, a.ID, esc.Type)
+	}
+	for _, o := range a.OpenEscalations {
+		if o.Seq == seq {
+			return true, 0, ""
+		}
+	}
+	return false, http.StatusConflict, fmt.Sprintf("escalation #%d on %s/%s is already resolved", seq, a.Ticket, a.ID)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
