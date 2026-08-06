@@ -91,6 +91,20 @@ body {
 .log-head { display: flex; align-items: baseline; gap: 12px; }
 .order-toggle { margin-left: auto; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
 .order-toggle:hover { border-color: var(--accent); }
+/* Compose box: append a typed entry from the detail page. */
+.log-compose { margin: 12px 0; display: flex; flex-direction: column; gap: 8px; }
+.compose-row { display: flex; gap: 8px; align-items: center; }
+.compose-type { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; }
+.compose-submit, .action-decision, .action-done { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.compose-submit:hover, .action-decision:hover { border-color: var(--accent); color: var(--accent); }
+.compose-body { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 14px; resize: vertical; }
+.compose-body:focus, .compose-type:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Review actions: the two state-changing verbs, shown only on a Review attempt. */
+.review-actions { display: flex; gap: 8px; margin: 0 0 12px; }
+.action-decision { border-color: var(--running); color: var(--running); }
+.action-done { border-color: var(--done); color: var(--done); }
+.action-done:hover { background: color-mix(in srgb, var(--done) 18%, transparent); }
+
 .timeline { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
 /* The DOM is always oldest-first; the toggle flips only the visual order (stored
    on .log-region, which survives htmx innerHTML swaps) so polling never resets

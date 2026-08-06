@@ -1,7 +1,10 @@
-// Package web serves the read-only Draiver board: a self-contained HTMX server
-// that renders the four control states per ATTEMPT from the filesystem log. Each
-// attempt is its own card; one ticket can appear several times. It never writes
-// and never spawns processes.
+// Package web serves the Draiver board: a self-contained HTMX server that
+// renders the four control states per ATTEMPT from the filesystem log. Each
+// attempt is its own card; one ticket can appear several times. It is
+// read-mostly — the one mutation it allows is appending a typed log event from
+// the attempt detail page (POST /ticket/{id}/{attempt}/log), which is how a
+// human records a note/gotcha/decision or acts on a Review claim (Decision to
+// reopen, Done to close). It still never spawns processes.
 package web
 
 import (
@@ -11,13 +14,18 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yuin/goldmark"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -26,14 +34,71 @@ var templatesFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// Server renders the read-only board and attempt detail from a data root.
+// Server renders the board and attempt detail from a data root and appends
+// human-composed log events from the detail page.
 type Server struct {
 	root store.Root
 	tmpl *template.Template
 	md   goldmark.Markdown
+	// actor is the identity stamped on web-composed log events, resolved once at
+	// construction (see resolveWebActor).
+	actor string
 	// alive probes whether a recorded session pid is still running. It defaults to
 	// a signal-0 OS probe (pidAlive); tests inject a deterministic stub.
 	alive func(pid int) bool
+}
+
+// composeTypes is the curated allow-list of event types the web compose box may
+// append. draiver log accepts a free-form --type, but the web form must never
+// let a human hand-type a lifecycle type that owns a dedicated flow —
+// escalation/resolution (the escalate/resolve pair), review (the agent's own
+// claim), enable/disable (supervision), or created. Only note and gotcha (plain
+// context), decision (which also reopens a Review attempt to Running), and done
+// (the Review terminal action) are allowed; any other type is a 400.
+var composeTypes = map[string]bool{
+	"note":     true,
+	"gotcha":   true,
+	"decision": true,
+	"done":     true,
+}
+
+// resolveWebActor resolves the identity stamped on web-composed events. The
+// webui is a single-user, localhost tool, so the human at the browser is the
+// same operator the CLI records: $DRAIVER_ACTOR if set, else human:$USER, else
+// human:web. It mirrors the CLI's resolveActor so an entry composed from the
+// page is attributable exactly like one logged from a terminal.
+func resolveWebActor() string {
+	if v := os.Getenv("DRAIVER_ACTOR"); v != "" {
+		return v
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return "human:" + u
+	}
+	return "human:web"
+}
+
+// sameOrigin guards the state-changing POST against cross-site request forgery.
+// The webui binds to localhost by default but is still a browser-reachable
+// origin, so we refuse any request whose Origin (or, absent that, Referer) names
+// a different host than the one it was served from. Browsers always attach
+// Origin to a cross-origin POST, so a forged submit from another site is
+// rejected while a same-origin htmx post (Origin host == Host) passes. A request
+// carrying neither header is not a browser CSRF vector (there are no ambient
+// credentials to ride), so it is allowed — this keeps non-browser clients (curl,
+// tests) working.
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 // stateLabels overrides how a control state is shown in the human-facing web UI.
@@ -77,7 +142,7 @@ func cardHref(a project.Attempt) string {
 
 // New builds a Server over the given data root.
 func New(root store.Root) (*Server, error) {
-	s := &Server{root: root, md: goldmark.New(), alive: pidAlive}
+	s := &Server{root: root, md: goldmark.New(), actor: resolveWebActor(), alive: pidAlive}
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
 			"stateLabel":  stateLabel,
@@ -113,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -393,8 +459,8 @@ func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	var buf bytes.Buffer
-	if err := s.tmpl.ExecuteTemplate(&buf, "attempt-live", vm); err != nil {
+	live, err := s.executeLive(vm)
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -403,7 +469,76 @@ func (s *Server) handleAttemptLive(w http.ResponseWriter, r *http.Request) {
 		// 286 tells htmx to cancel the polling trigger on a terminal attempt.
 		w.WriteHeader(286)
 	}
-	buf.WriteTo(w)
+	w.Write(live)
+}
+
+// executeLive renders the attempt-live fragment (the log <ol> plus the OOB state
+// badge and log count) for one attempt. It is shared by the live poll and the
+// log-append POST so both update every live region from one response body.
+func (s *Server) executeLive(vm detailVM) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, "attempt-live", vm); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// handleLogAppend appends a human-composed typed event to an attempt (POST
+// /ticket/{id}/{attempt}/log) and returns the re-rendered live fragment, so the
+// new entry, the state badge, and the log count all update from one swap. It is
+// the webui's single write path: a Decision reopens a Review attempt to Running
+// and a Done closes it (both via Derive on the appended lifecycle event), while
+// note/gotcha/decision on any other attempt just record context.
+func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	typ := r.FormValue("type")
+	if !composeTypes[typ] {
+		http.Error(w, "draiver: unsupported log type "+strconv.Quote(typ), http.StatusBadRequest)
+		return
+	}
+	// The two Review actions (decision/done) may fire without a typed reason, so
+	// they fall back to a sensible default body; a plain note/gotcha with no body
+	// is a mistake and is rejected.
+	body := strings.TrimSpace(r.FormValue("body"))
+	if body == "" {
+		switch typ {
+		case "done":
+			body = "Ticket closed."
+		case "decision":
+			body = "Reopened to Running."
+		default:
+			http.Error(w, "draiver: a "+typ+" needs a message", http.StatusBadRequest)
+			return
+		}
+	}
+	if _, err := ticketlog.Append(s.root, id, att, event.Event{Type: typ, Actor: s.actor, Body: body}); err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Always 200: the badge flips in-place via the OOB swap. A Done attempt's log
+	// region keeps its poll attribute and self-cancels on its next /live poll (the
+	// 286 path), so we do not need to signal termination from this response.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(live)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

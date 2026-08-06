@@ -12,9 +12,11 @@ var webuiAddr string
 
 var webuiCmd = &cobra.Command{
 	Use:   "webui",
-	Short: "Run the read-only HTMX board over a data folder",
-	Long: "webui serves a read-only board of the four control states plus a per-ticket\n" +
-		"detail view. It never writes to the data folder and never spawns processes.",
+	Short: "Run the HTMX board over a data folder",
+	Long: "webui serves a board of the four control states plus a per-ticket detail\n" +
+		"view. Its one write path is appending a typed log entry from the detail page\n" +
+		"(a note/gotcha/decision, or a Review attempt's Decision/Done action); it never\n" +
+		"spawns processes.",
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()
