@@ -112,6 +112,28 @@ func TestLoad_ReviewLinkHosts(t *testing.T) {
 	}
 }
 
+func TestLoad_PrimaryRemote(t *testing.T) {
+	// Omitted → empty (unconfigured; the agent falls back to the sole remote or
+	// surfaces the ambiguity when there are several).
+	c, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PrimaryRemote != "" {
+		t.Errorf("default PrimaryRemote = %q, want empty (omitted)", c.PrimaryRemote)
+	}
+
+	// Set → used verbatim.
+	path := writeConfig(t, `{"primary_remote": "forgejo"}`)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PrimaryRemote != "forgejo" {
+		t.Errorf("PrimaryRemote = %q, want %q", c.PrimaryRemote, "forgejo")
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")
