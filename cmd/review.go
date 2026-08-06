@@ -18,7 +18,12 @@ var reviewCmd = &cobra.Command{
 	Short: "Claim a ticket is done (a claim, not a fact, for a human to verify)",
 	Long: "review claims the ticket is complete for a human to verify. Attach the\n" +
 		"review link — the draft PR, merge request, or diff URL where the change can\n" +
-		"be seen — with --url (rel defaults to pr) or --link rel=uri for other rels.",
+		"be seen — with --url (rel defaults to pr) or --link rel=uri for other rels.\n" +
+		"\n" +
+		"Push your branch to a git remote first so the link resolves: review only\n" +
+		"logs and validates the link, it does not push or open a PR. With one remote\n" +
+		"use it; with several, push to the config's primary_remote. Prefer a compare\n" +
+		"URL (--link compare=<base>/compare/<main>...<branch>) when there is no PR.",
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]

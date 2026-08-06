@@ -57,6 +57,16 @@ type Config struct {
 	// Permissions and layers on top of the hardcoded {http, https} scheme floor,
 	// which it cannot loosen (see event.ValidateLink).
 	ReviewLinkHosts []string `json:"review_link_hosts"`
+
+	// PrimaryRemote names the git remote an agent should push to (and derive the
+	// review URL from) when a working tree has more than one remote configured —
+	// e.g. "forgejo" when origin=GitHub upstream and forgejo=the review forge. It
+	// disambiguates only the multi-remote case: with exactly one remote the agent
+	// uses it regardless, and with several remotes and no PrimaryRemote set the
+	// agent must not guess (it surfaces the ambiguity rather than pushing to the
+	// wrong forge). Empty (the default) leaves the choice unconfigured. This is
+	// prompt/agent policy — draiver itself does not push; see the onboarding skill.
+	PrimaryRemote string `json:"primary_remote"`
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -78,6 +88,7 @@ type file struct {
 	PermissionsDefault *string           `json:"permissions_default"`
 	Permissions        map[string]string `json:"permissions"`
 	ReviewLinkHosts    []string          `json:"review_link_hosts"`
+	PrimaryRemote      *string           `json:"primary_remote"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -137,6 +148,9 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.ReviewLinkHosts != nil {
 		c.ReviewLinkHosts = f.ReviewLinkHosts
+	}
+	if f.PrimaryRemote != nil {
+		c.PrimaryRemote = *f.PrimaryRemote
 	}
 	return c, nil
 }
