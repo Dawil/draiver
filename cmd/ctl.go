@@ -41,7 +41,7 @@ var (
 	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
 	ctlLogsJSON      bool
-	ctlStatusAll     bool // include terminal Done attempts in the list view
+	ctlStatusAll     bool              // include terminal Done attempts in the list view
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
 
 	// restart depth flags — the cumulative degree axis (drvctl-016). The deepest
@@ -314,8 +314,13 @@ var ctlLogsCmd = &cobra.Command{
 		"assistant prose, tool calls, tool errors, permission prompts, usage/cost and " +
 		"turn boundaries — the same one-liners the live start/restart view prints — with " +
 		"the stream-json envelope (event uuids, session id) dropped.\n\n" +
+		"It also interleaves draiverctld's own operational health (session/ctl.jsonl): " +
+		"error-start/error-end transitions for a wedged attempt — a worktree it cannot " +
+		"cut, a model it cannot reach — so the logs show what the supervisor is doing, not " +
+		"only what the agent said (drvctl-027).\n\n" +
 		"--json emits the raw stream.jsonl lines verbatim, byte-for-byte: the machine " +
-		"form for `| jq` and replay. -f/--follow works in both modes.",
+		"form for `| jq` and replay (health is human-render only). -f/--follow works in " +
+		"both modes.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := resolveRoot()
@@ -328,7 +333,9 @@ var ctlLogsCmd = &cobra.Command{
 		}
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return tailStream(ctx, cmd.OutOrStdout(), root.SessionStreamPath(ticket, att), ctlLogsFollow, !ctlLogsJSON)
+		return tailStream(ctx, cmd.OutOrStdout(),
+			root.SessionStreamPath(ticket, att), root.SessionCtlLogPath(ticket, att),
+			ctlLogsFollow, !ctlLogsJSON)
 	},
 }
 
@@ -549,10 +556,18 @@ func (r *streamRenderer) renderEvent(ev agent.Event) {
 	}
 }
 
-// emit writes body under role, one physical line at a time, each carrying the
-// full `[<prefix>]: ` so every line stays independently greppable (drvctl-025 #8).
+// emit writes body under role at render-time wallclock, one physical line at a
+// time, each carrying the full `[<prefix>]: ` so every line stays independently
+// greppable (drvctl-025 #8).
 func (r *streamRenderer) emit(role, body string) {
-	prefix := r.prefix(role)
+	r.emitAt(role, r.now().Format(tsLayout), body)
+}
+
+// emitAt is emit with an explicit timestamp column, for a source that carries its
+// own recorded time (the ctl.jsonl health log) rather than the stream's render-time
+// approximation.
+func (r *streamRenderer) emitAt(role, ts, body string) {
+	prefix := r.prefixAt(role, ts)
 	for _, line := range r.bodyLines(role, body) {
 		fmt.Fprintln(r.out, prefix+line)
 	}
@@ -564,6 +579,13 @@ func (r *streamRenderer) emit(role, body string) {
 // tinted by its colour — the datetime, tokens, brackets and delimiter stay
 // uncoloured (drvctl-025 #17).
 func (r *streamRenderer) prefix(role string) string {
+	return r.prefixAt(role, r.now().Format(tsLayout))
+}
+
+// prefixAt renders the prefix column with an explicit datetime stamp, so a source
+// carrying its own recorded time (ctl.jsonl health) sits in the same fixed-width
+// column as the render-time-stamped agent stream.
+func (r *streamRenderer) prefixAt(role, ts string) string {
 	tok := "-"
 	if r.ctxTokens >= 0 {
 		tok = commas(r.ctxTokens)
@@ -578,7 +600,7 @@ func (r *streamRenderer) prefix(role string) string {
 	if pad := roleWidth - len(role); pad > 0 {
 		roleField += strings.Repeat(" ", pad)
 	}
-	return fmt.Sprintf("[%s  %*s  %s]: ", r.now().Format(tsLayout), tokenWidth, tok, roleField)
+	return fmt.Sprintf("[%s  %*s  %s]: ", ts, tokenWidth, tok, roleField)
 }
 
 // bodyLines turns an event body into the physical lines to print under the
@@ -718,51 +740,76 @@ func commas(n int) string {
 	return b.String()
 }
 
-// tailStream prints a session's recorded stream (stream.jsonl). In render mode —
-// the human-readable default — each raw stream-json line is normalized back into
-// events and printed through renderEvent, the same vocabulary the live view uses,
-// with transport noise dropped; in raw mode (--json) the lines are emitted
-// verbatim, byte-for-byte, so `| jq` pipelines keep working. Without follow it
-// prints what is on disk and returns; with follow it keeps emitting appended
-// lines until ctx is cancelled (Ctrl-C), waiting for the file to appear if the
-// session has not been started yet.
-func tailStream(ctx context.Context, out io.Writer, path string, follow, render bool) error {
+// tailStream prints an attempt's recorded logs. In raw mode (--json) it emits the
+// stream.jsonl lines verbatim, byte-for-byte, so `| jq` pipelines keep working —
+// the machine form is unchanged, and ctl.jsonl health is *not* folded in (it is a
+// human-render concern only). In render mode — the human-readable default — it
+// interleaves two sources through one stateful renderer: the agent stream
+// (stream.jsonl, normalized back into the live view's event vocabulary with
+// transport noise dropped) and draiverctld's own operational health transitions
+// (ctl.jsonl, drvctl-027). Without follow it prints what is on disk and returns;
+// with follow it keeps emitting appended lines from both files until ctx is
+// cancelled (Ctrl-C), waiting for either to appear if the session has not started.
+func tailStream(ctx context.Context, out io.Writer, streamPath, ctlPath string, follow, render bool) error {
+	if !render {
+		return tailRaw(ctx, out, streamPath, follow)
+	}
+
+	// One renderer for both sources: it carries the running token tally forward, and
+	// a shared prefix column keeps the two visually aligned as they interleave.
+	sr := newStreamRenderer(out)
+	stream := &lineReader{path: streamPath}
+	ctl := &lineReader{path: ctlPath}
+	defer stream.close()
+	defer ctl.close()
+
+	printed := false
+	for {
+		n := stream.drain(func(line string) { sr.renderLine(line); printed = true })
+		n += ctl.drain(func(line string) { sr.renderHealthLine(line); printed = true })
+		if !follow {
+			// Flush any partial trailing line held for a newline that will not come.
+			if stream.flush(func(line string) { sr.renderLine(line); printed = true }) {
+				printed = true
+			}
+			if ctl.flush(func(line string) { sr.renderHealthLine(line); printed = true }) {
+				printed = true
+			}
+			if !printed {
+				fmt.Fprintln(out, "(no session stream yet)")
+			}
+			return nil
+		}
+		if n == 0 {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+	}
+}
+
+// tailRaw is the --json path: the stream.jsonl bytes, verbatim. It preserves the
+// exact pre-drvctl-027 behaviour — a `| jq` / replay consumer sees the on-disk
+// journal untouched, and health never enters this stream.
+func tailRaw(ctx context.Context, out io.Writer, path string, follow bool) error {
 	f, err := openStream(ctx, path, follow)
 	if err != nil {
 		return err
 	}
 	if f == nil {
-		// Absent stream and not following (or the wait was cancelled): a session
-		// that simply has not produced a stream yet, not an error.
 		if !follow {
 			fmt.Fprintln(out, "(no session stream yet)")
 		}
 		return nil
 	}
 	defer f.Close()
-
-	// The renderer is stateful (it carries the running token tally forward), so
-	// build one for the whole stream. Raw --json mode needs none.
-	var sr *streamRenderer
-	if render {
-		sr = newStreamRenderer(out)
-	}
 	r := bufio.NewReader(f)
-	var pending string // render mode only: bytes read past the last newline
 	for {
 		line, err := r.ReadString('\n')
 		if len(line) > 0 {
-			switch {
-			case !render:
-				_, _ = io.WriteString(out, line)
-			case strings.HasSuffix(line, "\n"):
-				sr.renderLine(pending + line)
-				pending = ""
-			default:
-				// A partial trailing line (EOF before a newline): hold it until its
-				// newline arrives so we never try to parse half a JSON object.
-				pending += line
-			}
+			_, _ = io.WriteString(out, line)
 		}
 		if err == nil {
 			continue
@@ -771,9 +818,6 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow, render 
 			return err
 		}
 		if !follow {
-			if render && pending != "" {
-				sr.renderLine(pending)
-			}
 			return nil
 		}
 		select {
@@ -784,12 +828,107 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow, render 
 	}
 }
 
+// lineReader tails one append-only file a line at a time, opening it lazily (so a
+// file that does not exist yet is simply skipped until it appears) and holding a
+// partial trailing line until its newline arrives — so a half-written JSON object
+// is never handed to a parser. drain reads every complete line available right now;
+// flush releases a held partial line at end-of-input in non-follow mode. It is the
+// tailing primitive tailStream interleaves the agent stream and the health log
+// through.
+type lineReader struct {
+	path    string
+	f       *os.File
+	r       *bufio.Reader
+	pending string
+}
+
+// drain reads all currently-available complete lines, calling emit for each, and
+// returns how many it emitted. It lazily opens the file on first use (and each
+// call, until it exists). A bufio.Reader does not cache EOF, so re-draining the
+// same reader after the file has grown yields the new lines — the tail property.
+func (lr *lineReader) drain(emit func(string)) int {
+	if lr.f == nil {
+		f, err := os.Open(lr.path)
+		if err != nil {
+			return 0 // not created yet (or unreadable) — try again next drain
+		}
+		lr.f = f
+		lr.r = bufio.NewReader(f)
+	}
+	n := 0
+	for {
+		line, err := lr.r.ReadString('\n')
+		if len(line) > 0 {
+			if strings.HasSuffix(line, "\n") {
+				emit(lr.pending + line)
+				lr.pending = ""
+				n++
+			} else {
+				lr.pending += line
+			}
+		}
+		if err != nil {
+			return n // EOF (or read error): stop this pass, keep position for the next
+		}
+	}
+}
+
+// flush emits any held partial trailing line (a final record written without a
+// newline), used only at end-of-input in non-follow mode. It reports whether it
+// emitted anything.
+func (lr *lineReader) flush(emit func(string)) bool {
+	if lr.pending == "" {
+		return false
+	}
+	emit(lr.pending)
+	lr.pending = ""
+	return true
+}
+
+func (lr *lineReader) close() {
+	if lr.f != nil {
+		lr.f.Close()
+	}
+}
+
 // renderLine normalizes one recorded stream-json line and renders the events it
 // yields through the shared renderer; lines that carry only transport noise
 // normalize to nothing and print nothing.
 func (r *streamRenderer) renderLine(line string) {
 	for _, ev := range claudecode.Normalize([]byte(line)) {
 		r.renderEvent(ev)
+	}
+}
+
+// renderHealthLine renders one session/ctl.jsonl record — a daemon health
+// transition — through the shared prefix vocabulary so it interleaves with the
+// agent stream. An error-start is an error-role line (the trouble beginning, with
+// its message); an error-end is a system-role line (it cleared). Unlike the agent
+// stream, a health record carries its own recorded timestamp, so the prefix uses
+// that rather than render-time wallclock. A malformed or unknown record prints
+// nothing.
+func (r *streamRenderer) renderHealthLine(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	var ev reconcile.HealthEvent
+	if json.Unmarshal([]byte(line), &ev) != nil {
+		return
+	}
+	ts := r.now().Format(tsLayout)
+	if t, err := time.Parse(time.RFC3339, ev.TS); err == nil {
+		ts = t.Local().Format(tsLayout)
+	}
+	switch ev.Event {
+	case "start":
+		body := "ctl: " + ev.Class + " started"
+		if ev.Message != "" {
+			body += ": " + ev.Message
+		}
+		r.emitAt(roleError, ts, body)
+	case "end":
+		r.emitAt(roleSystem, ts, "ctl: "+ev.Class+" cleared")
 	}
 }
 
@@ -854,6 +993,14 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
+		},
+		// Route the daemon's operational log to its own stderr. Left unset it
+		// defaults to a no-op — the gap drvctl-027 named: an admit that failed
+		// (and every gate error) went nowhere, not even to the terminal. The
+		// per-attempt *health* transitions land in each attempt's ctl.jsonl on
+		// their own; this is the daemon's own operator stream beside them.
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "draiverctld: "+format+"\n", args...)
 		},
 	})
 }

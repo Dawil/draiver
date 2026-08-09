@@ -122,6 +122,16 @@ func (r Root) SessionMeterPath(id, attempt string) string {
 	return filepath.Join(r.SessionDir(id, attempt), "meter.json")
 }
 
+// SessionCtlLogPath is the attempt's per-attempt operational health log: the
+// append-only JSON-lines record of draiverctld's own error-start/error-end
+// transitions for this attempt (a wedged worktree, a lost model, ...), as opposed
+// to stream.jsonl's agent stream. It is rebuildable runtime state — safe to
+// delete; the daemon rebuilds its in-memory health view and re-emits on the next
+// tick — and `ctl logs` surfaces it alongside the agent stream (drvctl-027).
+func (r Root) SessionCtlLogPath(id, attempt string) string {
+	return filepath.Join(r.SessionDir(id, attempt), "ctl.jsonl")
+}
+
 // --- existence & listing ---
 
 // Exists reports whether a ticket folder is present.

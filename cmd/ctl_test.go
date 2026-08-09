@@ -214,7 +214,7 @@ func TestTailStreamNoFollow(t *testing.T) {
 	// in both the raw (--json) and rendered modes.
 	for _, render := range []bool{false, true} {
 		var out bytes.Buffer
-		if err := tailStream(context.Background(), &out, path, false, render); err != nil {
+		if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, render); err != nil {
 			t.Fatalf("missing stream should not error (render=%v): %v", render, err)
 		}
 		if !strings.Contains(out.String(), "no session stream yet") {
@@ -228,7 +228,7 @@ func TestTailStreamNoFollow(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := tailStream(context.Background(), &out, path, false, false); err != nil {
+	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, false); err != nil {
 		t.Fatalf("tail: %v", err)
 	}
 	if !strings.Contains(out.String(), `{"a":1}`) || !strings.Contains(out.String(), `{"b":2}`) {
@@ -254,7 +254,7 @@ func TestTailStreamRender(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := tailStream(context.Background(), &out, path, false, true); err != nil {
+	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, true); err != nil {
 		t.Fatalf("render tail: %v", err)
 	}
 	got := out.String()
@@ -289,6 +289,78 @@ func TestTailStreamRender(t *testing.T) {
 	// Transport fields never appear.
 	if strings.Contains(got, "sess-secret-uuid") || strings.Contains(got, "session_id") {
 		t.Errorf("transport session id leaked into rendered output:\n%s", got)
+	}
+}
+
+// TestTailStreamMergesHealth is the drvctl-027 surfacing: `ctl logs` (human render)
+// interleaves draiverctld's own operational health (session/ctl.jsonl) with the
+// agent stream, so a wedged attempt's error-start/error-end show up beside the
+// agent's prose — with each health line carrying its own recorded timestamp, under
+// the error/system roles. The --json passthrough is unaffected (asserted separately).
+func TestTailStreamMergesHealth(t *testing.T) {
+	dir := t.TempDir()
+	streamPath := filepath.Join(dir, "stream.jsonl")
+	ctlPath := filepath.Join(dir, "ctl.jsonl")
+
+	if err := os.WriteFile(streamPath, []byte(
+		`{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ctlPath, []byte(strings.Join([]string{
+		`{"ts":"2026-08-10T09:00:00Z","class":"worktree-clash","event":"start","message":"git worktree add failed: already checked out"}`,
+		`{"ts":"2026-08-10T09:05:00Z","class":"worktree-clash","event":"end"}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := tailStream(context.Background(), &out, streamPath, ctlPath, false, true); err != nil {
+		t.Fatalf("render tail: %v", err)
+	}
+	got := out.String()
+
+	// The agent stream still renders.
+	if !strings.Contains(got, "working on it") {
+		t.Errorf("agent stream not rendered:\n%s", got)
+	}
+	// The health start renders as an error-role line, carrying the class and message.
+	if !strings.Contains(got, "error    ]: ctl: worktree-clash started: git worktree add failed") {
+		t.Errorf("health start not rendered under the error role:\n%s", got)
+	}
+	// The health end renders as a system-role line.
+	if !strings.Contains(got, "system   ]: ctl: worktree-clash cleared") {
+		t.Errorf("health end not rendered under the system role:\n%s", got)
+	}
+	// The health line uses its own recorded timestamp (rendered in local time, like
+	// the stream's wallclock), not render-time wallclock.
+	start, _ := time.Parse(time.RFC3339, "2026-08-10T09:00:00Z")
+	end, _ := time.Parse(time.RFC3339, "2026-08-10T09:05:00Z")
+	if !strings.Contains(got, start.Local().Format(tsLayout)) || !strings.Contains(got, end.Local().Format(tsLayout)) {
+		t.Errorf("health line did not carry its recorded timestamp:\n%s", got)
+	}
+}
+
+// TestTailStreamJSONIgnoresHealth: the raw --json passthrough is unchanged — it
+// emits stream.jsonl byte-for-byte and never folds in ctl.jsonl health (that is a
+// human-render-only concern), so `| jq` pipelines keep working (drvctl-027 non-goal).
+func TestTailStreamJSONIgnoresHealth(t *testing.T) {
+	dir := t.TempDir()
+	streamPath := filepath.Join(dir, "stream.jsonl")
+	ctlPath := filepath.Join(dir, "ctl.jsonl")
+	if err := os.WriteFile(streamPath, []byte(`{"a":1}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ctlPath, []byte(`{"ts":"2026-08-10T09:00:00Z","class":"worktree-clash","event":"start"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := tailStream(context.Background(), &out, streamPath, ctlPath, false, false); err != nil {
+		t.Fatalf("raw tail: %v", err)
+	}
+	got := out.String()
+	if got != `{"a":1}`+"\n" {
+		t.Errorf("raw --json must be the stream verbatim with no health folded in, got:\n%q", got)
 	}
 }
 
@@ -448,7 +520,7 @@ func TestTailStreamFollow(t *testing.T) {
 
 	var mu safeBuf
 	done := make(chan error, 1)
-	go func() { done <- tailStream(ctx, &mu, path, true, false) }()
+	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, false) }()
 
 	waitUntil(t, "first line", func() bool { return strings.Contains(mu.String(), `{"first":1}`) })
 
@@ -490,7 +562,7 @@ func TestTailStreamRenderFollow(t *testing.T) {
 
 	var mu safeBuf
 	done := make(chan error, 1)
-	go func() { done <- tailStream(ctx, &mu, path, true, true) }()
+	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, true) }()
 
 	waitUntil(t, "first rendered line", func() bool { return strings.Contains(mu.String(), "first line here") })
 
