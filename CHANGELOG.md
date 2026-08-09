@@ -5,10 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-10
 
 ### Added
 
+- **Set an attempt's repo/base from the board — the provenance table
+  (drvweb-009).** A Review attempt wedged for want of a `base:`/`repo:` (the two
+  fields `ctl merge`/`sync` gate on) could only be unblocked by hand-editing
+  `attempt.md` or recreating the attempt — losing its log and branch. A quiet
+  key/value **provenance table** now sits above the Spec on the attempt detail
+  page, showing the attempt's `repo`/`base`; a Review attempt that records no
+  base gets a merge-blocking callout. Each value reads as plain text until
+  clicked, when it becomes an inline input — the enclosing form posts on any
+  child's `change` (a blur that altered the value) or on Enter, so clicking out
+  saves and there is **no Save button**; an (i) bubble per key carries a
+  hover/focus tooltip explaining what that field gates. The write is not
+  reimplemented in the web layer: `POST /ticket/{id}/{attempt}/provenance` shells
+  **`draiver attempt set`** (drvctl-028), which owns the `attempt.md` write and
+  the field validation, keeping the package's write invariant that the web layer
+  never touches `attempt.md`. Only `repo`/`base` are read from the form (the
+  `tool`/`model` fields the verb also accepts are deliberately out of the UI's
+  scope, the same allow-list discipline the compose box uses); the panel prefills
+  current values, so a blank field means *leave unchanged* — it is omitted from
+  the shell-out, and an all-blank submit is a 400 rather than a 500 from the
+  verb's "nothing to set". No `--actor`: `attempt set` appends no hash-chained
+  event. On success the panel re-renders in place (htmx swap) with the saved
+  values and a confirmation, behind the same-origin and 404 guards as the other
+  writes.
+- **"Merged elsewhere — close & pull" review action (drvweb-010).** A third
+  review action joins Decision and Done on the attempt page —
+  **"Merged elsewhere — close & pull `<base>`"** — the board affordance for a PR
+  landed on the forge. It is shown only for a Review attempt that records **both**
+  a base and a repo, and `POST /ticket/{id}/{attempt}/merge-remote` shells
+  **`draiver ctl merge --remote`** (drvctl-029): the CLI owns the `git fetch` +
+  containment proof + `done` and the best-effort local fast-forward, so the web
+  layer never touches git, per the package write invariant. Unlike the other web
+  writes, the handler returns the verb's **combined stdout** on success — the
+  best-effort pull's result or warning is printed there, not recorded in the
+  `done` event — and pairs the attempt-live fragment (the log region flips to
+  Done, OOB badge/count) with an OOB result banner carrying that message. A
+  zero-exit-with-warning (e.g. a dirty or diverged local base that skipped the
+  pull) is treated as success and displayed; a nonzero exit (a failed containment
+  or fetch) surfaces as a 500 like the other writes.
 - **Self-documenting attempt.md/spec.md frontmatter and `draiver attempt set`
   to edit provenance after creation (drvctl-028).** The provenance fields that
   gate the whole land flow (`repo:`/`base:`, which `ctl merge`/`sync` demand)
@@ -121,6 +159,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   role for `start`, system role for `end`, each with its own recorded timestamp)
   and `-f` follows both files; the daemon's free-text `Logf` now routes to stderr
   (was a no-op) and `--json` passthrough of `stream.jsonl` is unchanged.
+
+### Changed
+
+- **Readable `ctl logs` — a fixed-width `[time · tokens · role]:` prefix and
+  Markdown-rendered prose (drvctl-025).** The shared session renderer marked each
+  line with ad-hoc glyphs, and the assistant's prose printed as raw Markdown
+  source. Every line now carries a fixed-width, greppable
+  **`[<datetime>  <tokens>  <role>]: <content>`** prefix, and assistant prose is
+  rendered from Markdown to styled ANSI via `charmbracelet/glamour` (over the
+  goldmark parser already vendored). `renderEvent` moves onto a stateful
+  `streamRenderer` so the tokens column carries the **last-known cumulative
+  context-window snapshot** forward across the many events that report no usage —
+  a cost-only `result` frame (ctx=0) no longer clobbers it. Roles map to a small
+  vocabulary (assistant/tool/system/perm/error), each tinted on a TTY — **only
+  the role token is coloured**, the datetime, token tally, and brackets stay
+  plain, with the role column hand-padded so the closing bracket still aligns past
+  the colour escapes — and tool output is italicised; usage-only frames print
+  nothing (their figures ride the next line's prefix). The timestamp is
+  render-time wallclock (the stream carries none), and `--json` / `stream.jsonl`
+  stay byte-for-byte unchanged. Non-TTY output uses glamour's notty style so no
+  ANSI leaks into a pipe or `jq`; a bespoke ANSI-aware trim strips glamour's
+  per-cell colour padding on a TTY. One renderer is still shared by the live
+  follow and disk replay.
 
 ## [0.3.0] - 2026-08-07
 
