@@ -36,7 +36,26 @@
   <main class="detail" data-testid="ticket-detail">
     <section class="spec" data-testid="spec">
       <h2>Spec</h2>
-      <div class="prose">{{.SpecHTML}}</div>
+      <div class="prose" data-testid="spec-prose">{{.SpecHTML}}</div>
+      {{/* Presentational cap only: a long spec is clipped to a max-height with a
+           fade; the button toggles a class to reveal the rest. JS unhides it only
+           when the spec actually overflows, and nothing is remembered server-side. */}}
+      <button type="button" class="spec-toggle" data-testid="spec-toggle" aria-expanded="false" hidden>more</button>
+    </section>
+
+    {{/* Agent Logs: a collapsed-by-default window onto the attempt's live session
+         stream — what the agent did, tool by tool, the same content `ctl logs -f`
+         prints (agent stream interleaved with session/ctl.jsonl health). Plain
+         text, no colour (deferred). The SSE opens only when the panel expands
+         (toggle listener below), so a collapsed panel costs no stream and no
+         subprocess. Lines are set via textContent, never HTML — the session is
+         untrusted content. */}}
+    <section class="agent-logs" data-testid="agent-logs">
+      <details class="agent-logs-details" data-testid="agent-logs-details"
+        data-stream-url="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/agent-logs">
+        <summary class="agent-logs-summary" data-testid="agent-logs-summary">Agent Logs <span class="hint">live session stream</span></summary>
+        <pre class="agent-logs-stream" data-testid="agent-logs-stream" aria-live="polite"></pre>
+      </details>
     </section>
 
     <section class="log">
@@ -136,6 +155,68 @@
       window.addEventListener('hashchange', function () { apply(true); });
       document.body.addEventListener('htmx:afterSettle', function () { apply(false); });
       apply(true);
+    })();
+
+    (function () {
+      // Spec cap: clip a long spec to a max-height (CSS) with a fade, and reveal
+      // it with a more/less button. The cap is purely presentational — SpecHTML is
+      // already rendered and sanitised server-side — so this only toggles a class.
+      // The button appears only when the spec overflows the cap; a short spec is
+      // shown whole with no fade and no button.
+      var spec = document.querySelector('[data-testid="spec"]');
+      var prose = document.querySelector('[data-testid="spec-prose"]');
+      var btn = document.querySelector('[data-testid="spec-toggle"]');
+      if (!spec || !prose || !btn) return;
+      if (prose.scrollHeight <= prose.clientHeight + 4) {
+        spec.classList.add('spec-uncapped'); // fits — drop the cap/fade entirely
+        return;
+      }
+      btn.hidden = false;
+      btn.addEventListener('click', function () {
+        var expanded = spec.classList.toggle('spec-expanded');
+        btn.textContent = expanded ? 'less' : 'more';
+        btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      });
+    })();
+
+    (function () {
+      // Agent Logs: open a Server-Sent Events stream only while the <details> is
+      // expanded, so a collapsed panel costs no connection and no subprocess. Each
+      // event is one rendered session line; it is untrusted content, so it is
+      // appended as a text node (never HTML). A stream that never produces a line
+      // (a hand-run attempt with no session) leaves the quiet placeholder in place.
+      var details = document.querySelector('[data-testid="agent-logs-details"]');
+      if (!details) return;
+      var pre = details.querySelector('[data-testid="agent-logs-stream"]');
+      var url = details.dataset.streamUrl;
+      var es = null, started = false;
+      var placeholder = 'no session stream yet…';
+
+      function connect() {
+        if (es) return;
+        started = false;
+        pre.textContent = placeholder;
+        es = new EventSource(url);
+        es.onmessage = function (e) {
+          if (!started) { pre.textContent = ''; started = true; }
+          var atBottom = pre.scrollHeight - pre.clientHeight - pre.scrollTop < 40;
+          pre.appendChild(document.createTextNode(e.data + '\n'));
+          if (atBottom) pre.scrollTop = pre.scrollHeight; // follow unless scrolled up
+        };
+        es.onerror = function () {
+          // Connection dropped: if nothing ever arrived, keep the quiet
+          // placeholder rather than surfacing an error; otherwise leave the
+          // backlog in place. (EventSource retries on its own.)
+          if (!started) pre.textContent = placeholder;
+        };
+      }
+      function disconnect() {
+        if (es) { es.close(); es = null; }
+      }
+      details.addEventListener('toggle', function () {
+        if (details.open) connect(); else disconnect();
+      });
+      window.addEventListener('beforeunload', disconnect);
     })();
   </script>
 </body>

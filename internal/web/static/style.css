@@ -117,9 +117,29 @@ body {
 .state-Needs\ me { background: var(--alert-bg); color: var(--alert); }
 
 .spec .prose { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px; }
+/* Spec cap: clip a long spec with a fade until "more" is pressed (drvweb-011).
+   The cap is a max-height on the prose (not the section), so the Agent Logs/Log
+   below are never clipped. The ::after fade sits inside the relatively-positioned
+   prose and matches its panel background. .spec-expanded lifts the cap; .spec-uncapped
+   is set by JS when the spec is short enough not to need one — both hide the fade. */
+.spec .prose { position: relative; max-height: 22rem; overflow: hidden; }
+.spec .prose::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3.5rem; background: linear-gradient(transparent, var(--panel)); pointer-events: none; border-radius: 0 0 10px 10px; }
+.spec.spec-expanded .prose, .spec.spec-uncapped .prose { max-height: none; }
+.spec.spec-expanded .prose::after, .spec.spec-uncapped .prose::after { display: none; }
+.spec-toggle { margin-top: 8px; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 3px 14px; font-size: 12px; cursor: pointer; }
+.spec-toggle:hover { border-color: var(--accent); color: var(--accent); }
 .prose { overflow-x: auto; }
 .prose pre { background: var(--panel-2); padding: 12px; border-radius: 8px; overflow-x: auto; }
 .prose code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+
+/* Agent Logs: a collapsible, plain-text window onto the live session stream
+   (drvweb-011). Monospace <pre>, no colour — ANSI/role styling is deferred. */
+.agent-logs { margin: 18px 0; }
+.agent-logs-summary { cursor: pointer; font-size: 18px; font-weight: 600; }
+.agent-logs-summary .hint { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+.agent-logs-summary:hover { color: var(--accent); }
+.agent-logs-stream { margin: 10px 0 0; max-height: 28rem; overflow: auto; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+.agent-logs-stream:empty::before { content: "no session stream yet…"; color: var(--muted); }
 
 .log-head { display: flex; align-items: baseline; gap: 12px; }
 .order-toggle { margin-left: auto; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }

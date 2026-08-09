@@ -14,6 +14,7 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -400,6 +401,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/agent-logs", s.handleAgentLogs)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
@@ -707,6 +709,77 @@ func (s *Server) executeLive(vm detailVM) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// handleAgentLogs streams an attempt's live session logs as Server-Sent Events
+// (GET /ticket/{id}/{attempt}/agent-logs) — the first stream in the web layer,
+// which is otherwise all htmx polling. It shells out to `draiver ctl logs -f`
+// (the same verb a human runs at a terminal, and the same write-path-reuse
+// discipline as the log/resolve/enable POSTs) and relays each rendered stdout
+// line as one SSE `data:` event. Over a pipe the CLI's renderer is non-TTY, so it
+// emits plain, uncoloured text (newStreamRenderer gates styling on
+// term.IsTerminal) — exactly what this read-only panel wants, with the prefix
+// column, markdown-as-literal, and ctl.jsonl health interleave reused verbatim.
+//
+// The child is bound to r.Context() via exec.CommandContext: when the client
+// closes the SSE — the <details> panel collapses, the page is left — the process
+// is killed and the follow ends. Each line is relayed as text and set client-side
+// via textContent; it is never routed through the markdown→HTML path, so the
+// untrusted session content (arbitrary tool output + model prose) cannot inject
+// markup. A hand-run attempt with no session yet simply streams nothing; the
+// client shows a quiet placeholder, not an error.
+func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.fail(w, fmt.Errorf("streaming unsupported"))
+		return
+	}
+	exe, err := draiverExe()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	cmd := exec.CommandContext(r.Context(), exe, "ctl", "logs", "-f",
+		"--data", s.root.Dir, id+"@"+att)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Disable proxy buffering so the stream reaches the panel line-by-line.
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Relay stdout one line per SSE record. bufio.Scanner strips the trailing
+	// newline, so each scanned line carries no embedded newline to break the
+	// `data:` framing; a stray CR is trimmed for the same reason. Flush after
+	// every line so the panel updates live rather than in buffer-sized bursts.
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", line); err != nil {
+			break // client went away; CommandContext kills the child
+		}
+		flusher.Flush()
+	}
+	// Reap the child. Context cancellation already signals it on client close;
+	// Wait releases its resources whether it exited on its own or was killed.
+	_ = cmd.Wait()
 }
 
 // handleLogAppend appends a human-composed typed event to an attempt (POST
