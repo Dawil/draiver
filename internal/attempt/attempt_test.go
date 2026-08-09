@@ -2,6 +2,8 @@ package attempt
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/Dawil/draiver/internal/store"
@@ -50,6 +52,76 @@ func TestCreateAllocatesSequentialIDsWithGenesis(t *testing.T) {
 	latest, ok, err := Latest(root, id)
 	if err != nil || !ok || latest != "0002" {
 		t.Errorf("latest = %q,%v,%v want 0002,true,nil", latest, ok, err)
+	}
+}
+
+// A set load-bearing field renders as a real YAML line; an unset one renders as a
+// commented example naming the key, a sample, and its consumer — so a hand-editor
+// of a wedged (base-less) attempt.md sees the schema it must fill in.
+func TestWriteMetaCommentsUnsetLoadBearingFields(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	// A partial attempt: repo set, base/tool/model unset.
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "human:x"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "repo: /repo") {
+		t.Errorf("set repo should render as a real line:\n%s", s)
+	}
+	for _, want := range []string{"# base: ", "# tool: ", "# model: "} {
+		if !strings.Contains(s, want) {
+			t.Errorf("unset field %q should render as a commented hint:\n%s", want, s)
+		}
+	}
+	// The hints are YAML comments, so parseMeta ignores them: the fields read empty.
+	m, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Base != "" || m.Tool != "" || m.Model != "" {
+		t.Errorf("commented hints must not parse as values: %+v", m)
+	}
+	if m.Repo != "/repo" {
+		t.Errorf("repo lost across write/parse: %+v", m)
+	}
+}
+
+// WriteMeta re-emits the canonical block, so a write→parse→write cycle is stable:
+// commented hints for unset fields survive the round-trip unchanged.
+func TestWriteMetaRoundTripIsIdempotent(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "human:x"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMeta(root, m); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("write→parse→write not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
 

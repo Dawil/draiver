@@ -176,20 +176,80 @@ func nextID(root store.Root, ticket string) (string, error) {
 	return fmt.Sprintf("%04d", max+1), nil
 }
 
+// WriteMeta writes an attempt's attempt.md from m, self-documenting the
+// load-bearing frontmatter: a set field renders as a real YAML line, an unset
+// optional field (repo/base/tool/model) renders as a commented example showing
+// the key, a sample value, and what consumes it. It re-emits the canonical block,
+// so it doubles as the write path for `draiver attempt set` — which, like
+// `draiver title` on spec.md, edits this static metadata outside the hash-chained
+// log. parseMeta ignores YAML comment lines, so write→parse→write is idempotent.
+func WriteMeta(root store.Root, m Meta) error {
+	return writeMeta(root, m)
+}
+
 func writeMeta(root store.Root, m Meta) error {
-	front, err := yaml.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("marshal attempt.md: %w", err)
-	}
 	var b strings.Builder
 	b.WriteString("---\n")
-	b.Write(front)
+	b.WriteString(metaFrontmatter(m))
 	b.WriteString("---\n\n")
 	b.WriteString("<!-- Attempt provenance. The control state is derived from the log. -->\n")
 	if err := os.WriteFile(root.AttemptMetaPath(m.Ticket, m.ID), []byte(b.String()), 0o644); err != nil {
 		return fmt.Errorf("write attempt.md: %w", err)
 	}
 	return nil
+}
+
+// metaFrontmatter renders the attempt.md frontmatter body (between the fences).
+// Identity fields (id/ticket/actor) always render; started renders only when set
+// (so a rewrite of a legacy file that never recorded one doesn't inject a bogus
+// zero time); from renders only when set (pure provenance, not human-fillable).
+// The four optional/load-bearing fields render as real lines when set and as
+// commented hints when unset, so a hand-editor sees the key, an example, and what
+// reads it — turning an invisible-when-empty field into a self-documenting one.
+func metaFrontmatter(m Meta) string {
+	var b strings.Builder
+	b.WriteString(metaLine("id", m.ID))
+	b.WriteString(metaLine("ticket", m.Ticket))
+	b.WriteString(optionalMetaLine("tool", m.Tool, "claude-code", "coding-agent adapter that runs this attempt"))
+	b.WriteString(optionalMetaLine("model", m.Model, "opus-4.8", "model the adapter runs (optional)"))
+	b.WriteString(optionalMetaLine("repo", m.Repo, "/path/to/repo", "local git working tree the daemon cuts this attempt's worktree from"))
+	b.WriteString(optionalMetaLine("base", m.Base, "main", "branch this attempt lands into; used by `ctl merge`/`sync`"))
+	b.WriteString(metaLine("actor", m.Actor))
+	if !m.Started.IsZero() {
+		b.WriteString(yamlMarshalLine(map[string]time.Time{"started": m.Started}))
+	}
+	if strings.TrimSpace(m.From) != "" {
+		b.WriteString(metaLine("from", m.From))
+	}
+	return b.String()
+}
+
+// metaLine renders one `key: value` frontmatter line (newline included),
+// YAML-encoding the value so a colon/quote/leading-# can't produce invalid
+// frontmatter that every later status/brief/webui read would choke on.
+func metaLine(key, val string) string {
+	return yamlMarshalLine(map[string]string{key: val})
+}
+
+// optionalMetaLine renders a set value as a real line, or an unset one as a
+// commented example: `# key: <example>  # <consumer>`. parseMeta parses YAML, so
+// the commented line is ignored on read and the field round-trips as empty.
+func optionalMetaLine(key, val, example, consumer string) string {
+	if strings.TrimSpace(val) != "" {
+		return metaLine(key, val)
+	}
+	return fmt.Sprintf("# %s: %s  # %s\n", key, example, consumer)
+}
+
+// yamlMarshalLine marshals a single-key map to its `key: value\n` line. yaml.v3
+// marshalling a one-entry map does not fail; the guard is defensive so a future
+// change here can never silently drop the value.
+func yamlMarshalLine(m any) string {
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 func parseMeta(data []byte) (Meta, error) {

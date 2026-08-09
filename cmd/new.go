@@ -183,6 +183,17 @@ func yamlLine(key, val string) string {
 	return strings.TrimRight(string(out), "\n")
 }
 
+// optionalSpecLine renders a spec.md metadata line (newline included): a set
+// value as a real YAML line, an unset one as a commented example naming the key,
+// a sample, and that it is optional board-grouping metadata. loadSpecMeta parses
+// YAML, so the commented line is ignored on read — the field is simply unset.
+func optionalSpecLine(key, val, example string) string {
+	if strings.TrimSpace(val) != "" {
+		return yamlLine(key, val) + "\n"
+	}
+	return fmt.Sprintf("# %s: %s  # optional board-grouping metadata\n", key, example)
+}
+
 // scaffoldSpec renders a fresh spec.md with identity frontmatter and a stub body.
 func scaffoldSpec(id, title string) []byte {
 	var b strings.Builder
@@ -191,9 +202,12 @@ func scaffoldSpec(id, title string) []byte {
 	// title/project/team/assignee are free-text (title and the latter three are
 	// user-supplied flags), so each goes through yamlLine to stay valid YAML.
 	b.WriteString(yamlLine("title", title) + "\n")
-	b.WriteString(yamlLine("project", newProject) + "\n")
-	b.WriteString(yamlLine("team", newTeam) + "\n")
-	b.WriteString(yamlLine("assignee", newAssignee) + "\n")
+	// project/team/assignee are optional board-grouping metadata. When set they
+	// render as real lines; when unset they render as commented examples so a
+	// hand-editor sees the key and a sample rather than a mute blank line.
+	b.WriteString(optionalSpecLine("project", newProject, "acme-web"))
+	b.WriteString(optionalSpecLine("team", newTeam, "platform"))
+	b.WriteString(optionalSpecLine("assignee", newAssignee, "alice"))
 	fmt.Fprintf(&b, "created: %s\n", time.Now().UTC().Format(time.RFC3339))
 	b.WriteString("---\n\n")
 	fmt.Fprintf(&b, "# %s\n\n", title)
