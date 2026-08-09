@@ -15,7 +15,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
+	"github.com/charmbracelet/glamour/styles"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/agent/claudecode"
@@ -370,51 +375,265 @@ func resolveCtlTarget(root store.Root, arg string) (string, string, error) {
 	return ticket, att, nil
 }
 
-// renderEvent writes one normalized event as a concise, human-readable one-liner:
-// assistant prose, `> tool` calls (with a short argument snippet), tool errors,
-// permission prompts, usage/cost + context-window fill, and turn boundaries. It
-// deliberately drops transport fields — event uuids, the session id, envelope
-// wrappers — that a machine needs but a human reading the session does not. This
-// is the single renderer shared by the live start/restart view (streamPrinter)
-// and `ctl logs` reading the recorded stream.jsonl back off disk.
-func renderEvent(out io.Writer, ev agent.Event) {
+// The role vocabulary event kinds map onto — a small, stable set that replaces
+// the old glyph markers (`>`, `!`, `--`, `?`). Each renders in a distinct colour
+// on a TTY so a reader can tell who is speaking without decoding a marker.
+const (
+	roleAssistant = "assistant"
+	roleTool      = "tool"
+	roleSystem    = "system"
+	rolePerm      = "perm"
+	roleError     = "error"
+)
+
+// Prefix column widths. The datetime is a fixed 19-column stamp
+// (`2006-01-02 15:04:05`); the tokens column is right-aligned so it stays put as
+// the number grows; the role column is left-aligned so the content start-column
+// is stable. prefixWidth is the total visible width of the `[<prefix>]: ` string,
+// used to leave the markdown renderer room to wrap inside the terminal.
+const (
+	tsLayout   = "2006-01-02 15:04:05"
+	tokenWidth = 9
+	roleWidth  = 9
+	// "[" + 19 (datetime) + "  " + tokenWidth + "  " + roleWidth + "]: "
+	prefixWidth = 1 + 19 + 2 + tokenWidth + 2 + roleWidth + 3
+)
+
+// ANSI attributes used on a TTY only. roleColor colours the whole `[<prefix>]:`
+// bracket by role; ansiItalic marks tool output so it reads as visibly distinct
+// from prose (drvctl-025 #8).
+const (
+	ansiReset  = "\033[0m"
+	ansiItalic = "\033[3m"
+)
+
+func roleColor(role string) string {
+	switch role {
+	case roleAssistant:
+		return "\033[36m" // cyan
+	case roleTool:
+		return "\033[33m" // yellow
+	case roleSystem:
+		return "\033[90m" // grey
+	case rolePerm:
+		return "\033[35m" // magenta
+	case roleError:
+		return "\033[31m" // red
+	}
+	return ""
+}
+
+// streamRenderer turns normalized events into the human-readable session render:
+// a fixed-width, greppable `[<time>  <tokens>  <role>]: ` prefix on every line,
+// followed by the event body — with assistant prose rendered from Markdown to
+// styled ANSI (glamour over the goldmark parser this repo already carries).
+//
+// It is stateful, so one value is built per stream and reused for every line: it
+// carries the last-known cumulative context-token count forward across the many
+// events that report no usage, so the tokens column is populated on every line
+// rather than only on usage frames. It is the single renderer shared by the live
+// `ctl logs -f` follow and disk replay alike; transport fields (event uuids, the
+// session id, envelope wrappers) are dropped.
+//
+// The timestamp is render-time wallclock captured as each line is emitted, NOT a
+// recorded event time — the normalized event and the stream-json envelope carry
+// none, and the on-disk stream.jsonl format and `--json` passthrough must stay
+// byte-for-byte unchanged (drvctl-025 #3). It is truthful for the live follow and
+// honest-but-approximate for historical replay.
+type streamRenderer struct {
+	out       io.Writer
+	styled    bool // out is a TTY: colours + italics + ANSI markdown on
+	md        *glamour.TermRenderer
+	ctxTokens int // last-known cumulative context tokens; -1 until first usage
+	now       func() time.Time
+}
+
+// newStreamRenderer builds a renderer bound to out, detecting whether out is a
+// terminal. On a TTY it styles: role-coloured prefixes, italic tool output, and
+// glamour's dark ANSI markdown wrapped to the terminal width minus the prefix.
+// When out is not a terminal (a pipe, a file, the test buffer) it renders plain —
+// glamour's notty style, which shows emphasis as literal `**bold**` markers
+// rather than leaking ANSI escapes into a `| jq`/file consumer (drvctl-025 #5).
+func newStreamRenderer(out io.Writer) *streamRenderer {
+	r := &streamRenderer{out: out, ctxTokens: -1, now: time.Now}
+	width := 100
+	if f, ok := out.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		r.styled = true
+		if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > prefixWidth+20 {
+			width = w
+		}
+	}
+	wrap := width - prefixWidth
+	if wrap < 20 {
+		wrap = 20
+	}
+	base := styles.NoTTYStyleConfig
+	profile := termenv.Ascii
+	if r.styled {
+		base = styles.DarkStyleConfig
+		profile = termenv.ANSI256
+	}
+	md, err := glamour.NewTermRenderer(
+		glamour.WithStyles(compactStyle(base)),
+		glamour.WithColorProfile(profile),
+		glamour.WithWordWrap(wrap),
+	)
+	if err == nil {
+		r.md = md
+	}
+	return r
+}
+
+// compactStyle strips glamour's document framing — the 2-space margin and the
+// leading/trailing blank lines it wraps every block in — so the rendered body
+// sits flush against our prefix column with no gutter (drvctl-025 #5). It copies
+// the base config by value; only the Document fields are replaced.
+func compactStyle(base ansi.StyleConfig) ansi.StyleConfig {
+	s := base
+	zero := uint(0)
+	s.Document.Margin = &zero
+	s.Document.BlockPrefix = ""
+	s.Document.BlockSuffix = ""
+	return s
+}
+
+// renderEvent writes one normalized event. Assistant prose is rendered as styled
+// Markdown; tool calls, tool errors, permission asks, turn boundaries and errors
+// map to their role. Usage-only frames print nothing (a bare ctx/tok/$ line is
+// noise, per drvctl-025 #8) but still advance the token tally the prefix carries.
+func (r *streamRenderer) renderEvent(ev agent.Event) {
+	// Fold any usage this event carries into the running tally first, so the
+	// tokens column reflects it even on the line that reported it. Only a
+	// positive count updates the tally: a result frame reports cost-only usage
+	// with ContextTokens==0 (see claudecode.Normalize), which must not clobber
+	// the last real context-window snapshot the column carries forward.
+	if ev.Usage != nil && ev.Usage.ContextTokens > 0 {
+		r.ctxTokens = ev.Usage.ContextTokens
+	}
 	switch ev.Kind {
 	case agent.EventSystem:
 		// The session id is a transport handle, not something a human reading the
 		// stream needs; note only that the session came online.
-		fmt.Fprintln(out, "  -- session online")
+		r.emit(roleSystem, "session online")
 	case agent.EventAssistant:
 		if ev.Thinking {
 			return
 		}
 		if s := strings.TrimSpace(ev.Text); s != "" {
-			fmt.Fprintf(out, "  %s\n", s)
+			r.emit(roleAssistant, s)
 		}
 	case agent.EventToolCall:
 		if ev.Tool != nil {
 			if s := toolSummary(ev.Tool.Input); s != "" {
-				fmt.Fprintf(out, "  > %s: %s\n", ev.Tool.Name, s)
+				r.emit(roleTool, ev.Tool.Name+": "+s)
 			} else {
-				fmt.Fprintf(out, "  > %s\n", ev.Tool.Name)
+				r.emit(roleTool, ev.Tool.Name)
 			}
 		}
 	case agent.EventToolResult:
 		if ev.Tool != nil && ev.Tool.IsError {
-			fmt.Fprintf(out, "  ! %s failed\n", ev.Tool.Name)
+			r.emit(roleTool, ev.Tool.Name+" failed")
 		}
 	case agent.EventPermission:
 		if ev.Permission != nil {
-			fmt.Fprintf(out, "  ? permission: %s\n", ev.Permission.Tool)
+			r.emit(rolePerm, "permission: "+ev.Permission.Tool)
 		}
 	case agent.EventUsage:
-		if ev.Usage != nil {
-			fmt.Fprintf(out, "  -- %s, $%.4f\n", contextGauge(ev.Usage.ContextTokens, ctlContextWindow), ev.Usage.CostUSD)
-		}
+		// The ctx/tok/$ figures ride along on the next real line's prefix; a
+		// dedicated line for them is dropped (drvctl-025 #8).
+		return
 	case agent.EventTurnEnd:
-		fmt.Fprintf(out, "  -- turn end (%s)\n", ev.Turn)
+		r.emit(roleSystem, "turn end ("+ev.Turn+")")
 	case agent.EventError:
-		fmt.Fprintf(out, "  ! %s\n", ev.Err)
+		r.emit(roleError, ev.Err)
 	}
+}
+
+// emit writes body under role, one physical line at a time, each carrying the
+// full `[<prefix>]: ` so every line stays independently greppable (drvctl-025 #8).
+func (r *streamRenderer) emit(role, body string) {
+	prefix := r.prefix(role)
+	for _, line := range r.bodyLines(role, body) {
+		fmt.Fprintln(r.out, prefix+line)
+	}
+}
+
+// prefix renders the `[<datetime>  <tokens>  <role>]: ` column for one line. The
+// bracket-and-colon are wrapped in `[` … `]: ` so a reader (or grep) can split
+// prefix from content on a fixed delimiter; on a TTY the whole bracket is tinted
+// by role.
+func (r *streamRenderer) prefix(role string) string {
+	tok := "-"
+	if r.ctxTokens >= 0 {
+		tok = commas(r.ctxTokens)
+	}
+	inner := fmt.Sprintf("%s  %*s  %-*s", r.now().Format(tsLayout), tokenWidth, tok, roleWidth, role)
+	if r.styled {
+		return roleColor(role) + "[" + inner + "]:" + ansiReset + " "
+	}
+	return "[" + inner + "]: "
+}
+
+// bodyLines turns an event body into the physical lines to print under the
+// prefix. Assistant prose is rendered from Markdown (styled ANSI on a TTY, plain
+// otherwise), split into lines with glamour's padding and blank framing stripped;
+// tool output is italicised on a TTY so it reads as visibly distinct; everything
+// else is a single plain line.
+func (r *streamRenderer) bodyLines(role, body string) []string {
+	if role == roleAssistant && r.md != nil {
+		if rendered, err := r.md.Render(body); err == nil {
+			var lines []string
+			for _, ln := range strings.Split(rendered, "\n") {
+				if ln = trimTrailingBlank(ln); ln != "" {
+					lines = append(lines, ln)
+				}
+			}
+			if len(lines) > 0 {
+				return lines
+			}
+		}
+	}
+	if role == roleTool && r.styled {
+		return []string{ansiItalic + body + ansiReset}
+	}
+	return []string{body}
+}
+
+// trimTrailingBlank strips trailing whitespace from a rendered line, seeing
+// through the per-cell colour escapes glamour uses to right-pad every line to the
+// wrap width — a plain strings.TrimRight can't, because such a line ends in an
+// ANSI reset, not a space (drvctl-025 #5). It skips CSI escape sequences while
+// tracking the last visible non-space byte, drops everything past it, and (if any
+// colour survived) re-appends a reset so no styling bleeds past the content. A
+// line that is blank once its padding and escapes are removed returns "".
+func trimTrailingBlank(s string) string {
+	lastVisible := -1
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b { // ESC: skip a CSI sequence (ESC [ … final-byte 0x40–0x7e)
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				for j++; j < len(s) && !(s[j] >= 0x40 && s[j] <= 0x7e); j++ {
+				}
+				if j < len(s) {
+					j++ // include the final byte
+				}
+			}
+			i = j
+			continue
+		}
+		if s[i] != ' ' && s[i] != '\t' && s[i] != '\r' {
+			lastVisible = i
+		}
+		i++
+	}
+	if lastVisible < 0 {
+		return ""
+	}
+	trimmed := s[:lastVisible+1]
+	if strings.Contains(trimmed, "\x1b[") {
+		trimmed += ansiReset
+	}
+	return trimmed
 }
 
 // toolSummary pulls a short, human-meaningful snippet out of a tool call's raw
@@ -515,6 +734,12 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow, render 
 	}
 	defer f.Close()
 
+	// The renderer is stateful (it carries the running token tally forward), so
+	// build one for the whole stream. Raw --json mode needs none.
+	var sr *streamRenderer
+	if render {
+		sr = newStreamRenderer(out)
+	}
 	r := bufio.NewReader(f)
 	var pending string // render mode only: bytes read past the last newline
 	for {
@@ -524,7 +749,7 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow, render 
 			case !render:
 				_, _ = io.WriteString(out, line)
 			case strings.HasSuffix(line, "\n"):
-				renderStreamLine(out, pending+line)
+				sr.renderLine(pending + line)
 				pending = ""
 			default:
 				// A partial trailing line (EOF before a newline): hold it until its
@@ -540,7 +765,7 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow, render 
 		}
 		if !follow {
 			if render && pending != "" {
-				renderStreamLine(out, pending)
+				sr.renderLine(pending)
 			}
 			return nil
 		}
@@ -552,12 +777,12 @@ func tailStream(ctx context.Context, out io.Writer, path string, follow, render 
 	}
 }
 
-// renderStreamLine normalizes one recorded stream-json line and renders the
-// events it yields; lines that carry only transport noise normalize to nothing
-// and print nothing.
-func renderStreamLine(out io.Writer, line string) {
+// renderLine normalizes one recorded stream-json line and renders the events it
+// yields through the shared renderer; lines that carry only transport noise
+// normalize to nothing and print nothing.
+func (r *streamRenderer) renderLine(line string) {
 	for _, ev := range claudecode.Normalize([]byte(line)) {
-		renderEvent(out, ev)
+		r.renderEvent(ev)
 	}
 }
 

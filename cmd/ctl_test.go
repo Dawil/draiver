@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
@@ -264,17 +266,85 @@ func TestTailStreamRender(t *testing.T) {
 	if strings.Contains(got, `"type":"assistant"`) {
 		t.Errorf("raw JSON leaked into rendered output:\n%s", got)
 	}
-	// Tool call shows name and a meaningful argument snippet.
-	if !strings.Contains(got, "> Bash: ls internal/agent") {
+	// Tool call shows name and a meaningful argument snippet, under the tool role.
+	if !strings.Contains(got, "Bash: ls internal/agent") {
 		t.Errorf("tool call not rendered with arguments:\n%s", got)
 	}
 	// Turn boundary is surfaced.
 	if !strings.Contains(got, "turn end (success)") {
 		t.Errorf("turn end not rendered:\n%s", got)
 	}
+	// Every rendered line carries the greppable `[<time>  <tokens>  <role>]: `
+	// prefix, and the role vocabulary replaces the old glyph markers (drvctl-025).
+	if !strings.Contains(got, "assistant]: Looking at the code now.") {
+		t.Errorf("assistant prefix not rendered:\n%s", got)
+	}
+	if !strings.Contains(got, "tool     ]: Bash: ls internal/agent") {
+		t.Errorf("tool prefix not rendered:\n%s", got)
+	}
+	// Non-TTY render must not leak ANSI escape sequences into a piped consumer.
+	if strings.Contains(got, "\033[") {
+		t.Errorf("ANSI escapes leaked into non-TTY render:\n%q", got)
+	}
 	// Transport fields never appear.
 	if strings.Contains(got, "sess-secret-uuid") || strings.Contains(got, "session_id") {
 		t.Errorf("transport session id leaked into rendered output:\n%s", got)
+	}
+}
+
+// TestStreamRendererPrefixAndState locks the new render shape: a greppable
+// `[<datetime>  <tokens>  <role>]: ` prefix per line, the role vocabulary, the
+// dropped usage-only frame, and the token tally that carries the last real
+// context snapshot forward — even across a cost-only turn-end frame that reports
+// ContextTokens 0 (drvctl-025 #3/#4/#8).
+func TestStreamRendererPrefixAndState(t *testing.T) {
+	var buf bytes.Buffer
+	sr := newStreamRenderer(&buf) // non-TTY: no ANSI, notty markdown
+	fixed := time.Date(2026, 8, 9, 14, 5, 6, 0, time.UTC)
+	sr.now = func() time.Time { return fixed }
+
+	sr.renderEvent(agent.Event{Kind: agent.EventAssistant, Text: "hello world"})
+	sr.renderEvent(agent.Event{Kind: agent.EventUsage, Usage: &agent.Usage{ContextTokens: 12345}})
+	sr.renderEvent(agent.Event{Kind: agent.EventToolCall, Tool: &agent.ToolEvent{Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`)}})
+	sr.renderEvent(agent.Event{Kind: agent.EventTurnEnd, Turn: "success", Usage: &agent.Usage{ContextTokens: 0, CostUSD: 0.5}})
+
+	got := buf.String()
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) != 3 { // the usage-only frame prints nothing
+		t.Fatalf("expected 3 rendered lines, got %d:\n%s", len(lines), got)
+	}
+	// Tokens show '-' before any usage; every line is prefix-then-content.
+	if !strings.HasPrefix(lines[0], "[2026-08-09 14:05:06") || !strings.Contains(lines[0], "-  assistant]: hello world") {
+		t.Errorf("assistant line = %q", lines[0])
+	}
+	// After the usage frame the tally shows, and the tool role/summary render.
+	if !strings.Contains(lines[1], "12,345  tool     ]: Bash: ls") {
+		t.Errorf("tool line = %q", lines[1])
+	}
+	// The cost-only turn-end frame (ContextTokens 0) must not reset the tally.
+	if !strings.Contains(lines[2], "12,345  system   ]: turn end (success)") {
+		t.Errorf("turn-end line = %q", lines[2])
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("non-TTY render leaked ANSI escapes:\n%q", got)
+	}
+}
+
+// TestTrimTrailingBlank covers the ANSI-aware right-trim that sees through the
+// per-cell colour escapes glamour pads lines with (drvctl-025 #5).
+func TestTrimTrailingBlank(t *testing.T) {
+	if got := trimTrailingBlank("hello   "); got != "hello" {
+		t.Errorf("plain trim = %q, want %q", got, "hello")
+	}
+	// Content wrapped in a colour escape, then colour-wrapped padding cells: the
+	// padding is dropped and a single reset closes the surviving colour.
+	padded := "\x1b[38;5;252mhi\x1b[0m\x1b[38;5;252m \x1b[0m\x1b[38;5;252m \x1b[0m"
+	if got := trimTrailingBlank(padded); !strings.Contains(got, "hi") || !strings.HasSuffix(got, ansiReset) || strings.HasSuffix(strings.TrimSuffix(got, ansiReset), " ") {
+		t.Errorf("ansi-padded trim = %q", got)
+	}
+	// A line that is only escapes and spaces collapses to empty (and is skipped).
+	if got := trimTrailingBlank("\x1b[38;5;252m \x1b[0m\x1b[38;5;252m \x1b[0m"); got != "" {
+		t.Errorf("blank-only trim = %q, want empty", got)
 	}
 }
 
