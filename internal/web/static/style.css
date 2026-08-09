@@ -165,6 +165,34 @@ body {
    below the actions after the POST; hidden until it carries a message. */
 .merge-remote-result { font-size: 13px; margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
 
+/* Provenance panel: a quiet editor for the repo/base a merge/sync gate on. It sits
+   between the spec and the log; the callout only lights up on the merge-blocking
+   case (a Review attempt with no base). */
+/* Provenance: a quiet key/value table above the spec. A value reads as plain text
+   until clicked, when it becomes an inline input (a change → shell `attempt set`);
+   an (i) bubble per key explains, on hover/focus, what the field gates. */
+.provenance { margin: 0 0 20px; }
+.provenance-callout { font-size: 13px; margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--alert); border-radius: 8px; background: color-mix(in srgb, var(--alert) 12%, transparent); color: var(--ink); }
+.provenance-callout code { background: var(--panel-2); border-radius: 4px; padding: 0 4px; }
+.provenance-table { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; align-items: center; width: fit-content; max-width: 100%; }
+.provenance-row { display: contents; }
+.provenance-key { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+/* The (i) bubble: a tiny circle whose CSS tooltip (data-tip) explains the field.
+   aria-label carries the same text for screen readers; the bubble is focusable so
+   the tip is reachable by keyboard, not hover alone. */
+.provenance-info { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; border: 1px solid var(--line); border-radius: 50%; font-size: 9px; font-style: normal; font-weight: 600; line-height: 1; color: var(--muted); cursor: help; }
+.provenance-info:hover, .provenance-info:focus { border-color: var(--accent); color: var(--accent); outline: none; }
+.provenance-info::after { content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 7px); min-width: 180px; max-width: 240px; padding: 7px 9px; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.4; font-weight: 400; white-space: normal; text-align: left; box-shadow: 0 6px 20px rgba(0,0,0,.35); opacity: 0; visibility: hidden; transition: opacity .12s ease; pointer-events: none; z-index: 20; }
+.provenance-info:hover::after, .provenance-info:focus::after { opacity: 1; visibility: visible; }
+/* The value: transparent and border-quiet so it reads as text, gaining a frame on
+   hover (hint that it is clickable) and a filled, accented field on focus. */
+.provenance-input { width: 100%; min-width: 260px; background: transparent; color: var(--ink); border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; margin: -1px 0; font: inherit; font-size: 13px; cursor: text; }
+.provenance-input:hover { border-color: var(--line); }
+.provenance-input:focus { background: var(--panel); border-color: var(--accent); outline: none; }
+.provenance-input::placeholder { color: var(--muted); opacity: .6; font-style: italic; }
+.provenance-saved { grid-column: 2; justify-self: start; font-size: 12px; color: var(--done); animation: provenance-fade 2.6s ease forwards; }
+@keyframes provenance-fade { 0%, 62% { opacity: 1; } 100% { opacity: 0; } }
+
 .timeline { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
 /* The DOM is always oldest-first; the toggle flips only the visual order (stored
    on .log-region, which survives htmx innerHTML swaps) so polling never resets

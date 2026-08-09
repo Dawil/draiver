@@ -7,13 +7,15 @@
 // close), answers an open escalation (POST /ticket/{id}/{attempt}/resolve — the
 // board affordance for `draiver resolve`), and closes a Review attempt landed by
 // an external PR while pulling its base (POST /ticket/{id}/{attempt}/merge-remote
-// — the "Merged elsewhere" action, `draiver ctl merge --remote`); and the board's
+// — the "Merged elsewhere" action, `draiver ctl merge --remote`); the board's
 // green play button (POST /ticket/{id}/{attempt}/enable) opts a parked attempt
-// into daemon supervision. Each write shells the same verb a human runs at a
-// terminal (draiver log / draiver done / draiver resolve / draiver ctl merge
-// --remote / draiver ctl enable — see runDraiverLog, runDraiverResolve,
-// runDraiverMergeRemote, runDraiverEnable), so there is a single code path per
-// write.
+// into daemon supervision; and the attempt's provenance panel (POST
+// /ticket/{id}/{attempt}/provenance) sets the repo/base that gate merge/sync, so a
+// human can unblock a base-less Review attempt from the UI. Each write shells the
+// same verb a human runs at a terminal (draiver log / draiver done / draiver
+// resolve / draiver ctl merge --remote / draiver ctl enable / draiver attempt set
+// — see runDraiverLog, runDraiverResolve, runDraiverMergeRemote, runDraiverEnable,
+// runDraiverAttemptSet), so there is a single code path per write.
 package web
 
 import (
@@ -139,6 +141,37 @@ func (s *Server) runDraiverLog(typ, id, att, body string) error {
 	cmd := exec.Command(exe, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runDraiverAttemptSet writes an attempt's provenance (repo/base) by invoking
+// `draiver attempt set` rather than reimplementing the attempt.md write in the
+// web layer — the same verb a human runs at a terminal, so the board and the CLI
+// share one write path (see runDraiverLog). Only a non-empty field is passed as a
+// flag: a blank input omits the flag so `attempt set` leaves that field untouched
+// (drvweb-009 maps a blank input to "no change", never to "clear"; the caller has
+// already rejected the both-blank case). The data root goes as an explicit flag
+// and the ticket@attempt target after "--" so an id beginning with "-" is never
+// parsed as a flag. No --actor: `attempt set` appends no hash-chained event, so
+// the write carries no actor to attribute. On failure it surfaces the CLI's
+// combined output for a legible error.
+func (s *Server) runDraiverAttemptSet(id, att, repo, base string) error {
+	exe, err := draiverExe()
+	if err != nil {
+		return err
+	}
+	args := []string{"attempt", "set", "--data", s.root.Dir}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	if base != "" {
+		args = append(args, "--base", base)
+	}
+	args = append(args, "--", id+"@"+att)
+	cmd := exec.Command(exe, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver attempt set: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -372,6 +405,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"cardHref":    cardHref,
 			"canEnable":   canEnable,
 			"reviewLink":  reviewLink,
+			"provenance":  func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
 			"sessionDot":  s.sessionDot,
 			"paletteVars": paletteVars,
 		}).
@@ -393,11 +427,12 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum, Waratah))
 }
 
-// Handler returns the route mux. Every route is a GET but four writes: POST
+// Handler returns the route mux. Every route is a GET but five writes: POST
 // .../log appends a composed log event, POST .../resolve answers an open
-// escalation, POST .../enable opts an attempt into daemon supervision, and POST
+// escalation, POST .../enable opts an attempt into daemon supervision, POST
 // .../merge-remote closes a Review attempt landed by an external PR and pulls its
-// base (via `ctl merge --remote`).
+// base (via `ctl merge --remote`), and POST .../provenance sets the repo/base that
+// gate merge/sync (via `attempt set`).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -411,6 +446,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/merge-remote", s.handleMergeRemote)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -519,6 +555,16 @@ type detailVM struct {
 	// FaviconHref is the current board variant, server-rendered into the detail
 	// page's <link rel="icon"> so the tab icon reflects live board state on load.
 	FaviconHref string
+}
+
+// provenanceVM drives the "provenance-panel" partial: the repo/base editor on the
+// attempt detail page. Attempt supplies the prefill values (Repo/Base) and the
+// gating bits (State/Ticket/ID); Saved is true only in the response to a
+// successful save, so the panel can confirm the write after an htmx swap (the
+// full-page render leaves it false).
+type provenanceVM struct {
+	Attempt project.Attempt
+	Saved   bool
 }
 
 type indexVM struct {
@@ -992,6 +1038,54 @@ func (s *Server) runDraiverMergeRemote(id, att string) (string, error) {
 		return "", fmt.Errorf("draiver ctl merge --remote: %w: %s", err, text)
 	}
 	return text, nil
+}
+
+// handleProvenance sets an attempt's repo/base from the detail page's provenance
+// panel (POST /ticket/{id}/{attempt}/provenance) — the one UI affordance for the
+// merge/sync-gating fields, so a human can unblock an attempt wedged for want of a
+// base without leaving the board. It shells `draiver attempt set`
+// (runDraiverAttemptSet — the write path a human runs at a terminal, drvctl-028),
+// which owns the attempt.md write and the field validation; the web layer never
+// touches attempt.md itself (the package's write invariant). The panel prefills
+// the current values, so a blank input means "leave unchanged": a blank field is
+// omitted from the shell-out, and an all-blank submit is a 400 here rather than a
+// 500 from the verb's "nothing to set". Only repo and base are read from the form
+// — the tool/model fields `attempt set` also accepts are deliberately out of the
+// UI's scope, the allow-list discipline the compose box uses for event types. On
+// success it re-renders the panel in place (htmx outerHTML swap) with the saved
+// values and a confirmation.
+func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	// Only repo/base are accepted; a blank field maps to "no change" (the verb
+	// leaves an omitted flag untouched), so the shell-out receives only the fields
+	// the human actually filled. An all-blank submit changes nothing — reject it as
+	// a bad request here rather than let the verb's "nothing to set" surface as a
+	// 500.
+	repo := strings.TrimSpace(r.FormValue("repo"))
+	base := strings.TrimSpace(r.FormValue("base"))
+	if repo == "" && base == "" {
+		http.Error(w, "draiver: set a repo or a base to save", http.StatusBadRequest)
+		return
+	}
+	if err := s.runDraiverAttemptSet(id, att, repo, base); err != nil {
+		s.fail(w, err)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.render(w, "provenance-panel", provenanceVM{Attempt: a, Saved: true})
 }
 
 // handleResolve answers an open escalation from the attempt timeline (POST
