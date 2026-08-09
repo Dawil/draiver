@@ -399,9 +399,9 @@ const (
 	prefixWidth = 1 + 19 + 2 + tokenWidth + 2 + roleWidth + 3
 )
 
-// ANSI attributes used on a TTY only. roleColor colours the whole `[<prefix>]:`
-// bracket by role; ansiItalic marks tool output so it reads as visibly distinct
-// from prose (drvctl-025 #8).
+// ANSI attributes used on a TTY only. roleColor colours the role token in the
+// prefix (not the datetime, tokens or brackets — drvctl-025 #17); ansiItalic
+// marks tool output so it reads as visibly distinct from prose (drvctl-025 #8).
 const (
 	ansiReset  = "\033[0m"
 	ansiItalic = "\033[3m"
@@ -560,18 +560,25 @@ func (r *streamRenderer) emit(role, body string) {
 
 // prefix renders the `[<datetime>  <tokens>  <role>]: ` column for one line. The
 // bracket-and-colon are wrapped in `[` … `]: ` so a reader (or grep) can split
-// prefix from content on a fixed delimiter; on a TTY the whole bracket is tinted
-// by role.
+// prefix from content on a fixed delimiter; on a TTY only the role token is
+// tinted by its colour — the datetime, tokens, brackets and delimiter stay
+// uncoloured (drvctl-025 #17).
 func (r *streamRenderer) prefix(role string) string {
 	tok := "-"
 	if r.ctxTokens >= 0 {
 		tok = commas(r.ctxTokens)
 	}
-	inner := fmt.Sprintf("%s  %*s  %-*s", r.now().Format(tsLayout), tokenWidth, tok, roleWidth, role)
+	// Pad the role to a fixed column by hand: on a TTY the colour escapes wrap
+	// only the role word, so %-*s (which counts the escape bytes) would misalign
+	// the closing bracket. Left-align the visible word, then trailing spaces.
+	roleField := role
 	if r.styled {
-		return roleColor(role) + "[" + inner + "]:" + ansiReset + " "
+		roleField = roleColor(role) + role + ansiReset
 	}
-	return "[" + inner + "]: "
+	if pad := roleWidth - len(role); pad > 0 {
+		roleField += strings.Repeat(" ", pad)
+	}
+	return fmt.Sprintf("[%s  %*s  %s]: ", r.now().Format(tsLayout), tokenWidth, tok, roleField)
 }
 
 // bodyLines turns an event body into the physical lines to print under the

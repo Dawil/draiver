@@ -330,6 +330,55 @@ func TestStreamRendererPrefixAndState(t *testing.T) {
 	}
 }
 
+// TestStreamRendererRoleOnlyColor locks drvctl-025 #17: on a TTY only the role
+// token is colour-tinted — the datetime, tokens, brackets and delimiter stay
+// uncoloured, and the closing bracket still aligns because the role column is
+// padded past its colour escapes.
+func TestStreamRendererRoleOnlyColor(t *testing.T) {
+	var buf bytes.Buffer
+	sr := newStreamRenderer(&buf)
+	sr.styled = true // force the TTY styling path without a real terminal
+	fixed := time.Date(2026, 8, 9, 14, 5, 6, 0, time.UTC)
+	sr.now = func() time.Time { return fixed }
+
+	got := sr.prefix(roleTool)
+	// The bracket, datetime and token column are outside any colour escape.
+	if !strings.HasPrefix(got, "[2026-08-09 14:05:06  ") {
+		t.Fatalf("prefix opening is coloured or malformed: %q", got)
+	}
+	// Colour opens immediately before the role word and resets immediately after,
+	// leaving the trailing pad and the `]: ` delimiter uncoloured.
+	want := roleColor(roleTool) + "tool" + ansiReset + "     ]: "
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("role token not the only coloured span: %q (want suffix %q)", got, want)
+	}
+	// Total visible width is unchanged from the uncoloured prefix.
+	if visible := stripANSI(got); len(visible) != prefixWidth {
+		t.Errorf("visible prefix width = %d, want %d: %q", len(visible), prefixWidth, visible)
+	}
+}
+
+// stripANSI removes CSI escape sequences so a coloured string's visible width
+// can be measured.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+				i++
+			}
+			if i < len(s) {
+				i++ // final byte
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 // TestTrimTrailingBlank covers the ANSI-aware right-trim that sees through the
 // per-cell colour escapes glamour pads lines with (drvctl-025 #5).
 func TestTrimTrailingBlank(t *testing.T) {
