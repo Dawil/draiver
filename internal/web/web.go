@@ -1,16 +1,19 @@
 // Package web serves the Draiver board: a self-contained HTMX server that
 // renders the four control states per ATTEMPT from the filesystem log. Each
 // attempt is its own card; one ticket can appear several times. It is
-// read-mostly but for three write affordances, none reimplemented here: the
+// read-mostly but for four write affordances, none reimplemented here: the
 // attempt detail page appends a typed log event (POST /ticket/{id}/{attempt}/log
 // — a note/gotcha/decision, or a Review action: Decision to reopen, Done to
-// close) and answers an open escalation (POST /ticket/{id}/{attempt}/resolve —
-// the board affordance for `draiver resolve`); and the board's green play button
-// (POST /ticket/{id}/{attempt}/enable) opts a parked attempt into daemon
-// supervision. Each write shells the same verb a human runs at a terminal
-// (draiver log / draiver done / draiver resolve / draiver ctl enable — see
-// runDraiverLog, runDraiverResolve, runDraiverEnable), so there is a single code
-// path per write.
+// close), answers an open escalation (POST /ticket/{id}/{attempt}/resolve — the
+// board affordance for `draiver resolve`), and closes a Review attempt landed by
+// an external PR while pulling its base (POST /ticket/{id}/{attempt}/merge-remote
+// — the "Merged elsewhere" action, `draiver ctl merge --remote`); and the board's
+// green play button (POST /ticket/{id}/{attempt}/enable) opts a parked attempt
+// into daemon supervision. Each write shells the same verb a human runs at a
+// terminal (draiver log / draiver done / draiver resolve / draiver ctl merge
+// --remote / draiver ctl enable — see runDraiverLog, runDraiverResolve,
+// runDraiverMergeRemote, runDraiverEnable), so there is a single code path per
+// write.
 package web
 
 import (
@@ -390,9 +393,11 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum, Waratah))
 }
 
-// Handler returns the route mux. Every route is a GET but three writes: POST
+// Handler returns the route mux. Every route is a GET but four writes: POST
 // .../log appends a composed log event, POST .../resolve answers an open
-// escalation, and POST .../enable opts an attempt into daemon supervision.
+// escalation, POST .../enable opts an attempt into daemon supervision, and POST
+// .../merge-remote closes a Review attempt landed by an external PR and pulls its
+// base (via `ctl merge --remote`).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -405,6 +410,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/merge-remote", s.handleMergeRemote)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -909,6 +915,83 @@ func (s *Server) runDraiverEnable(id, att string) error {
 		return fmt.Errorf("draiver ctl enable: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// handleMergeRemote closes a Review attempt whose change landed via a PR merged
+// on the forge and refreshes the local base in one click (POST
+// /ticket/{id}/{attempt}/merge-remote). It shells `draiver ctl merge --remote`
+// (runDraiverMergeRemote — the write path a human runs at a terminal, drvctl-029),
+// which owns the fetch + containment check + `done` and the best-effort local
+// fast-forward; the web layer never touches git itself (the package's write
+// invariant). Unlike the other writes it surfaces the verb's combined output on
+// success too: the CLI records `done` and only *best-effort* pulls, so a
+// zero-exit-with-warning ("could not fast-forward … pull manually") is a success
+// to report, not an error — the message rides back on an OOB banner beside the
+// re-rendered (now Done) log region. A nonzero exit (containment/fetch failure) is
+// a real error, surfaced via s.fail like the other writes.
+func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	msg, err := s.runDraiverMergeRemote(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// One response body carries both swaps: the attempt-live fragment (log region +
+	// OOB badge/count, flipped to Done) and the OOB result banner with the verb's
+	// combined message. Buffer both before writing so a template error still fails
+	// cleanly with a 500 rather than a half-written 200.
+	var buf bytes.Buffer
+	buf.Write(live)
+	if err := s.tmpl.ExecuteTemplate(&buf, "merge-remote-result", msg); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(buf.Bytes())
+}
+
+// runDraiverMergeRemote closes an externally-landed Review attempt by invoking
+// `draiver ctl merge --remote` rather than reimplementing the fetch/ff in the web
+// layer — the same verb a human runs at a terminal, so the board and the CLI share
+// one write path (see runDraiverEnable). Bare `--remote` picks the primary remote
+// (no NAME field in the UI for v1); the server's data root, actor, and target
+// attempt go as explicit flags, and the ticket id after "--" so an id beginning
+// with "-" is never parsed as a flag. Unlike the other shell-outs it returns the
+// trimmed combined output on success too: the verb prints the close plus the
+// best-effort pull result (or warning) there, and the handler reports it. On a
+// nonzero exit it wraps that same output as a legible error.
+func (s *Server) runDraiverMergeRemote(id, att string) (string, error) {
+	exe, err := draiverExe()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(exe, "ctl", "merge", "--remote",
+		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		return "", fmt.Errorf("draiver ctl merge --remote: %w: %s", err, text)
+	}
+	return text, nil
 }
 
 // handleResolve answers an open escalation from the attempt timeline (POST

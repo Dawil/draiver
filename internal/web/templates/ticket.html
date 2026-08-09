@@ -100,7 +100,26 @@
           hx-vals='{"type":"done"}' hx-include="[data-testid=compose-body]"
           hx-confirm="Mark this attempt Done? This is terminal and cannot be undone."
           hx-target="[data-testid=log-region]" hx-swap="innerHTML">Done — close</button>
+        {{if and .Attempt.Base .Attempt.Repo}}
+        {{/* "Merged elsewhere": the real end-of-life flow — the change landed via a
+             PR merged on the forge, so instead of the plain Done this closes AND
+             refreshes the local base in one click. It shells `ctl merge --remote`
+             (drvctl-029), which records `done` on the verified external land and
+             *best-effort* fast-forwards local <base> — a failed pull is a warning,
+             never a block. Terminal and it touches the local repo, so it confirms
+             (wording names the ff). Shown only when the attempt records both a base
+             and a repo — without them there is nothing to fetch/ff, so it degrades
+             to the plain Done above. The result region below carries the verb's
+             combined message (closed + pull result / pull warning), swapped in OOB. */}}
+        <button type="button" class="action-merge-remote" data-testid="action-merge-remote"
+          hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/merge-remote"
+          hx-confirm="Merged elsewhere? This closes the ticket and fast-forwards your local {{.Attempt.Base}} to the remote. This is terminal and cannot be undone."
+          hx-target="[data-testid=log-region]" hx-swap="innerHTML">Merged elsewhere — close &amp; pull {{.Attempt.Base}}</button>
+        {{end}}
       </div>
+      {{if and .Attempt.Base .Attempt.Repo}}
+      <div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hidden></div>
+      {{end}}
       {{end}}
 
       <div class="log-region" data-testid="log-region" data-order="newest"
@@ -267,3 +286,10 @@
       </ol>{{end}}
 
 {{define "attempt-live"}}{{template "attempt-log" .}}{{template "state-badge" (badge .Attempt.State true)}}<span id="log-count" class="count" hx-swap-oob="true">{{len .Events}}</span>{{end}}
+
+{{/* merge-remote-result carries `ctl merge --remote`'s combined message (closed +
+     pull result, or closed + pull warning) back onto the page. The handler pairs
+     it with the attempt-live fragment: the log region re-renders to Done and this
+     OOB-swaps the previously-hidden banner into a visible report. The message is
+     plain CLI text, HTML-escaped by the template — never routed through markdown. */}}
+{{define "merge-remote-result"}}<div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hx-swap-oob="true">{{.}}</div>{{end}}

@@ -157,6 +157,13 @@ body {
 .action-decision { border-color: var(--running); color: var(--running); }
 .action-done { border-color: var(--done); color: var(--done); }
 .action-done:hover { background: color-mix(in srgb, var(--done) 18%, transparent); }
+/* "Merged elsewhere — close & pull": the external-land twin of Done, tinted with
+   the Review colour (it acts on a Review attempt). Same pill as the other actions. */
+.action-merge-remote { background: var(--panel-2); color: var(--review); border: 1px solid var(--review); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.action-merge-remote:hover { background: color-mix(in srgb, var(--review) 18%, transparent); }
+/* The verb's combined report (closed + pull result / pull warning), OOB-swapped in
+   below the actions after the POST; hidden until it carries a message. */
+.merge-remote-result { font-size: 13px; margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
 
 .timeline { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
 /* The DOM is always oldest-first; the toggle flips only the visual order (stored
