@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bufio"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -182,25 +184,37 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	for _, want := range []string{
 		`data-testid="ticket-detail"`,
 		`data-testid="state-badge"`,
-		"Use OAuth for login.",              // rendered spec markdown
-		`data-testid="event-1"`,             // created
-		`data-testid="event-2"`,             // escalation
-		"which base image?",                 // escalation body
-		`data-testid="unresolved-2"`,        // shown as unresolved
-		`data-testid="log-order-toggle"`,    // the ordering toggle
-		`data-testid="log-timeline"`,        // the log list
-		`data-testid="log-region"`,          // the htmx-polled log region
-		`data-order="newest"`,               // default visual order is newest-first
-		`hx-get="/ticket/PROJ-1/0001/live"`, // the region polls the live fragment
-		`hx-trigger="every 3s"`,             // ...on the board's polling cadence
-		"htmx.min.js",                       // htmx is loaded locally (no CDN)
-		`data-testid="breadcrumb"`,          // board › attempts › <attempt> trail
-		`href="/"`,                          // breadcrumb: one click to the board
-		`href="/ticket/PROJ-1"`,             // breadcrumb: one click to the attempt list
+		"Use OAuth for login.",                             // rendered spec markdown
+		`data-testid="event-1"`,                            // created
+		`data-testid="event-2"`,                            // escalation
+		"which base image?",                                // escalation body
+		`data-testid="unresolved-2"`,                       // shown as unresolved
+		`data-testid="log-order-toggle"`,                   // the ordering toggle
+		`data-testid="log-timeline"`,                       // the log list
+		`data-testid="log-region"`,                         // the htmx-polled log region
+		`data-order="newest"`,                              // default visual order is newest-first
+		`hx-get="/ticket/PROJ-1/0001/live"`,                // the region polls the live fragment
+		`hx-trigger="every 3s"`,                            // ...on the board's polling cadence
+		"htmx.min.js",                                      // htmx is loaded locally (no CDN)
+		`data-testid="breadcrumb"`,                         // board › attempts › <attempt> trail
+		`href="/"`,                                         // breadcrumb: one click to the board
+		`href="/ticket/PROJ-1"`,                            // breadcrumb: one click to the attempt list
+		`data-testid="spec-toggle"`,                        // the spec more/less cap toggle
+		`data-testid="agent-logs"`,                         // the Agent Logs section (between Spec and Log)
+		`data-testid="agent-logs-stream"`,                  // the plain-text stream <pre>
+		`data-stream-url="/ticket/PROJ-1/0001/agent-logs"`, // lazy SSE target
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q", want)
 		}
+	}
+
+	// Agent Logs sits between Spec and Log so the stream reads in page order.
+	iSpec := strings.Index(body, `data-testid="spec"`)
+	iAgent := strings.Index(body, `data-testid="agent-logs"`)
+	iLog := strings.Index(body, `data-testid="log-region"`)
+	if !(iSpec < iAgent && iAgent < iLog) {
+		t.Errorf("Agent Logs should sit between Spec and Log (spec=%d agent=%d log=%d)", iSpec, iAgent, iLog)
 	}
 
 	// The DOM is oldest-first (#1 before #2); the newest-first *default* is a
@@ -1360,5 +1374,66 @@ func TestResolveCrossOriginRejected(t *testing.T) {
 	after, _ := ticketlog.Read(root, "ESC-1", "0001")
 	if len(after) != len(before) {
 		t.Errorf("cross-origin resolve must not append an event")
+	}
+}
+
+// TestAgentLogsStreamsSessionAsSSE pins the drvweb-011 stream: GET
+// /ticket/{id}/{attempt}/agent-logs returns text/event-stream and relays the
+// attempt's session logs — the same content `ctl logs -f` prints — one rendered
+// line per `data:` event. It seeds a recorded assistant line and asserts it
+// arrives over the stream, exercising the real shell-out to the CLI end-to-end
+// (draiverBinOverride points at the freshly built binary, like the write tests).
+func TestAgentLogsStreamsSessionAsSSE(t *testing.T) {
+	root := seedBoard(t)
+	if err := root.EnsureSessionDir("PROJ-3", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}` + "\n"
+	if err := os.WriteFile(root.SessionStreamPath("PROJ-3", "0001"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	// Follow mode never ends on its own; the timeout is the safety net that fails
+	// the test (and tears down the child) if the seeded line never arrives.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/ticket/PROJ-3/0001/agent-logs", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	found := false
+	for sc.Scan() {
+		txt := sc.Text()
+		if strings.HasPrefix(txt, "data:") && strings.Contains(txt, "working on it") {
+			found = true
+			break
+		}
+	}
+	cancel() // stop following; unblocks the reader and kills the child
+	if !found {
+		t.Fatalf("did not receive the seeded session line as an SSE data event")
+	}
+}
+
+// TestAgentLogsUnknownAttempt404s pins that the stream endpoint 404s an attempt
+// that does not exist rather than spawning a follow against a missing session.
+func TestAgentLogsUnknownAttempt404s(t *testing.T) {
+	h := newServer(t)
+	rr := get(t, h, "/ticket/PROJ-3/9999/agent-logs")
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("agent-logs for unknown attempt = %d, want 404", rr.Code)
 	}
 }
