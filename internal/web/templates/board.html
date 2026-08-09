@@ -53,9 +53,9 @@
 </div>
 {{end}}
 
-{{/* session-dot renders an attempt's runtime-liveness dot (green running / wattle
-     stopped / grey disabled; nothing when the attempt never ran). It takes the
-     project.Attempt and asks the sessionDot helper for the state + label. Shared
-     by the board card, the attempts index, and the detail header so every surface
-     shows the same signal. */}}
+{{/* session-dot renders an attempt's runtime-liveness dot (green running / crimson
+     error when draiverctld can't run it / wattle stopped / grey disabled; nothing
+     when the attempt never ran). It takes the project.Attempt and asks the
+     sessionDot helper for the state + label. Shared by the board card, the attempts
+     index, and the detail header so every surface shows the same signal. */}}
 {{define "session-dot"}}{{$d := sessionDot .}}{{if $d.State}}<span class="session-dot session-{{$d.State}}" data-testid="session-dot-{{.Ticket}}-{{.ID}}" role="img" title="{{$d.Label}}" aria-label="{{$d.Label}}"></span>{{end}}{{end}}

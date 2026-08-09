@@ -385,8 +385,8 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 // styles the dots purely through var(--dot-*).
 func paletteVars() template.HTML {
 	return template.HTML(fmt.Sprintf(
-		"<style>:root{--dot-running:%s;--dot-stopped:%s;--dot-disabled:%s;}</style>",
-		Eucalypt, Wattle, GhostGum))
+		"<style>:root{--dot-running:%s;--dot-stopped:%s;--dot-disabled:%s;--dot-error:%s;}</style>",
+		Eucalypt, Wattle, GhostGum, Waratah))
 }
 
 // Handler returns the route mux. Every route is a GET but three writes: POST

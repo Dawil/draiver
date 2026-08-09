@@ -38,4 +38,12 @@ const (
 	// Ghost-gum grey — the "disabled" session-dot. Reuses the theme's --muted
 	// (the ghost gum's pale bark), so a disabled leftover recedes.
 	GhostGum = "#8B93A7"
+
+	// Waratah crimson — the "draiverctld can't run this attempt" error session-dot
+	// (drvweb-008). Named for the vivid crimson Waratah (Telopea), so it stays in
+	// the bush palette while sitting a clear hue apart from MurrayRust: rust is the
+	// burnt orange-red reserved for Stuck, and the error dot must never read as
+	// "stuck". A true crimson (little green, a touch of blue) versus rust's orange
+	// keeps "the supervisor is failing" legibly distinct from "needs me".
+	Waratah = "#B0122F"
 )

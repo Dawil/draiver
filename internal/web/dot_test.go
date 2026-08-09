@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -39,6 +41,30 @@ func writeSession(t *testing.T, root store.Root, id, att string, sess session.Id
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(root.SessionMetaPath(id, att), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeCtlLog appends daemon health transitions to an attempt's session/ctl.jsonl
+// exactly as draiverctld's reconciler would (drvctl-027) — marshalling real
+// reconcile.HealthEvent values, so the dot reader is pinned to the shared wire
+// contract (JSON field names + the "start"/"end" event kinds), not a hand-typed
+// copy that could drift.
+func writeCtlLog(t *testing.T, root store.Root, id, att string, evs ...reconcile.HealthEvent) {
+	t.Helper()
+	if err := root.EnsureSessionDir(id, att); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, ev := range evs {
+		line, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(root.SessionCtlLogPath(id, att), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -76,6 +102,14 @@ func seedDots(t *testing.T) *Server {
 	ticketlog.Append(root, "STUCK", "0001", event.Event{Type: "escalation", Actor: "a", Body: "which?"})
 	writeSession(t, root, "STUCK", "0001", session.Identity{SessionID: "s-stuck", PID: deadPID})
 
+	// ERR/0001 — enabled, empty session_id (the restart --new-session wedge), and an
+	// open worktree-clash in ctl.jsonl → error (crimson). This is the founding
+	// incident: session_id="" alone renders no dot, but the open error class does.
+	mkAttempt(t, root, "ERR", "Erroring", "0001")
+	ticketlog.Append(root, "ERR", "0001", event.Event{Type: "enable", Actor: "h", Body: "on"})
+	writeSession(t, root, "ERR", "0001", session.Identity{SessionID: "", PID: deadPID})
+	writeCtlLog(t, root, "ERR", "0001", reconcile.HealthEvent{Class: reconcile.ClassWorktree, Event: "start"})
+
 	s, err := New(root)
 	if err != nil {
 		t.Fatal(err)
@@ -99,6 +133,8 @@ func TestSessionDotStatesOnBoard(t *testing.T) {
 		`session-dot session-stopped`,
 		`data-testid="session-dot-GONE-0001" role="img" title="disabled" aria-label="disabled"`,
 		`session-dot session-disabled`,
+		`data-testid="session-dot-ERR-0001" role="img" title="draiverctld cannot run this attempt" aria-label="draiverctld cannot run this attempt"`,
+		`session-dot session-error`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("board missing dot markup %q\n%s", want, body)
@@ -147,6 +183,107 @@ func TestSessionDotRunningWinsWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestSessionDotErrorRule pins the ctl.jsonl-derived error dot: it is
+// most-recent-transition-per-class-wins, class-agnostic, and outranks
+// stopped/disabled — but a live pid still wins over it.
+func TestSessionDotErrorRule(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		enabled   bool
+		sessionID string
+		pid       int
+		alivePID  bool
+		log       []reconcile.HealthEvent
+		wantState string // "" = no dot
+	}{
+		{
+			name: "open worktree-clash on an empty-session wedge lights error",
+			// The founding incident: session_id="" (would be no dot) but an open class.
+			enabled: true, sessionID: "", pid: deadPID,
+			log:       []reconcile.HealthEvent{{Class: reconcile.ClassWorktree, Event: "start"}},
+			wantState: "error",
+		},
+		{
+			name:    "resolved class (start then end) shows no error, falls back to stopped",
+			enabled: true, sessionID: "s", pid: deadPID,
+			log: []reconcile.HealthEvent{
+				{Class: reconcile.ClassWorktree, Event: "start"},
+				{Class: reconcile.ClassWorktree, Event: "end"},
+			},
+			wantState: "stopped",
+		},
+		{
+			name:    "admit-failed catch-all lights error too (class-agnostic, gotcha #2)",
+			enabled: true, sessionID: "", pid: deadPID,
+			log:       []reconcile.HealthEvent{{Class: reconcile.ClassAdmit, Event: "start"}},
+			wantState: "error",
+		},
+		{
+			name:    "one class resolved, another still open → error",
+			enabled: true, sessionID: "s", pid: deadPID,
+			log: []reconcile.HealthEvent{
+				{Class: reconcile.ClassWorktree, Event: "start"},
+				{Class: reconcile.ClassWorktree, Event: "end"},
+				{Class: reconcile.ClassAdmit, Event: "start"},
+			},
+			wantState: "error",
+		},
+		{
+			name:    "error outranks disabled",
+			enabled: false, sessionID: "s", pid: deadPID,
+			log:       []reconcile.HealthEvent{{Class: reconcile.ClassWorktree, Event: "start"}},
+			wantState: "error",
+		},
+		{
+			name:    "a live pid wins over an open error class (the impossible pair)",
+			enabled: true, sessionID: "s", pid: os.Getpid(), alivePID: true,
+			log:       []reconcile.HealthEvent{{Class: reconcile.ClassWorktree, Event: "start"}},
+			wantState: "running",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := store.Root{Dir: t.TempDir()}
+			mkAttempt(t, root, "T", "Ticket", "0001")
+			if c.enabled {
+				ticketlog.Append(root, "T", "0001", event.Event{Type: "enable", Actor: "h", Body: "on"})
+			}
+			writeSession(t, root, "T", "0001", session.Identity{SessionID: c.sessionID, PID: c.pid})
+			writeCtlLog(t, root, "T", "0001", c.log...)
+
+			s, err := New(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.alive = func(pid int) bool { return pid == os.Getpid() }
+
+			// State left zero (not NeedsMe): these cases exercise the error/liveness
+			// rules, not the Stuck-suppression path.
+			got := s.sessionDot(project.Attempt{Ticket: "T", ID: "0001", Enabled: c.enabled})
+			if got.State != c.wantState {
+				t.Errorf("state = %q, want %q (label %q)", got.State, c.wantState, got.Label)
+			}
+		})
+	}
+}
+
+// TestSessionDotErrorMissingLogIsUnchanged pins that an attempt with no ctl.jsonl
+// (older data, or one that never tripped) behaves exactly as before the error dot.
+func TestSessionDotErrorMissingLogIsUnchanged(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	mkAttempt(t, root, "T", "Ticket", "0001")
+	ticketlog.Append(root, "T", "0001", event.Event{Type: "enable", Actor: "h", Body: "on"})
+	writeSession(t, root, "T", "0001", session.Identity{SessionID: "s", PID: deadPID})
+	// No writeCtlLog: no ctl.jsonl at all.
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.alive = func(pid int) bool { return pid == os.Getpid() }
+	if got := s.sessionDot(project.Attempt{Ticket: "T", ID: "0001", Enabled: true}); got.State != "stopped" {
+		t.Errorf("missing ctl.jsonl should read as stopped, got %q", got.State)
+	}
+}
+
 // TestPaletteVarsRenderedFromConstants pins that the dot colours reach the
 // browser as :root custom properties sourced from the Go palette constants (not
 // hand-typed in style.css), and that style.css carries no dot hex of its own.
@@ -157,6 +294,7 @@ func TestPaletteVarsRenderedFromConstants(t *testing.T) {
 		"--dot-running:" + Eucalypt,
 		"--dot-stopped:" + Wattle,
 		"--dot-disabled:" + GhostGum,
+		"--dot-error:" + Waratah,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("board page missing palette custom property %q", want)
@@ -167,8 +305,10 @@ func TestPaletteVarsRenderedFromConstants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(css), Wattle) {
-		t.Errorf("style.css should reference var(--dot-*), not the Wattle hex %s directly", Wattle)
+	for _, hex := range []string{Wattle, Waratah} {
+		if strings.Contains(string(css), hex) {
+			t.Errorf("style.css should reference var(--dot-*), not the hex %s directly", hex)
+		}
 	}
 }
 

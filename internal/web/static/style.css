@@ -88,13 +88,18 @@ body {
 .tool { font-size: 11px; color: var(--accent); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
 /* Session-liveness dot. Colour alone is not sufficient (colour-blind / screen
    readers), so each state also differs by shape — disabled is a hollow ring,
-   running carries a faint halo — and every dot has a title/aria-label. The dot
-   colours come from the :root --dot-* custom properties (rendered from the Go
-   palette constants; see paletteVars), never a hex here. */
+   running carries a faint halo, error a heavier solid ring — and every dot has a
+   title/aria-label. The dot colours come from the :root --dot-* custom properties
+   (rendered from the Go palette constants; see paletteVars), never a hex here. */
 .session-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid transparent; flex: none; }
 .session-running { background: var(--dot-running); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot-running) 30%, transparent); }
 .session-stopped { background: var(--dot-stopped); }
 .session-disabled { background: transparent; border-color: var(--dot-disabled); }
+/* error: draiverctld can't run the attempt. A bold near-solid ring makes it read
+   as an alarm and gives it a silhouette distinct from running's faint halo, so it
+   is not colour alone that separates the crimson error dot from the green running
+   one. The waratah crimson is a hue apart from the rust reserved for Stuck. */
+.session-error { background: var(--dot-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot-error) 60%, transparent); }
 .badge { font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
 /* control-state accents come from the parent column */
 .col-stuck .card { background: var(--alert-bg); border-color: var(--alert); }
