@@ -43,6 +43,15 @@
       <button type="button" class="spec-toggle" data-testid="spec-toggle" aria-expanded="false" hidden>more</button>
     </section>
 
+    {{/* Provenance: the repo/base a merge/sync gate on. Always shown but visually
+         quiet — an editor for two static metadata fields, not a log event. It
+         shells `draiver attempt set` (drvctl-028): only the fields a human fills
+         change, a blank leaves that field untouched. Prefilled from Attempt so it
+         reads as "edit provenance"; when a Review attempt records no base (the
+         merge-blocking state) the panel flags it. The POST re-renders this panel
+         in place (outerHTML on #provenance) with the saved values. */}}
+    {{template "provenance-panel" (provenance .Attempt)}}
+
     {{/* Agent Logs: a collapsed-by-default window onto the attempt's live session
          stream — what the agent did, tool by tool, the same content `ctl logs -f`
          prints (agent stream interleaved with session/ctl.jsonl health). Plain
@@ -240,6 +249,35 @@
   </script>
 </body>
 </html>{{end}}
+
+{{/* provenance-panel: the repo/base editor, rendered on the detail page and again
+     as the POST response (outerHTML on #provenance). Inputs prefill from the
+     attempt so a blank field is a deliberate "leave unchanged" (the handler omits
+     it from the shell-out). The callout fires only on the merge-blocking case — a
+     Review attempt with no base — so it stays quiet the rest of the time. Saved is
+     set only on the successful-save response, confirming the write after the swap. */}}
+{{define "provenance-panel"}}<section class="provenance" id="provenance" data-testid="provenance">
+  <h2>Provenance</h2>
+  {{if and (eq .Attempt.State "Review") (not .Attempt.Base)}}
+  <p class="provenance-callout" data-testid="provenance-callout">This Review attempt records no <code>base</code>: <code>ctl merge</code>/<code>sync</code> will refuse it until you set one below.</p>
+  {{end}}
+  <form class="provenance-form" data-testid="provenance-form"
+    hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/provenance"
+    hx-target="#provenance" hx-swap="outerHTML">
+    <label class="provenance-field">repo
+      <input type="text" name="repo" class="provenance-input" data-testid="provenance-repo"
+        value="{{.Attempt.Repo}}" placeholder="local path to the git working tree">
+    </label>
+    <label class="provenance-field">base
+      <input type="text" name="base" class="provenance-input" data-testid="provenance-base"
+        value="{{.Attempt.Base}}" placeholder="branch this attempt lands back into">
+    </label>
+    <div class="provenance-row">
+      <button type="submit" class="provenance-submit" data-testid="provenance-submit">Save</button>
+      {{if .Saved}}<span class="provenance-saved" data-testid="provenance-saved">saved ✓</span>{{end}}
+    </div>
+  </form>
+</section>{{end}}
 
 {{define "state-badge"}}<span id="state-badge" class="state state-{{.State}}" data-testid="state-badge"{{if .OOB}} hx-swap-oob="true"{{end}}>{{stateLabel .State}}</span>{{end}}
 

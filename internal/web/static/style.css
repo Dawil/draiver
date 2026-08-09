@@ -165,6 +165,22 @@ body {
    below the actions after the POST; hidden until it carries a message. */
 .merge-remote-result { font-size: 13px; margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
 
+/* Provenance panel: a quiet editor for the repo/base a merge/sync gate on. It sits
+   between the spec and the log; the callout only lights up on the merge-blocking
+   case (a Review attempt with no base). */
+.provenance { margin: 0 0 20px; }
+.provenance h2 { margin-bottom: 6px; }
+.provenance-callout { font-size: 13px; margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--alert); border-radius: 8px; background: color-mix(in srgb, var(--alert) 12%, transparent); color: var(--ink); }
+.provenance-callout code { background: var(--panel-2); border-radius: 4px; padding: 0 4px; }
+.provenance-form { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.provenance-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); align-self: stretch; }
+.provenance-input { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
+.provenance-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.provenance-row { display: flex; gap: 10px; align-items: center; }
+.provenance-submit { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.provenance-submit:hover { border-color: var(--accent); color: var(--accent); }
+.provenance-saved { font-size: 13px; color: var(--done); }
+
 .timeline { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
 /* The DOM is always oldest-first; the toggle flips only the visual order (stored
    on .log-region, which survives htmx innerHTML swaps) so polling never resets
