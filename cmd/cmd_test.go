@@ -8,10 +8,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
+
+// resetFlagsChanged clears pflag's per-flag Changed state across the whole
+// command tree. Unlike the bound value vars (reset above), Changed is cobra
+// internal state that persists across the shared rootCmd between run() calls;
+// a verb that consults Flags().Changed (e.g. `attempt set`, to tell an omitted
+// flag from an explicit empty one) would otherwise see a stale "changed" from a
+// prior test.
+func resetFlagsChanged(c *cobra.Command) {
+	c.Flags().VisitAll(func(f *pflag.Flag) { f.Changed = false })
+	for _, sub := range c.Commands() {
+		resetFlagsChanged(sub)
+	}
+}
 
 // run executes the root command with args and returns combined output and the
 // exit code Execute would produce. Package-level flag vars are reset first so
@@ -25,12 +41,14 @@ func run(t *testing.T, args ...string) (string, int) {
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
 	newTool, newModel, newRepo, newBase = "", "", "", ""
 	attemptTool, attemptModel, attemptFrom, attemptRepo, attemptBase = "", "", "", "", ""
+	attemptSetTool, attemptSetModel, attemptSetRepo, attemptSetBase = "", "", "", ""
 	inboxMine = false
 	ctlLogsFollow, ctlLogsJSON = false, false
 	ctlStatusAll = false
 	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
 	mergeRemote = ""
 	t.Setenv("DRAIVER_ATTEMPT", "")
+	resetFlagsChanged(rootCmd)
 
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)

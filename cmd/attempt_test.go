@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -74,6 +75,91 @@ func TestAttemptNewInheritsRepoFromParent(t *testing.T) {
 	}
 	if m.Repo != dir {
 		t.Errorf("inherited repo = %q, want %q", m.Repo, dir)
+	}
+}
+
+// attempt set writes provenance into an existing attempt.md and appends NO log
+// event (metadata, outside the hash-chained log — the `title` precedent). Only
+// the flags passed change; an omitted flag leaves its field untouched.
+func TestAttemptSetWritesProvenanceOutsideLog(t *testing.T) {
+	dir := newTicket(t) // PROJ-1/0001, repo == dir, base defaulted
+	root := store.Root{Dir: dir}
+	before, _ := ticketlog.Read(root, "PROJ-1", "0001")
+
+	if out, code := run(t, "--data", dir, "attempt", "set", "PROJ-1", "--base", "release/v2", "--tool", "aider"); code != 0 {
+		t.Fatalf("attempt set exited %d: %s", code, out)
+	}
+	m, err := project.LoadAttempt(root, "PROJ-1", "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Base != "release/v2" || m.Tool != "aider" {
+		t.Errorf("set fields not persisted: base=%q tool=%q", m.Base, m.Tool)
+	}
+	if m.Repo != dir {
+		t.Errorf("an omitted --repo must leave repo untouched, got %q", m.Repo)
+	}
+	// No log event was appended: audit is untouched.
+	after, _ := ticketlog.Read(root, "PROJ-1", "0001")
+	if len(after) != len(before) {
+		t.Errorf("attempt set must not append to the log: %d -> %d events", len(before), len(after))
+	}
+}
+
+// A targeted setter: setting one field never blanks another.
+func TestAttemptSetIsTargeted(t *testing.T) {
+	dir := newTicket(t)
+	root := store.Root{Dir: dir}
+	if _, code := run(t, "--data", dir, "attempt", "set", "PROJ-1", "--base", "hotfix"); code != 0 {
+		t.Fatal("set --base exited nonzero")
+	}
+	if _, code := run(t, "--data", dir, "attempt", "set", "PROJ-1", "--tool", "codex"); code != 0 {
+		t.Fatal("set --tool exited nonzero")
+	}
+	m, _ := project.LoadAttempt(root, "PROJ-1", "0001")
+	if m.Base != "hotfix" || m.Tool != "codex" || m.Repo != dir {
+		t.Errorf("targeted set clobbered a sibling field: %+v", m)
+	}
+}
+
+func TestAttemptSetValidation(t *testing.T) {
+	dir := newTicket(t)
+	// No flags: nothing to set.
+	if _, code := run(t, "--data", dir, "attempt", "set", "PROJ-1"); code == 0 {
+		t.Error("expected nonzero exit with no flags")
+	}
+	// Explicit empty --repo is refused (required-if-given).
+	if _, code := run(t, "--data", dir, "attempt", "set", "PROJ-1", "--repo", "   "); code == 0 {
+		t.Error("expected nonzero exit for a whitespace-only --repo")
+	}
+	// Unknown ticket.
+	if _, code := run(t, "--data", dir, "attempt", "set", "NOPE-9", "--tool", "x"); code == 0 {
+		t.Error("expected nonzero exit for an unknown ticket")
+	}
+}
+
+// A base-less attempt is exactly what `ctl merge` refuses; `attempt set --base`
+// is the fix. This is the wedged-attempt recovery the ticket exists to enable.
+func TestAttemptSetUnwedgesMerge(t *testing.T) {
+	dir := newTicket(t)
+	root := store.Root{Dir: dir}
+	// Blank the base to simulate a legacy/hand-made attempt that records none.
+	m, _ := attempt.LoadMeta(root, "PROJ-1", "0001")
+	m.Base = ""
+	if err := attempt.WriteMeta(root, m); err != nil {
+		t.Fatal(err)
+	}
+	// ctl merge refuses a base-less attempt (rootCmd silences the error text, so
+	// assert on the nonzero exit; loadLandContext's message is covered elsewhere).
+	if _, code := run(t, "--data", dir, "ctl", "merge", "PROJ-1"); code == 0 {
+		t.Fatal("expected ctl merge to refuse a base-less attempt")
+	}
+	// attempt set --base fills it in; the field is now readable.
+	if _, code := run(t, "--data", dir, "attempt", "set", "PROJ-1", "--base", "main"); code != 0 {
+		t.Fatal("attempt set --base exited nonzero")
+	}
+	if got, _ := project.LoadAttempt(root, "PROJ-1", "0001"); got.Base != "main" {
+		t.Errorf("base not set after attempt set: %q", got.Base)
 	}
 }
 

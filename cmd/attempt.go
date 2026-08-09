@@ -17,6 +17,11 @@ var (
 	attemptRepo  string
 	attemptBase  string
 	attemptFrom  string
+
+	attemptSetTool  string
+	attemptSetModel string
+	attemptSetRepo  string
+	attemptSetBase  string
 )
 
 var attemptCmd = &cobra.Command{
@@ -119,6 +124,74 @@ var attemptLsCmd = &cobra.Command{
 	},
 }
 
+var attemptSetCmd = &cobra.Command{
+	Use:   "set <ticket[@attempt]>",
+	Short: "Set an existing attempt's provenance (repo/base/tool/model) in attempt.md",
+	Long: "Write repo/base/tool/model into an existing attempt's attempt.md — the fix " +
+		"for an attempt wedged for want of a `base:`/`repo:` (the fields `ctl merge`/`sync` " +
+		"require) without recreating it or hand-editing YAML. Like `draiver title` on " +
+		"spec.md, attempt.md's provenance is static metadata, not a log event: `set` " +
+		"appends nothing to the hash-chained log and never affects `draiver audit`; the " +
+		"change is read live on the next board/merge.\n\n" +
+		"Only the flags you pass change; an omitted flag leaves that field untouched, so " +
+		"`attempt set X --base main` never clobbers repo. --repo, if given, must be a " +
+		"non-empty path; --base defaults to the repo's current branch when passed empty " +
+		"(like `attempt new`).",
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := resolveRoot()
+		if err != nil {
+			return err
+		}
+		ticket, att, err := resolveCtlTarget(root, args[0])
+		if err != nil {
+			return err
+		}
+		meta, err := attempt.LoadMeta(root, ticket, att)
+		if err != nil {
+			return err
+		}
+
+		// A targeted setter: only an explicitly-passed flag overwrites its field, so
+		// setting one field can never blank another. --repo is required-if-given
+		// (mirrors attempt.Create's trim-and-require); --base with an empty value
+		// defaults to the repo's current branch, exactly like `attempt new`.
+		changed := false
+		if cmd.Flags().Changed("repo") {
+			repo := strings.TrimSpace(attemptSetRepo)
+			if repo == "" {
+				return fmt.Errorf("--repo must be a non-empty local git working tree path")
+			}
+			meta.Repo = repo
+			changed = true
+		}
+		if cmd.Flags().Changed("base") {
+			base, err := resolveBase(cmd.Context(), meta.Repo, attemptSetBase)
+			if err != nil {
+				return err
+			}
+			meta.Base = base
+			changed = true
+		}
+		if cmd.Flags().Changed("tool") {
+			meta.Tool = strings.TrimSpace(attemptSetTool)
+			changed = true
+		}
+		if cmd.Flags().Changed("model") {
+			meta.Model = strings.TrimSpace(attemptSetModel)
+			changed = true
+		}
+		if !changed {
+			return fmt.Errorf("nothing to set: pass at least one of --repo, --base, --tool, --model")
+		}
+		if err := attempt.WriteMeta(root, meta); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "set %s/%s provenance in attempt.md\n", ticket, att)
+		return nil
+	},
+}
+
 func dash(s string) string {
 	if s == "" {
 		return "-"
@@ -132,7 +205,12 @@ func init() {
 	attemptNewCmd.Flags().StringVar(&attemptRepo, "repo", "", "required (unless inherited via --from): local path to the git working tree this attempt targets")
 	attemptNewCmd.Flags().StringVar(&attemptBase, "base", "", "branch this attempt lands back into (default: inherited via --from, else the repo's current branch)")
 	attemptNewCmd.Flags().StringVar(&attemptFrom, "from", "", "record provenance: this attempt branches from attempt <id>")
+	attemptSetCmd.Flags().StringVar(&attemptSetTool, "tool", "", "coding-agent tool (e.g. claude-code, aider, codex)")
+	attemptSetCmd.Flags().StringVar(&attemptSetModel, "model", "", "model (e.g. opus-4.8)")
+	attemptSetCmd.Flags().StringVar(&attemptSetRepo, "repo", "", "local path to the git working tree this attempt targets")
+	attemptSetCmd.Flags().StringVar(&attemptSetBase, "base", "", "branch this attempt lands back into (empty defaults to the repo's current branch)")
 	attemptCmd.AddCommand(attemptNewCmd)
 	attemptCmd.AddCommand(attemptLsCmd)
+	attemptCmd.AddCommand(attemptSetCmd)
 	rootCmd.AddCommand(attemptCmd)
 }

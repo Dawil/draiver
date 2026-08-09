@@ -76,6 +76,7 @@ Discoverable via --help; the verbs are to agents what the status enum is to Issu
 * `status` — regenerate the projection(s).
 * `audit PROJ-123` - verifies the hash-chained log of every attempt (see below)
 * `attempt new PROJ-123 --tool …` / `attempt ls PROJ-123` — start or list attempts. Verbs act on the ticket's latest attempt by default; `--attempt 0002` (or `DRAIVER_ATTEMPT`) targets a specific one.
+* `attempt set PROJ-123 --repo … --base … [--tool --model]` — write provenance into an existing attempt's `attempt.md` (the fix for an attempt wedged for want of a `base:`/`repo:` that `ctl merge`/`sync` require). Like `title` on `spec.md`, it edits static metadata **outside the hash-chained log** — no event, no audit effect — and only the flags you pass change (an omitted flag leaves that field untouched). The scaffolded `attempt.md`/`spec.md` also carry commented example lines for every unset load-bearing field, so the schema is visible to a hand-editor.
 
 ## Control states (not progress states)
 

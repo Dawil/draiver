@@ -152,6 +152,7 @@ defaults to the ticket's **latest** attempt).
 | `new PROJ-123 --title "…" [--project --team --assignee --spec <file> --tool --model]` | Create ticket + `spec.md` (or import `--spec`) + attempt `0001` with its genesis event | |
 | `attempt new PROJ-123 [--tool --model --from N]` | Start a new attempt (own log/chain/working tree); becomes the latest | The comparison unit |
 | `attempt ls PROJ-123` | List attempts with tool, model, derived state, event count | |
+| `attempt set PROJ-123[@N] [--repo --base --tool --model]` | Write provenance into an existing `attempt.md` (metadata, outside the log — like `title` on `spec.md`); only passed flags change | Fixes an attempt wedged for want of a `base:`/`repo:` |
 | `log PROJ-123 --type gotcha "msg" [--ref N --artefact path]` | Append a typed event to the target attempt | The generic recorder |
 | `escalate PROJ-123 "question" [--artefact path]` | Append an `escalation` **and halt with a nonzero exit code** | Gate enforced by process control |
 | `resolve PROJ-123 N "answer"` | Append a `resolution` referencing escalation `seq N` in the target attempt | Human's answer |
@@ -263,7 +264,8 @@ fixtures and `t.TempDir()`:
 - `brief`: output contains spec + every event of the attempt, escalation/resolution paired.
 - `audit`: clean chain passes; a mutated body fails with the right first-broken
   `seq`; `VerifyTicket` covers every attempt; nonzero exit.
-- `cmd`: `escalate` exits 3; `resolve` links by `seq`; `attempt new/ls`;
+- `cmd`: `escalate` exits 3; `resolve` links by `seq`; `attempt new/ls/set`
+  (`set` writes provenance outside the log and is a targeted, per-flag setter);
   `--attempt` targets a specific attempt and the default is the latest.
 - `web`: `httptest` — board shows one card per attempt (a ticket appears twice),
   attempt index + detail render, and the server exposes **no** write routes.
