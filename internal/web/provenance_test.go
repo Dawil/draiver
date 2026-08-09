@@ -77,6 +77,50 @@ func TestProvenancePanelAlwaysRendersPrefilled(t *testing.T) {
 	}
 }
 
+// TestProvenanceInlineEditTable pins the redesigned panel: a quiet key/value
+// table above the spec, where each value is an inline input (no Save button) that
+// posts on change, and each key carries an (i) info bubble whose tooltip explains
+// the field.
+func TestProvenanceInlineEditTable(t *testing.T) {
+	root := seedBoard(t)
+	writeAttemptMeta(t, root, "PROJ-3", "0001", "/tmp/repo", "main")
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	body := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+
+	// The table form posts on change (blur that altered a value) or Enter — there
+	// is no Save button anymore.
+	for _, want := range []string{
+		`class="provenance-table"`,
+		`hx-trigger="change, submit"`,
+		`hx-swap="outerHTML"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("inline-edit table missing %q", want)
+		}
+	}
+	if strings.Contains(body, `data-testid="provenance-submit"`) || strings.Contains(body, ">Save<") {
+		t.Errorf("the redesigned panel must not carry a Save button")
+	}
+
+	// An (i) bubble per key, with a hover/focus tooltip (data-tip) mirrored to
+	// aria-label for screen readers.
+	if n := strings.Count(body, `class="provenance-info"`); n != 2 {
+		t.Errorf("want an info bubble on each of the two keys, got %d", n)
+	}
+	if !strings.Contains(body, `data-tip=`) || !strings.Contains(body, `aria-label="base"`) {
+		t.Errorf("info bubble tooltip / input aria-label missing")
+	}
+
+	// The provenance panel renders above the spec section.
+	if pi, si := strings.Index(body, `data-testid="provenance"`), strings.Index(body, `data-testid="spec"`); pi < 0 || si < 0 || pi > si {
+		t.Errorf("provenance panel should render above the spec (provenance@%d, spec@%d)", pi, si)
+	}
+}
+
 // TestProvenanceCalloutOnBaselessReview pins the one prominent case: a Review
 // attempt with no base (the state that blocks `ctl merge`/`sync`) gets a callout;
 // a Review attempt that records a base does not.

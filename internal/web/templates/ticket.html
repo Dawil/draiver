@@ -34,6 +34,17 @@
   </header>
 
   <main class="detail" data-testid="ticket-detail">
+    {{/* Provenance: the repo/base a merge/sync gate on, as a quiet key/value table
+         above the spec. Always shown but visually light — the values read as plain
+         text until clicked, when each becomes an inline input; blurring (a native
+         change) shells `draiver attempt set` (drvctl-028) to persist it, with a
+         blank input leaving that field untouched. An (i) bubble per key explains
+         what the field gates. Prefilled from Attempt so it reads as "edit
+         provenance"; when a Review attempt records no base (the merge-blocking
+         state) the panel flags it. The POST re-renders this panel in place
+         (outerHTML on #provenance) with the saved values. */}}
+    {{template "provenance-panel" (provenance .Attempt)}}
+
     <section class="spec" data-testid="spec">
       <h2>Spec</h2>
       <div class="prose" data-testid="spec-prose">{{.SpecHTML}}</div>
@@ -42,15 +53,6 @@
            when the spec actually overflows, and nothing is remembered server-side. */}}
       <button type="button" class="spec-toggle" data-testid="spec-toggle" aria-expanded="false" hidden>more</button>
     </section>
-
-    {{/* Provenance: the repo/base a merge/sync gate on. Always shown but visually
-         quiet — an editor for two static metadata fields, not a log event. It
-         shells `draiver attempt set` (drvctl-028): only the fields a human fills
-         change, a blank leaves that field untouched. Prefilled from Attempt so it
-         reads as "edit provenance"; when a Review attempt records no base (the
-         merge-blocking state) the panel flags it. The POST re-renders this panel
-         in place (outerHTML on #provenance) with the saved values. */}}
-    {{template "provenance-panel" (provenance .Attempt)}}
 
     {{/* Agent Logs: a collapsed-by-default window onto the attempt's live session
          stream — what the agent did, tool by tool, the same content `ctl logs -f`
@@ -250,32 +252,42 @@
 </body>
 </html>{{end}}
 
-{{/* provenance-panel: the repo/base editor, rendered on the detail page and again
-     as the POST response (outerHTML on #provenance). Inputs prefill from the
-     attempt so a blank field is a deliberate "leave unchanged" (the handler omits
-     it from the shell-out). The callout fires only on the merge-blocking case — a
-     Review attempt with no base — so it stays quiet the rest of the time. Saved is
-     set only on the successful-save response, confirming the write after the swap. */}}
+{{/* provenance-panel: the repo/base editor as a quiet key/value table, rendered on
+     the detail page and again as the POST response (outerHTML on #provenance). Each
+     value is an input styled to read as plain text until focused; the enclosing
+     form posts on any child's change (a blur that altered the value) or on Enter, so
+     clicking out saves without a Save button. Inputs prefill from the attempt so a
+     blank field is a deliberate "leave unchanged" (the handler omits it from the
+     shell-out). Each key carries an (i) bubble whose hover/focus tooltip (data-tip,
+     mirrored to aria-label for screen readers) says what the field gates. The
+     callout fires only on the merge-blocking case — a Review attempt with no base —
+     so it stays quiet the rest of the time. Saved is set only on the successful-save
+     response, confirming the write after the swap. */}}
 {{define "provenance-panel"}}<section class="provenance" id="provenance" data-testid="provenance">
-  <h2>Provenance</h2>
   {{if and (eq .Attempt.State "Review") (not .Attempt.Base)}}
-  <p class="provenance-callout" data-testid="provenance-callout">This Review attempt records no <code>base</code>: <code>ctl merge</code>/<code>sync</code> will refuse it until you set one below.</p>
+  <p class="provenance-callout" data-testid="provenance-callout">This Review attempt records no <code>base</code>: <code>ctl merge</code>/<code>sync</code> will refuse it until you set one.</p>
   {{end}}
-  <form class="provenance-form" data-testid="provenance-form"
+  {{/* One form, no submit button: a change bubbling up from either input (a blur
+       that altered the value) or Enter posts both fields; the handler treats a blank
+       field as "no change", so a single edit only touches the field you changed. */}}
+  <form class="provenance-table" data-testid="provenance-form"
     hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/provenance"
-    hx-target="#provenance" hx-swap="outerHTML">
-    <label class="provenance-field">repo
-      <input type="text" name="repo" class="provenance-input" data-testid="provenance-repo"
-        value="{{.Attempt.Repo}}" placeholder="local path to the git working tree">
-    </label>
-    <label class="provenance-field">base
-      <input type="text" name="base" class="provenance-input" data-testid="provenance-base"
-        value="{{.Attempt.Base}}" placeholder="branch this attempt lands back into">
-    </label>
+    hx-trigger="change, submit" hx-target="#provenance" hx-swap="outerHTML">
     <div class="provenance-row">
-      <button type="submit" class="provenance-submit" data-testid="provenance-submit">Save</button>
-      {{if .Saved}}<span class="provenance-saved" data-testid="provenance-saved">saved ✓</span>{{end}}
+      <span class="provenance-key">base<span class="provenance-info" tabindex="0" role="note"
+        aria-label="Branch this attempt merges back into — required before ctl merge/sync will land it."
+        data-tip="Branch this attempt merges back into — required before ctl merge/sync will land it.">i</span></span>
+      <input type="text" name="base" class="provenance-input" data-testid="provenance-base"
+        value="{{.Attempt.Base}}" placeholder="set a base…" aria-label="base" autocomplete="off" spellcheck="false">
     </div>
+    <div class="provenance-row">
+      <span class="provenance-key">repo<span class="provenance-info" tabindex="0" role="note"
+        aria-label="Local git checkout this attempt lands from — needed to make and merge changes."
+        data-tip="Local git checkout this attempt lands from — needed to make and merge changes.">i</span></span>
+      <input type="text" name="repo" class="provenance-input" data-testid="provenance-repo"
+        value="{{.Attempt.Repo}}" placeholder="set a repo…" aria-label="repo" autocomplete="off" spellcheck="false">
+    </div>
+    {{if .Saved}}<span class="provenance-saved" data-testid="provenance-saved" role="status">saved ✓</span>{{end}}
   </form>
 </section>{{end}}
 
