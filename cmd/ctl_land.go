@@ -20,11 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/reconcile"
@@ -36,10 +38,17 @@ import (
 
 var (
 	mergeDryRun    bool
-	mergeSync      bool // on divergence, sync-then-ff in one shot instead of refusing
-	landEscalate   bool // force the escalate disposition on failure
-	landNoEscalate bool // force the error-only disposition on failure
+	mergeSync      bool   // on divergence, sync-then-ff in one shot instead of refusing
+	mergeRemote    string // --remote[=NAME]: reconcile from a remote after an external PR merge
+	landEscalate   bool   // force the escalate disposition on failure
+	landNoEscalate bool   // force the error-only disposition on failure
 )
+
+// remoteBareSentinel is the NoOptDefVal for --remote: a bare `--remote` (no value)
+// yields it, so the resolver knows to pick the default remote rather than treating
+// it as an explicit NAME. It contains a space, which git forbids in a remote name,
+// so it can never collide with a real --remote=NAME.
+const remoteBareSentinel = "<default remote>"
 
 var ctlMergeCmd = &cobra.Command{
 	Use:   "merge <ticket[@attempt]>",
@@ -58,12 +67,29 @@ var ctlMergeCmd = &cobra.Command{
 		"mutating anything, via --is-ancestor and merge-tree.\n\n" +
 		"On failure --escalate raises a durable escalation (→ Needs me, halt exit 3) and " +
 		"--no-escalate exits nonzero with just a message; the default is by actor kind " +
-		"(agent → escalate, human → error).",
+		"(agent → escalate, human → error).\n\n" +
+		"--remote[=NAME] is the external twin: when the change landed via a PR merged on " +
+		"the forge, it fetches the recorded base from the remote (read-only, never pushes), " +
+		"verifies the branch is contained upstream, records `done`, and best-effort " +
+		"fast-forwards the local base. Bare --remote uses the sole remote (or the config's " +
+		"primary_remote when there are several); --remote=NAME overrides. A failed containment " +
+		"check takes the same escalate/no-escalate disposition; a failed local pull is only a " +
+		"warning and never un-closes the ticket.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		lc, err := loadLandContext(cmd.Context(), args[0])
 		if err != nil {
 			return err
+		}
+		// Remote mode is keyed off the flag value, not cmd.Flags().Changed: the test
+		// harness reuses the singleton root command and cobra never resets Changed
+		// between runs. Absence leaves mergeRemote "" (plain local merge); a bare
+		// --remote yields the sentinel; --remote=NAME yields NAME.
+		if mergeRemote != "" {
+			if mergeDryRun {
+				return fmt.Errorf("--dry-run reports local mergeability and --remote reconciles from a remote; use one or the other")
+			}
+			return lc.mergeRemote(cmd)
 		}
 		if mergeDryRun {
 			return lc.dryRun(cmd)
@@ -203,6 +229,115 @@ func (lc *landContext) merge(cmd *cobra.Command) error {
 	return nil
 }
 
+// mergeRemote is the external twin of merge: it reconciles from the remote rather
+// than landing the local branch. It fetches the recorded base, verifies the branch
+// is contained upstream (the load-bearing gate for `done`), records `done`, then
+// best-effort fast-forwards the local base. The containment/fetch failure takes the
+// escalate/no-escalate disposition; the local pull's failure is only a warning.
+func (lc *landContext) mergeRemote(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	// Resolve which remote before anything else: a config/usage problem here is a
+	// plain error, not a land failure worth escalating.
+	remote, err := lc.resolveRemote(ctx)
+	if err != nil {
+		return err
+	}
+	if err := lc.gateForRemoteLand(ctx); err != nil {
+		return lc.fail(cmd, "merge --remote", err)
+	}
+
+	rm, err := lc.wm.MergeRemote(ctx, lc.key, remote, lc.base)
+	if errors.Is(err, worktree.ErrNotContainedUpstream) {
+		return lc.fail(cmd, "merge --remote", fmt.Errorf(
+			"%s is not contained in %s — the PR was not merged into %s (or not yet fetched); recording nothing",
+			rm.Branch, rm.Ref, lc.base))
+	}
+	if err != nil {
+		return lc.fail(cmd, "merge --remote", err)
+	}
+
+	// The branch is proven contained in the remote base — the code landed, just via
+	// the remote this time. Record `done` so control state follows reality.
+	body := fmt.Sprintf("`ctl merge --remote=%s`: %s is contained in %s (tip %s) — the change landed via an external PR merge; recording done.",
+		remote, rm.Branch, rm.Ref, shortSHA(rm.RemoteTip))
+	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
+		Type: "done", Actor: resolveActor(), Body: body,
+	})
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "closed %s/%s: %s is contained in %s and recorded done (seq %d)\n", lc.ticket, lc.attempt, rm.Branch, rm.Ref, e.Seq)
+
+	// Step 4 — best-effort local fast-forward. Never load-bearing: a skip or warning
+	// here must never un-close the ticket just recorded done above.
+	switch p := rm.Pull; {
+	case p.Moved:
+		fmt.Fprintf(out, "fast-forwarded local %s to %s (tip %s)\n", lc.base, rm.Ref, shortSHA(p.Tip))
+	case p.Already:
+		fmt.Fprintf(out, "local %s already up to date with %s\n", lc.base, rm.Ref)
+	case p.Skipped != "":
+		fmt.Fprintf(out, "warning: left local %s unchanged — %s\n", lc.base, p.Skipped)
+	}
+	return nil
+}
+
+// resolveRemote picks the git remote to reconcile from, mirroring review's rule:
+// an explicit --remote=NAME wins (verified against the repo's remotes); a bare
+// --remote uses the sole remote regardless, else the config's primary_remote, and
+// with several remotes and no primary it refuses rather than guess.
+func (lc *landContext) resolveRemote(ctx context.Context) (string, error) {
+	remotes, err := lc.wm.Remotes(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(remotes) == 0 {
+		return "", fmt.Errorf("%s/%s repo has no git remote configured; add one (git remote add) before `ctl merge --remote`", lc.ticket, lc.attempt)
+	}
+	// Explicit --remote=NAME: use it, but verify it names a real remote.
+	if mergeRemote != remoteBareSentinel && strings.TrimSpace(mergeRemote) != "" {
+		name := strings.TrimSpace(mergeRemote)
+		if !slices.Contains(remotes, name) {
+			return "", fmt.Errorf("no git remote named %q in %s/%s (configured: %s)", name, lc.ticket, lc.attempt, strings.Join(remotes, ", "))
+		}
+		return name, nil
+	}
+	// Bare --remote: exactly one remote → use it regardless of any config.
+	if len(remotes) == 1 {
+		return remotes[0], nil
+	}
+	cfg, err := config.Load(ctlConfigPath)
+	if err != nil {
+		return "", err
+	}
+	if pr := strings.TrimSpace(cfg.PrimaryRemote); pr != "" {
+		if !slices.Contains(remotes, pr) {
+			return "", fmt.Errorf("configured primary_remote %q is not a remote of %s/%s (configured: %s)", pr, lc.ticket, lc.attempt, strings.Join(remotes, ", "))
+		}
+		return pr, nil
+	}
+	return "", fmt.Errorf("%s/%s repo has several remotes (%s) and no primary_remote configured; pass --remote=NAME or set primary_remote in the config", lc.ticket, lc.attempt, strings.Join(remotes, ", "))
+}
+
+// gateForRemoteLand enforces the remote-land preconditions: the attempt must be in
+// Review (a remote land is still the Review → Done transition) and stopped (no live
+// session racing the close). Unlike gateForLand it does not require a clean base
+// checkout — step 4's local fast-forward is best-effort, so a dirty base skips the
+// pull with a warning rather than blocking the close.
+func (lc *landContext) gateForRemoteLand(ctx context.Context) error {
+	if lc.att.State != project.Review {
+		return fmt.Errorf("merge --remote records the Review → Done transition, but %s/%s is %s — claim `review` first, or use the plain `done` verb for a docs-only ticket", lc.ticket, lc.attempt, lc.att.State)
+	}
+	live, pid, err := attemptSessionLive(lc.root, lc.ticket, lc.attempt)
+	if err != nil {
+		return err
+	}
+	if live {
+		return fmt.Errorf("%s/%s has a live session (pid %d); stop it with `ctl stop` before landing", lc.ticket, lc.attempt, pid)
+	}
+	return nil
+}
+
 // sync back-merges the base into the branch additively.
 func (lc *landContext) sync(cmd *cobra.Command) error {
 	synced, err := lc.wm.Sync(cmd.Context(), lc.key, lc.base)
@@ -319,6 +454,8 @@ func shortSHA(sha string) string {
 func init() {
 	ctlMergeCmd.Flags().BoolVar(&mergeDryRun, "dry-run", false, "report mergeability (ff-landable? would a merge conflict?) without mutating anything")
 	ctlMergeCmd.Flags().BoolVar(&mergeSync, "sync", false, "on divergence, back-merge the base in (sync) then fast-forward, instead of refusing")
+	ctlMergeCmd.Flags().StringVar(&mergeRemote, "remote", "", "reconcile from a git remote after an external PR merge instead of landing locally: fetch the base, verify the branch is contained upstream, record done, best-effort fast-forward the local base. Bare --remote uses the sole remote or the config's primary_remote; --remote=NAME overrides")
+	ctlMergeCmd.Flags().Lookup("remote").NoOptDefVal = remoteBareSentinel
 	for _, c := range []*cobra.Command{ctlMergeCmd, ctlSyncCmd} {
 		c.Flags().BoolVar(&landEscalate, "escalate", false, "on failure, raise a durable escalation (→ Needs me, halt exit 3); default for an agent actor")
 		c.Flags().BoolVar(&landNoEscalate, "no-escalate", false, "on failure, exit nonzero with just a message, no durable event; default for a human actor")

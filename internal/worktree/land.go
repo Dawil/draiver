@@ -50,6 +50,11 @@ var (
 	// conflicts. The in-progress merge is aborted before returning, so the checkout
 	// is restored to its pre-sync state.
 	ErrConflict = errors.New("worktree: merging the base into the branch conflicts")
+	// ErrNotContainedUpstream is returned by MergeRemote when the attempt's branch
+	// tip is not contained in the fetched remote base — the external PR was not
+	// merged (or not into this base), so there is nothing to record done. It is the
+	// load-bearing gate for the remote land; the caller records nothing on it.
+	ErrNotContainedUpstream = errors.New("worktree: the attempt branch is not contained in the fetched remote base — the external merge did not land it")
 )
 
 // Mergeability is the side-effect-free prediction of landing k's branch onto
@@ -136,35 +141,51 @@ func (m *Manager) Merge(ctx context.Context, k Key, base string) (Landed, error)
 	}
 	landed := Landed{Base: base, Branch: branch, Tip: branchTip, AlreadyUpToDate: branchTip == baseTip}
 
+	if _, err := m.fastForward(ctx, base, branch, branchTip, baseTip); err != nil {
+		return Landed{}, err
+	}
+	return landed, nil
+}
+
+// fastForward advances the local branch base to the commit sourceTip names,
+// fast-forward only, using sourceRef as the merge argument when base is checked
+// out. The caller must have already proven base is an ancestor of sourceTip (a
+// pure fast-forward). If base is checked out in a worktree the move runs there as
+// `git merge --ff-only <sourceRef>`, which also advances that working tree; that
+// checkout must be clean first (ErrBaseDirty) so the fast-forward disturbs nothing.
+// If base is checked out nowhere the ref is moved by a compare-and-swap update-ref,
+// so a concurrent change to base loses the race rather than being silently
+// overwritten. Returns moved=false when base already points at sourceTip.
+func (m *Manager) fastForward(ctx context.Context, base, sourceRef, sourceTip, baseTip string) (bool, error) {
 	basePath, checkedOut, err := m.worktreePathForBranch(ctx, base)
 	if err != nil {
-		return Landed{}, err
+		return false, err
 	}
 	if checkedOut {
 		// Landing into a live checkout advances its working tree; refuse if that
 		// tree is dirty so the fast-forward never clobbers uncommitted work.
 		dirty, err := m.dirtyAt(ctx, basePath)
 		if err != nil {
-			return Landed{}, err
+			return false, err
 		}
 		if dirty {
-			return Landed{}, ErrBaseDirty
+			return false, ErrBaseDirty
 		}
-		if _, err := m.gitIn(ctx, basePath, "merge", "--ff-only", branch); err != nil {
-			return Landed{}, fmt.Errorf("worktree: fast-forward %s into %s: %w", branch, base, err)
+		if baseTip == sourceTip {
+			return false, nil
 		}
-		return landed, nil
+		if _, err := m.gitIn(ctx, basePath, "merge", "--ff-only", sourceRef); err != nil {
+			return false, fmt.Errorf("worktree: fast-forward %s into %s: %w", sourceRef, base, err)
+		}
+		return true, nil
 	}
-	// base is checked out nowhere: move the ref directly with a compare-and-swap so
-	// a concurrent change to base loses the race rather than being silently
-	// overwritten. is-ancestor already proved this is a pure fast-forward.
-	if landed.AlreadyUpToDate {
-		return landed, nil
+	if baseTip == sourceTip {
+		return false, nil
 	}
-	if _, err := m.git(ctx, "update-ref", "refs/heads/"+base, branchTip, baseTip); err != nil {
-		return Landed{}, fmt.Errorf("worktree: fast-forward ref %s to %s: %w", base, branch, err)
+	if _, err := m.git(ctx, "update-ref", "refs/heads/"+base, sourceTip, baseTip); err != nil {
+		return false, fmt.Errorf("worktree: fast-forward ref %s to %s: %w", base, sourceRef, err)
 	}
-	return landed, nil
+	return true, nil
 }
 
 // Synced reports a successful additive back-merge of base into k's branch.
@@ -369,6 +390,173 @@ func (m *Manager) gitStdoutAllowExit1(ctx context.Context, args ...string) (stri
 		return string(out), nil
 	}
 	return "", fmt.Errorf("worktree: %s: %w", strings.Join(args, " "), err)
+}
+
+// Remotes lists the repo's configured git remotes, in git's own order. It is the
+// input to the command layer's remote disambiguation (sole remote → use it;
+// several + a configured primary → use that; several + none → refuse).
+func (m *Manager) Remotes(ctx context.Context) ([]string, error) {
+	out, err := m.git(ctx, "remote")
+	if err != nil {
+		return nil, fmt.Errorf("worktree: list remotes: %w", err)
+	}
+	var names []string
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			names = append(names, l)
+		}
+	}
+	return names, nil
+}
+
+// Fetched records a completed fetch of a remote base: the remote-tracking ref the
+// fetch updated and the commit it now points at.
+type Fetched struct {
+	Remote string
+	Base   string
+	Ref    string // refs/remotes/<remote>/<base> — the ref the fetch updated
+	Tip    string // commit oid the fetched remote base points at
+}
+
+// Fetch updates the remote-tracking ref for base from remote — read-only, and the
+// only place the Manager ever reaches a git remote (it never pushes). It fetches
+// with an explicit refspec into refs/remotes/<remote>/<base> so the tracking ref
+// updates even for a remote without the conventional fetch refspec, and returns
+// that ref (more legible in log bodies than FETCH_HEAD) with its resolved tip.
+func (m *Manager) Fetch(ctx context.Context, remote, base string) (Fetched, error) {
+	if strings.TrimSpace(remote) == "" {
+		return Fetched{}, fmt.Errorf("worktree: fetch: no remote given")
+	}
+	ref := "refs/remotes/" + remote + "/" + base
+	refspec := "+refs/heads/" + base + ":" + ref
+	if _, err := m.git(ctx, "fetch", remote, refspec); err != nil {
+		return Fetched{}, fmt.Errorf("worktree: fetch %s %s: %w", remote, base, err)
+	}
+	tip, err := m.revParse(ctx, ref)
+	if err != nil {
+		return Fetched{}, fmt.Errorf("worktree: resolve fetched %s: %w", ref, err)
+	}
+	return Fetched{Remote: remote, Base: base, Ref: ref, Tip: tip}, nil
+}
+
+// Pulled reports the best-effort local fast-forward of base toward a fetched remote
+// tip — hygiene after an external land, never load-bearing.
+type Pulled struct {
+	Base    string
+	Tip     string // the remote tip the local base was reconciled toward
+	Moved   bool   // the local base ref advanced to Tip
+	Already bool   // the local base already contained Tip (nothing to pull)
+	Skipped string // non-empty: why the fast-forward was skipped (absent / diverged / dirty base)
+}
+
+// PullBase best-effort fast-forwards the local base branch to the fetched remote
+// tip. It is deliberately unfailing: a missing, already-current, diverged, or dirty
+// local base yields a Skipped reason (or Already) rather than an error, so a failed
+// pull can never un-close a ticket the containment gate already proved landed. It
+// never forces. A genuine git fault is still returned for the caller to surface as
+// a warning — but the caller must treat it as non-fatal all the same.
+func (m *Manager) PullBase(ctx context.Context, f Fetched) (Pulled, error) {
+	res := Pulled{Base: f.Base, Tip: f.Tip}
+	exists, err := m.branchExists(ctx, f.Base)
+	if err != nil {
+		return res, err
+	}
+	if !exists {
+		res.Skipped = fmt.Sprintf("the local base %q does not exist", f.Base)
+		return res, nil
+	}
+	baseTip, err := m.revParse(ctx, f.Base)
+	if err != nil {
+		return res, err
+	}
+	// The local base already contains the remote tip (equal, or already pulled, or
+	// the remote is behind): nothing to fast-forward.
+	if baseTip == f.Tip {
+		res.Already = true
+		return res, nil
+	}
+	if contained, err := m.isAncestor(ctx, f.Ref, f.Base); err != nil {
+		return res, err
+	} else if contained {
+		res.Already = true
+		return res, nil
+	}
+	// A fast-forward is possible only if the local base is an ancestor of the remote
+	// tip; otherwise the local base has its own commits and pulling would need a
+	// merge — out of scope for this best-effort hygiene step.
+	if anc, err := m.isAncestor(ctx, f.Base, f.Ref); err != nil {
+		return res, err
+	} else if !anc {
+		res.Skipped = fmt.Sprintf("the local base %q has diverged from %s; fast-forward is impossible (sync or reconcile it manually)", f.Base, f.Ref)
+		return res, nil
+	}
+	moved, err := m.fastForward(ctx, f.Base, f.Ref, f.Tip, baseTip)
+	if errors.Is(err, ErrBaseDirty) {
+		res.Skipped = fmt.Sprintf("the %q checkout holds uncommitted changes", f.Base)
+		return res, nil
+	}
+	if err != nil {
+		return res, err
+	}
+	res.Moved = moved
+	return res, nil
+}
+
+// RemoteMerge reports reconciling k's branch from a fetched remote base: the proof
+// the branch landed upstream and the outcome of the best-effort local pull.
+type RemoteMerge struct {
+	Remote    string
+	Base      string
+	Branch    string
+	Ref       string // refs/remotes/<remote>/<base>
+	RemoteTip string // the fetched remote base tip
+	BranchTip string // the attempt branch tip proven contained in RemoteTip
+	Pull      Pulled // best-effort local fast-forward outcome (never load-bearing)
+}
+
+// MergeRemote is the external twin of Merge: instead of landing the local branch it
+// reconciles from the remote. It fetches base from remote (read-only, never a
+// push), verifies the branch tip is contained in the fetched remote base — the
+// proof the external PR really landed it — and, only when it is, best-effort
+// fast-forwards the local base toward the remote tip. It moves nothing when the
+// branch is not contained: ErrNotContainedUpstream is returned and the caller
+// records nothing. The local pull is hygiene, so its failure is captured in
+// Pull.Skipped rather than raised, and never blocks the caller's `done`.
+func (m *Manager) MergeRemote(ctx context.Context, k Key, remote, base string) (RemoteMerge, error) {
+	if err := k.valid(); err != nil {
+		return RemoteMerge{}, err
+	}
+	branch := k.branch()
+	if exists, err := m.branchExists(ctx, branch); err != nil {
+		return RemoteMerge{}, err
+	} else if !exists {
+		return RemoteMerge{}, ErrBranchNotFound
+	}
+	fetched, err := m.Fetch(ctx, remote, base)
+	if err != nil {
+		return RemoteMerge{}, err
+	}
+	branchTip, err := m.revParse(ctx, branch)
+	if err != nil {
+		return RemoteMerge{}, err
+	}
+	rm := RemoteMerge{Remote: remote, Base: base, Branch: branch, Ref: fetched.Ref, RemoteTip: fetched.Tip, BranchTip: branchTip}
+	contained, err := m.isAncestor(ctx, branch, fetched.Ref)
+	if err != nil {
+		return rm, err
+	}
+	if !contained {
+		return rm, ErrNotContainedUpstream
+	}
+	pull, err := m.PullBase(ctx, fetched)
+	if err != nil {
+		// Even a genuine git fault in the best-effort pull is non-fatal — the branch
+		// is proven landed, so the caller records done regardless. Fold it into the
+		// warning channel rather than failing the reconcile.
+		pull.Skipped = err.Error()
+	}
+	rm.Pull = pull
+	return rm, nil
 }
 
 // HeadBranch returns the short name of the branch currently checked out in repo —

@@ -29,6 +29,7 @@ func run(t *testing.T, args ...string) (string, int) {
 	ctlLogsFollow, ctlLogsJSON = false, false
 	ctlStatusAll = false
 	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
+	mergeRemote = ""
 	t.Setenv("DRAIVER_ATTEMPT", "")
 
 	var out bytes.Buffer
