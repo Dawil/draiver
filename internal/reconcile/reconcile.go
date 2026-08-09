@@ -173,6 +173,15 @@ type Reconciler struct {
 	// the base). Keyed by the cleaned absolute repo path.
 	wtMu    sync.Mutex
 	wtCache map[string]*worktree.Manager
+
+	// healthMu guards health, the per-attempt set of currently-active operational
+	// error classes (keyed by class string). It is edge-triggering state for the
+	// ctl.jsonl health log: Tick diffs each attempt's observation against it to emit
+	// error-start/error-end transitions (see health.go). In-memory and rebuildable —
+	// a restart re-observes and re-emits on the next tick — matching the loop's
+	// "the only runtime state is session/ + the in-memory table" model.
+	healthMu sync.Mutex
+	health   map[worktree.Key]map[string]bool
 }
 
 // run is one entry in the actual-state table. A run this daemon owns carries the
@@ -224,7 +233,12 @@ func New(opt Options) (*Reconciler, error) {
 	if opt.Logf == nil {
 		opt.Logf = func(string, ...any) {}
 	}
-	return &Reconciler{opt: opt, runs: map[worktree.Key]*run{}, wtCache: map[string]*worktree.Manager{}}, nil
+	return &Reconciler{
+		opt:     opt,
+		runs:    map[worktree.Key]*run{},
+		wtCache: map[string]*worktree.Manager{},
+		health:  map[worktree.Key]map[string]bool{},
+	}, nil
 }
 
 // errNoRepoBound marks the one admit failure that is turned into a durable
@@ -346,6 +360,9 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	for key, a := range desired {
 		if currentSet[key] {
 			if !r.readmittable(key) {
+				// A session already live for this attempt is healthy: clear any
+				// operational error class it was carrying (edge → error-end).
+				r.reportHealth(key, "", "")
 				continue
 			}
 			r.reapSpentRun(key)
@@ -354,12 +371,18 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 			// A missing repo is a human-actionable block, not a transient hiccup:
 			// surface it on the board as an escalation instead of only logging it,
 			// where it would silently stall (drvctl-017). Every other admit failure
-			// stays operational-log-only.
+			// stays operational — recorded as an edge-triggered health transition on
+			// the attempt's ctl.jsonl (drvctl-027) so a wedge is observable, and
+			// logged for the daemon's own operator stream.
 			if errors.Is(err, errNoRepoBound) {
 				r.escalateNoRepo(a)
 			} else {
+				r.reportHealth(key, classifyAdmit(err), err.Error())
 				r.opt.Logf("reconcile: admit %s/%s: %v", key.Ticket, key.Attempt, err)
 			}
+		} else {
+			// Admit succeeded: whatever class was wedging this attempt has cleared.
+			r.reportHealth(key, "", "")
 		}
 	}
 
@@ -372,6 +395,12 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 		}
 		r.retire(ctx, key, r.stateOf(key))
 	}
+
+	// An attempt that left the desired set (disabled, retired, or blocked) is no
+	// longer supervised, so any operational error class it was carrying is over from
+	// the daemon's view: close it out with an error-end rather than strand the record
+	// (and the webui red dot) on a lone error-start (drvctl-027).
+	r.sweepHealth(desired)
 	return nil
 }
 

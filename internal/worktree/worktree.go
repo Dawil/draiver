@@ -39,6 +39,16 @@ import (
 // distinguishable from any a developer created by hand.
 const branchPrefix = "draiver/"
 
+// ErrCreate wraps every failure of `git worktree add` in Create, so a caller can
+// recognize "the checkout could not be cut" by cause rather than by string-matching
+// git's stderr. It deliberately spans *any* reason the add is refused — a branch
+// already checked out in another worktree (the founding drvctl-027 incident), a
+// corrupt or empty object at the branch tip (an unclean shutdown, gotcha #2), a
+// missing base ref, a pre-occupied path — because to the health log they are one
+// class: draiverctld cannot bring the attempt up. The reconciler's admit-health
+// classifier keys the worktree-clash class on errors.Is(err, ErrCreate).
+var ErrCreate = errors.New("git worktree add failed")
+
 // Key identifies a worktree by the attempt it isolates. It is the stable handle
 // the supervisor reconciles against: which attempts should have a live worktree.
 type Key struct {
@@ -200,7 +210,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (Worktree, error) {
 		args = append(args, "-b", branch, path, ref)
 	}
 	if _, err := m.git(ctx, args...); err != nil {
-		return Worktree{}, fmt.Errorf("worktree: create %s/%s: %w", spec.Ticket, spec.Attempt, err)
+		return Worktree{}, fmt.Errorf("worktree: create %s/%s: %w: %w", spec.Ticket, spec.Attempt, ErrCreate, err)
 	}
 
 	wt, ok, err := m.find(ctx, spec.Key)
