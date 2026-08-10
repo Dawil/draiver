@@ -80,6 +80,113 @@ and **discover the rest at test time**. The dependency graph is partly authored,
 partly grown — and the two halves live in **different stores** (decision #3): the
 declarations in the unit file, the discoveries in the log.
 
+## Decisions locked (2026-08-11)
+
+A working session closed the blocking forks. **This section is authoritative**; the
+"Design decisions to settle" below is kept for its reasoning, annotated where a fork
+is now resolved.
+
+### Target shape → parent-with-e2e (resolves decision #2)
+
+A target is a **normal ticket** whose repo is the integration/e2e repo and whose
+test only passes once its children are wired together. No new ticket kind; no pure
+aggregator. The target's state is derived from **its own** log like any ticket, and
+its children are ordinary dependency edges gating the target's own admission.
+"Reached when children Done" is therefore just a `requires:` edge (below) on the
+target itself — there is no separate rollup projection to build.
+
+### The three relations and their draiver semantics
+
+Draiver keeps systemd's names but binds them to draiver **control states**. systemd
+has no Review/Done, so this is a native reinterpretation, not a literal port:
+
+| Field (on ticket X's `spec.md`) | Points to | Meaning |
+| --- | --- | --- |
+| `wants:` | tickets X pulls in | *"If I am enabled, enable them."* Transitive enable — desired-ness flows from X to the listed tickets. The grouping / `.target` edge. **No ordering.** |
+| `after:` | tickets X waits on | *"Admit me once they reach **Review**."* Ordering gate on the **Review** state — the predecessor's work is claimed complete (a code-compare exists) though not yet merged. |
+| `requires:` | tickets X waits on | *"Admit me once they reach **Done**."* Ordering gate on the **Done** state — the predecessor is finalized/merged into its base. |
+
+**Direction:** every field is owned by the ticket the relationship belongs to. A
+parent typically carries `wants:` (its children); a child typically carries
+`after:` / `requires:` (its predecessors). Because a target is only a ticket, any
+ticket may carry any of the three — they are just `spec.md` frontmatter fields, and
+therefore immutable design input shared across attempts (decision #3's rule).
+
+**Note on the analogy.** Vanilla systemd `After=` is pure start-ordering and
+`Requires=` is a hard requirement *with failure propagation*. Draiver reuses the
+names for two ordering gates that differ only by **which control state** they wait
+for (Review vs Done). Failure propagation (a failed `requires:` predecessor culling
+its dependents) is **not** in scope for v1 — we keep the analogy only while it
+holds.
+
+### Worked example — the motivating case
+
+```
+CAP-A/spec.md      wants:    [SRC-1, INFRA-1]   # enable CAP-A → SRC-1 and INFRA-1 join the fleet
+INFRA-1/spec.md    after:    [SRC-1]            # CD starts once source is in Review (CI run once)
+CAP-B/spec.md      requires: [CAP-A]            # Capability B starts work only once Capability A is Done
+```
+
+Enable `CAP-A`: its `wants:` pulls `SRC-1` and `INFRA-1` into the fleet. `INFRA-1`'s
+`after: [SRC-1]` holds it out of admission until `SRC-1` reaches **Review**, then
+admits it. `CAP-A`'s own e2e runs once its inputs are ready. A separate `CAP-B` with
+`requires: [CAP-A]` stays parked until `CAP-A` is **Done**.
+
+### Attempt admission & restart (resolves Gap 3)
+
+- **Which attempt runs.** Transitive enable, and a satisfied `after:`/`requires:`
+  gate, target the ticket's **latest attempt**; if there is none (or the latest is
+  terminal/Done) it creates one with the **default launch config** — the same
+  behavior as a manual `enable`. No launch-config customization in v1.
+- **Fire-once, edge-triggered.** A gate opening is a **latch**: once a dependent is
+  admitted, a later change in its dependency does **not** auto-restart it. Staleness
+  surfaces at the integration test (it fails) or at a human; re-triggering is
+  manual. This deliberately defers the hard "what counts as a dependency *change*"
+  question and locks in nothing regrettable. When auto-freshness is eventually
+  wanted, grow toward **a new attempt on retrigger** (draiver-native: a dependency
+  change is a new *journey*), not a systemd-style in-place restart. Corollary:
+  because `after:` gates on the non-terminal **Review** state, gating must be
+  edge-triggered — a predecessor flickering Review↔Running must never flap an
+  already-admitted dependent.
+
+### Ball-passing is escalate-and-recommend (resolves Gap 4's mechanism)
+
+Whoever discovers an integration gap (the integration test) **escalates a
+recommendation** — "INFRA-1 didn't deliver X; recommend reopening it" — a human
+approves, and the reopen executes (a `decision` against the target's Review attempt
+sends it back to Running, an existing primitive). The discoverer's agent **never
+writes to another ticket's log**; the cross-ticket mutation stays human-gated,
+exactly as decision #1 requires. Direct agent-to-ticket reopen is explicitly *not*
+the default. The one primitive this needs built: **cross-ticket path-activation** —
+a log event on ticket X (→ Review / → Escalation / → Done) wakes ticket Y's attempt
+— the same kind of mechanism as resolution-activation, sourced from another
+ticket's log.
+
+### Still open — is a "Capability" a ticket or a grouping?
+
+Parent-with-e2e (Gap 1) settled that the coordination root is a *real* ticket, not
+a pure aggregator. What remains is where the "Capability" wrapper lives:
+
+- **B1 — Capability = the e2e ticket.** The integration ticket is the root; it
+  carries `wants:` (pull in source+infra) and `after:`/`requires:` (gate its own
+  test on them). "Capability Done" = e2e ticket Done. No new ticket kind; grouping,
+  milestone, and integration coincide in one real ticket.
+- **B2 — Capability = a pure aggregator ticket** (source, infra, e2e all children).
+  Cleanest separation and the truest `.target`, but **reintroduces the ticket kind
+  Gap 1 rejected**: state derived from *children's* logs (a ticket that is not
+  portable in isolation — a core-thesis break), and a ticket the reconciler must
+  never spawn.
+- **B3 — Capability = a `project`/grouping, not a ticket** (decision #5's line).
+  Source, infra, and e2e are each clean single-responsibility tickets sharing a
+  `project:`; the **e2e ticket is the coordination root** and the thing you enable
+  (`wants: [SRC, INFRA]`), and its Done is the capability's completion signal
+  (`CAP-B requires: [E2E-A]`). Gets B2's separation of concerns **without** the
+  aggregator kind.
+
+Leaning **B3**: it answers the "maybe this is bad ticket creation" worry — the fix
+is not a fourth ticket kind but recognizing the Capability as a grouping over
+three clean tickets, with the e2e ticket first among equals.
+
 ## Design decisions to settle
 
 ### 1. Keep human approval on the ball-pass — it is on-thesis, not just cautious
@@ -92,7 +199,7 @@ surface the human already watches — so this **strengthens** the thesis by maki
 hidden cross-repo coordination visible as first-class escalations rather than
 buried agent chatter.
 
-### 2. Decide the target's shape — the one place the flat model bends
+### 2. Decide the target's shape — the one place the flat model bends *(RESOLVED → parent-with-e2e; see "Decisions locked")*
 
 Every ticket today is defined by its progression toward a PR: it has a repo, an
 attempt, a worktree, and the daemon *tries to bring it up* (recall drvctl-017
