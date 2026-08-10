@@ -85,7 +85,8 @@ Each rung shares a wider prefix than the one below it.
   discipline. On a Claude *subscription* the 1h TTL is already automatic (it drops
   to 5m only in usage-credit overage). Change: `ENABLE_PROMPT_CACHING_1H=1` env
   guard; prefer cache-preserving `restart` depth; pin the adapter version.
-  *Marginal for draiver by design.*
+  *Marginal for draiver by design.* See "Rung B in practice" below for the
+  auth-mode detail and where the guard is set.
 - **C — sequential/parallel sessions in the same worktree.** Not draiver's shape
   (worktree-per-session). Out of scope.
 - **D — across worktrees of one repo (every ticket, every `race` competitor).**
@@ -99,6 +100,64 @@ Each rung shares a wider prefix than the one below it.
   via append; leave spec+log in the brief.
 - **F — cross-machine fleet + pre-warming.** Needs the Agent SDK for a clean
   `max_tokens:0` prewarm. **Out of scope here** (see "Deferred").
+
+## Rung B in practice: the 1-hour TTL and auth mode
+
+Rung B is the one rung drvctl-035 delivered. Two gaps in draiver routinely exceed
+the default cache TTL, and across either the next turn re-reads and re-pays for the
+whole prefix:
+
+- **Between tickets on a repo.** The shared per-repo prefix sits idle from the end
+  of one attempt to the start of the next.
+- **A session parked on Needs-me.** An attempt that escalated (`draiver escalate`)
+  waits on a human, who resolves on their own time — often far longer than any
+  cache TTL.
+
+**The TTL depends on auth mode — so we pin it.** The TTL is not a single fixed
+number; it depends on how the `claude` process is authenticated and on account
+state:
+
+| Auth mode                      | Default TTL         | In usage-credit overage  |
+| ------------------------------ | ------------------- | ------------------------ |
+| Claude.ai subscription (OAuth) | 1 hour (automatic)  | **silently drops to 5m** |
+| API key (`sk-ant-…`)           | 5 minutes           | 5 minutes                |
+
+Setting **`ENABLE_PROMPT_CACHING_1H=1`** in the session environment holds the 1h
+TTL in *all* of these cases — including overage on a subscription and on an API
+key. It is a belt-and-suspenders opt-in, not a redundant no-op, precisely because
+the subscription default silently degrades.
+
+**Where it is set.** `newReconciler` in `cmd/ctl.go` puts it on the daemon-level
+`BaseSpec.Env`:
+
+```go
+BaseSpec: agent.SessionSpec{
+    ...
+    Env: []string{"ENABLE_PROMPT_CACHING_1H=1"},
+},
+```
+
+`BaseSpec` is the template every session is brought up with. It flows unchanged
+through `reconcile` → `manage` (`Handle.spec` copies the spec, overwriting only
+`WorkDir` and `Model`) → the Claude Code adapter, which layers `spec.Env` on top of
+`os.Environ()` for the `claude` process (`internal/agent/claudecode/claudecode.go`).
+So the variable reaches every spawned and resumed session.
+
+**Adapter auth mode (confirmed).** The adapter authenticates via a **Claude.ai
+subscription (OAuth login)**, *not* an API key. Verified on the daemon host
+(drvctl-035):
+
+- `~/.claude/.credentials.json` contains a single `claudeAiOauth` key — the
+  subscription OAuth token, not an `sk-ant-…` API key.
+- `ANTHROPIC_API_KEY` is **not set** in the daemon environment.
+- The adapter (`internal/agent/claudecode/claudecode.go`) sets no auth env of its
+  own; it inherits `os.Environ()` and layers `spec.Env` on top, so `claude` uses
+  whatever the host is logged in as.
+
+Consequence: on subscription auth the 1h TTL is automatic but drops to 5m in
+usage-credit overage — which is exactly the case `ENABLE_PROMPT_CACHING_1H=1`
+guards against. If the daemon host is ever switched to API-key auth (the default
+becomes 5m), the same drop-in keeps the TTL at 1h with no further change.
 
 ## The key finding: system-prompt control is a CLI flag
 
@@ -224,9 +283,10 @@ Minimum path to a measured result: `drvctl-031 → 032 → 033 → 034 → 036`,
 
 ## Open questions
 
-- **Adapter auth mode** (subscription vs API key) — decides whether the 1h TTL is
-  already the default (subscription) or an opt-in (API key). Confirm before
-  scoping `drvctl-035`.
+- **Adapter auth mode** — *resolved (drvctl-035).* The daemon host authenticates
+  via a Claude.ai subscription (OAuth), so the 1h TTL is the default; it drops to
+  5m only in usage-credit overage, which `ENABLE_PROMPT_CACHING_1H=1` guards
+  against. See "Rung B in practice" above.
 - **150K reap vs Claude Code compaction** — reaping mid-task is a cache-cold event
   draiver *chooses*; Claude Code's in-session compaction keeps system+project
   warm. Worth revisiting whether the threshold should defer to compaction.

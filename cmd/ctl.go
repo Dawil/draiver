@@ -1082,6 +1082,14 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
+			// Pin the 1-hour prompt-cache TTL on every session. The shared per-repo
+			// prefix goes cold across gaps longer than the TTL — the interval between
+			// tickets on a repo, or a session parked on Needs-me awaiting a human. The
+			// adapter authenticates via a Claude.ai subscription (OAuth), where the 1h
+			// TTL is automatic but silently drops to 5m in usage-credit overage (and is
+			// 5m by default on an API key). This drop-in holds 1h regardless. See
+			// docs/prompt-caching.md.
+			Env: []string{"ENABLE_PROMPT_CACHING_1H=1"},
 		},
 		// Route the daemon's operational log to its own stderr. Left unset it
 		// defaults to a no-op — the gap drvctl-027 named: an admit that failed
