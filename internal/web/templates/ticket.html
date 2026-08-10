@@ -158,6 +158,43 @@
     })();
 
     (function () {
+      // Keep focus in a resolve textarea across the 3s log poll. The log region
+      // is an htmx innerHTML swap; hx-preserve keeps the textarea NODE and its
+      // typed value, but htmx moves that node into the freshly-rendered content,
+      // and detaching/re-attaching an element blurs it and drops the caret — so
+      // every ~3s the cursor jumps out mid-sentence. We snapshot the focused
+      // resolve input (id + selection) just before the swap and, the instant
+      // htmx puts the new content in place (afterSwap, before the browser
+      // paints), refocus it and restore the caret/selection. Running
+      // synchronously inside afterSwap means the round-trip never reaches a
+      // frame, so it is seamless — no visible flicker. preventScroll keeps the
+      // refocus from yanking the page, matching the deep-link handler's
+      // don't-move-the-reader stance.
+      var region = document.querySelector('[data-testid="log-region"]');
+      if (!region) return;
+      function resolveInput(el) {
+        return el && el.classList && el.classList.contains('resolve-input') ? el : null;
+      }
+      var pending = null;
+      document.body.addEventListener('htmx:beforeSwap', function (e) {
+        if (e.target !== region) return;
+        var el = resolveInput(document.activeElement);
+        pending = el ? { id: el.id, start: el.selectionStart, end: el.selectionEnd, dir: el.selectionDirection } : null;
+      });
+      document.body.addEventListener('htmx:afterSwap', function (e) {
+        if (e.target !== region || !pending) return;
+        var el = pending.id ? document.getElementById(pending.id) : null;
+        if (resolveInput(el)) {
+          el.focus({ preventScroll: true });
+          // The escalation may still be open (input present) but stale/unknown
+          // selection offsets throw; ignore so a missing caret never breaks focus.
+          try { el.setSelectionRange(pending.start, pending.end, pending.dir); } catch (_) {}
+        }
+        pending = null;
+      });
+    })();
+
+    (function () {
       // Deep-link support: /ticket/{id}/{attempt}#event-{seq} scrolls to and
       // highlights that entry. Native :target handles the initial load, but the
       // log region is an htmx innerHTML poll (task-008): each swap replaces the

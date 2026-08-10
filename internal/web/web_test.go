@@ -1218,6 +1218,30 @@ func TestResolveBoxRendersForOpenEscalationOnly(t *testing.T) {
 	}
 }
 
+// TestResolveInputKeepsFocusAcrossPoll pins the focus-retention contract
+// (drvweb-014): the detail page ships a client handler that snapshots the
+// focused resolve textarea before the 3s log-region swap and refocuses it (with
+// caret) right after, so hx-preserve's value-retention is joined by
+// focus-retention and the poll no longer steals the cursor mid-sentence. The
+// script is inline in the page, so we assert its keying + call shape rather than
+// behaviour.
+func TestResolveInputKeepsFocusAcrossPoll(t *testing.T) {
+	root := seedEscalation(t)
+	h := newServerOver(t, root)
+
+	page := get(t, h, "/ticket/ESC-1/0001").Body.String()
+	for _, want := range []string{
+		"htmx:beforeSwap",   // snapshot focus before the region is swapped
+		"htmx:afterSwap",    // restore it once the new content is in place
+		"preventScroll",     // refocus must not yank the reader
+		"setSelectionRange", // ...and it restores the caret/selection, not just focus
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("detail page missing resolve-focus handler marker %q", want)
+		}
+	}
+}
+
 // TestResolvePostClearsStuck pins the happy path: posting an answer appends
 // exactly one resolution refing that escalation's seq, attributable to a human,
 // and the attempt leaves Stuck for Running in the same live fragment.
