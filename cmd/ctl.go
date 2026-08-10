@@ -41,6 +41,7 @@ var (
 	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
 	ctlLogsJSON      bool
+	ctlLogsTail      int // -f backlog window: last N stream records before following
 	ctlStatusAll     bool              // include terminal Done attempts in the list view
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
 
@@ -335,7 +336,7 @@ var ctlLogsCmd = &cobra.Command{
 		defer stop()
 		return tailStream(ctx, cmd.OutOrStdout(),
 			root.SessionStreamPath(ticket, att), root.SessionCtlLogPath(ticket, att),
-			ctlLogsFollow, !ctlLogsJSON)
+			ctlLogsFollow, !ctlLogsJSON, ctlLogsTail)
 	},
 }
 
@@ -750,16 +751,31 @@ func commas(n int) string {
 // (ctl.jsonl, drvctl-027). Without follow it prints what is on disk and returns;
 // with follow it keeps emitting appended lines from both files until ctx is
 // cancelled (Ctrl-C), waiting for either to appear if the session has not started.
-func tailStream(ctx context.Context, out io.Writer, streamPath, ctlPath string, follow, render bool) error {
+//
+// tail is the follow-mode backlog window over stream.jsonl: a follow is a "show me
+// what's happening now" request, so rather than replay the whole recorded history
+// on start it emits only the last `tail` stream records and then follows live.
+// tail == 0 shows no backlog (only lines appended after the follow starts); tail
+// < 0 replays the full history (today's behaviour, the escape hatch). The window
+// is meaningful only under follow — without it the full history always prints (cat
+// semantics) — and it applies to the stream.jsonl backlog only: the interleaved
+// ctl.jsonl health lines are sparse and kept in full (drvctl-030).
+func tailStream(ctx context.Context, out io.Writer, streamPath, ctlPath string, follow, render bool, tail int) error {
+	// The backlog window is a follow-mode concern; a plain `logs` (cat) always
+	// prints the whole file, and health is never windowed.
+	streamTail := -1
+	if follow {
+		streamTail = tail
+	}
 	if !render {
-		return tailRaw(ctx, out, streamPath, follow)
+		return tailRaw(ctx, out, streamPath, follow, streamTail)
 	}
 
 	// One renderer for both sources: it carries the running token tally forward, and
 	// a shared prefix column keeps the two visually aligned as they interleave.
 	sr := newStreamRenderer(out)
-	stream := &lineReader{path: streamPath}
-	ctl := &lineReader{path: ctlPath}
+	stream := &lineReader{path: streamPath, tail: streamTail}
+	ctl := &lineReader{path: ctlPath, tail: -1}
 	defer stream.close()
 	defer ctl.close()
 
@@ -792,8 +808,11 @@ func tailStream(ctx context.Context, out io.Writer, streamPath, ctlPath string, 
 
 // tailRaw is the --json path: the stream.jsonl bytes, verbatim. It preserves the
 // exact pre-drvctl-027 behaviour — a `| jq` / replay consumer sees the on-disk
-// journal untouched, and health never enters this stream.
-func tailRaw(ctx context.Context, out io.Writer, path string, follow bool) error {
+// journal untouched, and health never enters this stream. In follow mode it honours
+// the same backlog window as the render path (tail records, seeked to a record
+// boundary so the bytes stay byte-for-byte); non-follow always emits the full file
+// (tail < 0), which is where replay-from-start is served.
+func tailRaw(ctx context.Context, out io.Writer, path string, follow bool, tail int) error {
 	f, err := openStream(ctx, path, follow)
 	if err != nil {
 		return err
@@ -805,6 +824,9 @@ func tailRaw(ctx context.Context, out io.Writer, path string, follow bool) error
 		return nil
 	}
 	defer f.Close()
+	if off, err := tailOffset(f, tail); err == nil {
+		_, _ = f.Seek(off, io.SeekStart)
+	}
 	r := bufio.NewReader(f)
 	for {
 		line, err := r.ReadString('\n')
@@ -828,6 +850,60 @@ func tailRaw(ctx context.Context, out io.Writer, path string, follow bool) error
 	}
 }
 
+// tailOffset returns the byte offset in f from which reading yields the last n
+// complete (newline-terminated) lines — the seek target for a follow's backlog
+// window. n < 0 means the whole file (offset 0); n == 0 means only content
+// appended after the current end (offset == size). It scans backward from EOF
+// counting record-terminating newlines, ignoring a single trailing newline at the
+// very end (which terminates the last line rather than starting a new one), and
+// stops at the start of the nth-from-last line; a file with fewer than n lines
+// yields offset 0 (the whole file). A trailing partial line (no newline yet) is
+// kept within the window so its bytes reach the reader's pending buffer.
+func tailOffset(f *os.File, n int) (int64, error) {
+	if n < 0 {
+		return 0, nil
+	}
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 || size == 0 {
+		return size, nil
+	}
+	const chunk = 32 * 1024
+	buf := make([]byte, chunk)
+	count := 0
+	pos := size
+	skipTrailing := true // the final '\n' terminates the last line, not a new one
+	for pos > 0 {
+		readSize := int64(chunk)
+		if pos < readSize {
+			readSize = pos
+		}
+		start := pos - readSize
+		if _, err := f.ReadAt(buf[:readSize], start); err != nil && err != io.EOF {
+			return 0, err
+		}
+		for i := int(readSize) - 1; i >= 0; i-- {
+			if buf[i] != '\n' {
+				continue
+			}
+			abs := start + int64(i)
+			if skipTrailing && abs == size-1 {
+				skipTrailing = false
+				continue
+			}
+			skipTrailing = false
+			count++
+			if count == n {
+				return abs + 1, nil
+			}
+		}
+		pos = start
+	}
+	return 0, nil
+}
+
 // lineReader tails one append-only file a line at a time, opening it lazily (so a
 // file that does not exist yet is simply skipped until it appears) and holding a
 // partial trailing line until its newline arrives — so a half-written JSON object
@@ -836,7 +912,13 @@ func tailRaw(ctx context.Context, out io.Writer, path string, follow bool) error
 // tailing primitive tailStream interleaves the agent stream and the health log
 // through.
 type lineReader struct {
-	path    string
+	path string
+	// tail is the initial backlog window, applied once when the file is first
+	// opened: keep the last `tail` complete lines (tail < 0 = the whole file, the
+	// default; tail == 0 = none, i.e. seek to the current end and only report lines
+	// appended afterwards). Later lines appended past the initial seek are always
+	// reported — the window bounds the backlog, not the follow.
+	tail    int
 	f       *os.File
 	r       *bufio.Reader
 	pending string
@@ -853,6 +935,13 @@ func (lr *lineReader) drain(emit func(string)) int {
 			return 0 // not created yet (or unreadable) — try again next drain
 		}
 		lr.f = f
+		// Apply the backlog window once, at open: seek past everything but the last
+		// `tail` records so a follow starts near the tip instead of replaying the
+		// whole history. tailOffset lands on a record boundary, so the reader still
+		// only ever sees complete lines.
+		if off, err := tailOffset(f, lr.tail); err == nil {
+			_, _ = f.Seek(off, io.SeekStart)
+		}
 		lr.r = bufio.NewReader(f)
 	}
 	n := 0
@@ -1067,6 +1156,12 @@ func init() {
 	ctlStartCmd.Flags().BoolVar(&ctlStartNewAttempt, "new-attempt", false, "fork a new attempt (new id, provenance to this one) and start the fork, leaving the parent running — a parallel branch")
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlLogsCmd.Flags().BoolVar(&ctlLogsJSON, "json", false, "print the raw stream.jsonl lines verbatim (machine form for | jq / replay) instead of the human-readable rendering")
+	// -f follows from the last N stream records (tail semantics) rather than
+	// replaying the whole history — a follow is a "what's happening now" request,
+	// and the webui's Agent Logs panel consumes exactly `logs -f`, where a
+	// full-history flood froze the page (drvctl-030). 0 = no backlog; -1 = full
+	// history (the old behaviour). Meaningful only with -f; ignored without it.
+	ctlLogsCmd.Flags().IntVar(&ctlLogsTail, "tail", 50, "with -f, start from the last N stream records then follow (0 = none, -1 = full history); ignored without -f")
 	ctlStatusCmd.Flags().BoolVarP(&ctlStatusAll, "all", "a", false, "include terminal Done attempts (hidden by default in the list view)")
 	ctlCmd.AddCommand(ctlUpCmd, ctlStartCmd, ctlStopCmd, ctlRestartCmd, ctlStatusCmd, ctlLogsCmd)
 	rootCmd.AddCommand(ctlCmd)

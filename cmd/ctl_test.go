@@ -214,7 +214,7 @@ func TestTailStreamNoFollow(t *testing.T) {
 	// in both the raw (--json) and rendered modes.
 	for _, render := range []bool{false, true} {
 		var out bytes.Buffer
-		if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, render); err != nil {
+		if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, render, -1); err != nil {
 			t.Fatalf("missing stream should not error (render=%v): %v", render, err)
 		}
 		if !strings.Contains(out.String(), "no session stream yet") {
@@ -228,7 +228,7 @@ func TestTailStreamNoFollow(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, false); err != nil {
+	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, false, -1); err != nil {
 		t.Fatalf("tail: %v", err)
 	}
 	if !strings.Contains(out.String(), `{"a":1}`) || !strings.Contains(out.String(), `{"b":2}`) {
@@ -254,7 +254,7 @@ func TestTailStreamRender(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, true); err != nil {
+	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, true, -1); err != nil {
 		t.Fatalf("render tail: %v", err)
 	}
 	got := out.String()
@@ -314,7 +314,7 @@ func TestTailStreamMergesHealth(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := tailStream(context.Background(), &out, streamPath, ctlPath, false, true); err != nil {
+	if err := tailStream(context.Background(), &out, streamPath, ctlPath, false, true, -1); err != nil {
 		t.Fatalf("render tail: %v", err)
 	}
 	got := out.String()
@@ -355,7 +355,7 @@ func TestTailStreamJSONIgnoresHealth(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := tailStream(context.Background(), &out, streamPath, ctlPath, false, false); err != nil {
+	if err := tailStream(context.Background(), &out, streamPath, ctlPath, false, false, -1); err != nil {
 		t.Fatalf("raw tail: %v", err)
 	}
 	got := out.String()
@@ -520,7 +520,7 @@ func TestTailStreamFollow(t *testing.T) {
 
 	var mu safeBuf
 	done := make(chan error, 1)
-	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, false) }()
+	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, false, -1) }()
 
 	waitUntil(t, "first line", func() bool { return strings.Contains(mu.String(), `{"first":1}`) })
 
@@ -562,7 +562,7 @@ func TestTailStreamRenderFollow(t *testing.T) {
 
 	var mu safeBuf
 	done := make(chan error, 1)
-	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, true) }()
+	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, true, -1) }()
 
 	waitUntil(t, "first rendered line", func() bool { return strings.Contains(mu.String(), "first line here") })
 
@@ -589,6 +589,174 @@ func TestTailStreamRenderFollow(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("tailStream did not return after cancel")
+	}
+}
+
+// TestTailOffset locks the backlog-seek arithmetic: for N complete lines it returns
+// the byte offset of the start of the last N (N < 0 = the whole file, N == 0 = the
+// current end), and a trailing partial line (no newline yet) is kept within the
+// window rather than counted as its own line (drvctl-030).
+func TestTailOffset(t *testing.T) {
+	whole := "aaa\nbbb\nccc\nddd\n"
+	cases := []struct {
+		name    string
+		content string
+		n       int
+		want    string // bytes from the returned offset to EOF
+	}{
+		{"full", whole, -1, whole},
+		{"none", whole, 0, ""},
+		{"last-one", whole, 1, "ddd\n"},
+		{"last-two", whole, 2, "ccc\nddd\n"},
+		{"exactly-all", whole, 4, whole},
+		{"more-than-present", whole, 9, whole},
+		{"empty-file", "", 3, ""},
+		// A half-written trailing record (no newline) rides along in the window.
+		{"trailing-partial", "aaa\nbbb\nccc", 2, "bbb\nccc"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f")
+			if err := os.WriteFile(path, []byte(c.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			off, err := tailOffset(f, c.n)
+			if err != nil {
+				t.Fatalf("tailOffset(%d): %v", c.n, err)
+			}
+			buf := make([]byte, len(c.content)+1)
+			m, _ := f.ReadAt(buf, off)
+			if got := string(buf[:m]); got != c.want {
+				t.Errorf("tailOffset(%d) off=%d read %q, want %q", c.n, off, got, c.want)
+			}
+		})
+	}
+}
+
+// TestTailStreamFollowWindow: -f starts from the last N stream records (the tail
+// window) instead of replaying the whole recorded history, then follows live — the
+// hang the webui's Agent Logs panel hit was exactly this full-history replay. The
+// dropped backlog head never prints; a line appended after the follow starts still
+// does. Raw (--json) path, so the assertion is byte-exact.
+func TestTailStreamFollowWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		`{"n":1}`, `{"n":2}`, `{"n":3}`, `{"n":4}`, `{"n":5}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu safeBuf
+	done := make(chan error, 1)
+	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, false, 2) }()
+
+	waitUntil(t, "windowed backlog tip", func() bool { return strings.Contains(mu.String(), `{"n":5}`) })
+	got := mu.String()
+	if !strings.Contains(got, `{"n":4}`) {
+		t.Errorf("the last 2 records should print, missing n=4:\n%s", got)
+	}
+	for _, dropped := range []string{`{"n":1}`, `{"n":2}`, `{"n":3}`} {
+		if strings.Contains(got, dropped) {
+			t.Errorf("record outside the last-2 window should not replay, saw %s:\n%s", dropped, got)
+		}
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"n":6}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	waitUntil(t, "line appended after follow started", func() bool { return strings.Contains(mu.String(), `{"n":6}`) })
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tailStream returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("tailStream did not return after cancel")
+	}
+}
+
+// TestTailStreamFollowTailZero: --tail 0 shows no backlog at all — only lines
+// appended after the follow starts. (--tail -1 restoring full replay is covered by
+// the follow tests that pass -1.)
+func TestTailStreamFollowTailZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.jsonl")
+	if err := os.WriteFile(path, []byte(`{"old":1}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu safeBuf
+	done := make(chan error, 1)
+	go func() { done <- tailStream(ctx, &mu, path, filepath.Join(dir, "ctl.jsonl"), true, false, 0) }()
+
+	// Let the follower open the file and seek to its current end before appending,
+	// so the appended line is unambiguously "after the follow started" (the first
+	// drain runs immediately; the poll loop only sleeps between passes).
+	time.Sleep(300 * time.Millisecond)
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"new":2}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	waitUntil(t, "line appended after follow", func() bool { return strings.Contains(mu.String(), `{"new":2}`) })
+	if strings.Contains(mu.String(), `{"old":1}`) {
+		t.Errorf("--tail 0 must not replay any backlog:\n%s", mu.String())
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tailStream returned %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("tailStream did not return after cancel")
+	}
+}
+
+// TestTailStreamNoFollowIgnoresTail: the window is a follow-mode concern. A plain
+// `logs` (no -f) prints the whole history regardless of the tail value passed —
+// `--tail` is ignored without `-f` (drvctl-030).
+func TestTailStreamNoFollowIgnoresTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		`{"n":1}`, `{"n":2}`, `{"n":3}`,
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	// tail=1 would keep only the last record if it applied — but without -f it must
+	// not, so all three still print.
+	if err := tailStream(context.Background(), &out, path, filepath.Join(dir, "ctl.jsonl"), false, false, 1); err != nil {
+		t.Fatalf("tail: %v", err)
+	}
+	for _, want := range []string{`{"n":1}`, `{"n":2}`, `{"n":3}`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("non-follow must print the full history, missing %s:\n%s", want, out.String())
+		}
 	}
 }
 
