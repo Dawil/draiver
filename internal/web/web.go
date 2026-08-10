@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -406,6 +407,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"canEnable":   canEnable,
 			"reviewLink":  reviewLink,
 			"provenance":  func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
+			"cachePanel":  cachePanel,
 			"sessionDot":  s.sessionDot,
 			"paletteVars": paletteVars,
 		}).
@@ -565,6 +567,83 @@ type detailVM struct {
 type provenanceVM struct {
 	Attempt project.Attempt
 	Saved   bool
+}
+
+// cacheVM drives the "cache-panel" partial on the attempt detail page: the
+// per-attempt prompt-cache telemetry folded in from drvctl-031. It is a display
+// projection of agent.Metrics — every number is pre-formatted here so the
+// template stays logic-free. Present is false when the attempt has no metrics
+// yet (Metrics nil, the common Running case), so the panel renders a quiet "not
+// recorded yet" note rather than a grid of zeros.
+type cacheVM struct {
+	Present bool
+	// Active mirrors caching_active: the fast "is caching even on?" signal. When
+	// false the prefix never cached (below-min-prefix or a silent invalidator) and
+	// the panel styles itself distinctly.
+	Active         bool
+	HitRatioPct    string // cache_hit_ratio as a percentage, e.g. "73.2%"
+	CacheRead      string // cache_read tokens, thousands-grouped
+	CacheCreation  string // cache_creation tokens (written), thousands-grouped
+	InputTokens    string // uncached input tokens, thousands-grouped
+	OutputTokens   string // output tokens, thousands-grouped
+	NormalizedWork string // all tokens at 1x — the caching-agnostic work measure
+	// Billed vs Uncached are input-rate token equivalents (output excluded): Billed
+	// applies the cache multipliers (reads 0.1x, writes 1.25x), Uncached prices the
+	// same prompt tokens at full rate. Saved is how much the cache took off that
+	// bill, or "—" when there were no prompt tokens to bill.
+	BilledInput   string
+	UncachedInput string
+	SavedPct      string
+}
+
+// cachePanel projects an attempt's folded-in metrics into the cache-panel view.
+// A nil Metrics (no metered retire yet) yields a zero cacheVM whose Present is
+// false, so the template shows the quiet placeholder instead of a grid of zeros.
+func cachePanel(a project.Attempt) cacheVM {
+	m := a.Metrics
+	if m == nil {
+		return cacheVM{}
+	}
+	// Uncached-equivalent prompt cost: every prompt token (input + reads + writes)
+	// priced at the full input rate — what the session would have billed with no
+	// cache. Billed applies the multipliers; Saved is the fraction the cache shaved
+	// off, guarded against a zero-prompt-token attempt.
+	uncached := m.InputTokens + m.CacheReadTokens + m.CacheCreationTokens
+	saved := "—"
+	if uncached > 0 {
+		frac := (float64(uncached) - m.BilledInputTokens) / float64(uncached)
+		saved = fmt.Sprintf("%.1f%%", frac*100)
+	}
+	return cacheVM{
+		Present:        true,
+		Active:         m.CachingActive,
+		HitRatioPct:    fmt.Sprintf("%.1f%%", m.CacheHitRatio*100),
+		CacheRead:      groupInt(m.CacheReadTokens),
+		CacheCreation:  groupInt(m.CacheCreationTokens),
+		InputTokens:    groupInt(m.InputTokens),
+		OutputTokens:   groupInt(m.OutputTokens),
+		NormalizedWork: groupInt(m.NormalizedWork),
+		BilledInput:    groupInt(int(math.Round(m.BilledInputTokens))),
+		UncachedInput:  groupInt(uncached),
+		SavedPct:       saved,
+	}
+}
+
+// groupInt formats a non-negative token count with thousands separators, so a
+// six-figure token tally stays readable in the cache panel (1234567 → "1,234,567").
+func groupInt(n int) string {
+	s := strconv.Itoa(n)
+	if n < 0 {
+		return s // token counts are non-negative; don't try to group a sign
+	}
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 type indexVM struct {

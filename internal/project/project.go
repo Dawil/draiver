@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
@@ -53,6 +54,11 @@ type Attempt struct {
 	Enabled         bool // opted into daemon supervision (see DeriveEnabled)
 	Events          []event.Event
 	OpenEscalations []event.Event // escalations with no later resolution
+
+	// Metrics is the attempt's final prompt-caching tally, folded into attempt.md
+	// on retire (drvctl-031). Nil until an attempt retires with a metered session,
+	// so a card renders the cache panel only once there is something to show.
+	Metrics *agent.Metrics
 }
 
 // isLifecycle reports whether an event type moves the control state: the last
@@ -156,6 +162,7 @@ func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
 		Ticket: ticket, ID: id, Title: title, Assignee: spec.Assignee,
 		Tool: am.Tool, Model: am.Model, Repo: am.Repo, Base: am.Base,
 		State: state, Enabled: DeriveEnabled(events), Events: events, OpenEscalations: open,
+		Metrics: am.Metrics,
 	}, nil
 }
 

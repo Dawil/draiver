@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
@@ -1459,5 +1461,127 @@ func TestAgentLogsUnknownAttempt404s(t *testing.T) {
 	rr := get(t, h, "/ticket/PROJ-3/9999/agent-logs")
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("agent-logs for unknown attempt = %d, want 404", rr.Code)
+	}
+}
+
+// seedAttemptWithMetrics writes a minimal attempt (spec + one created event) and
+// folds a metrics block into its attempt.md, mirroring what reconcile.retire does
+// on a metered retire. It is the fixture for the cache-panel tests.
+func seedAttemptWithMetrics(t *testing.T, id, att string, m agent.Metrics) store.Root {
+	t.Helper()
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: "+id+"\n---\n\nspec"), 0o644)
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := attempt.LoadMeta(root, id, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.Ticket, meta.ID = id, att
+	meta.Metrics = &m
+	if err := attempt.WriteMeta(root, meta); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestCachePanelRendersMetrics pins the acceptance: an attempt with folded-in
+// drvctl-031 metrics renders the cache panel on its detail view — the caching_active
+// yes/no headline plus read-vs-written, hit ratio, normalised work, and the
+// billed-vs-uncached input-equivalent saving. The panel sits above the spec.
+func TestCachePanelRendersMetrics(t *testing.T) {
+	// Clean numbers: hit ratio 8000/10000 = 80.0%; normalised work = 10,200;
+	// billed = 1000 + 1.25*1000 + 0.1*8000 = 3,050; uncached = 10,000; saved 69.5%.
+	m := agent.Totals{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 8000, CacheCreationTokens: 1000}.Metrics()
+	root := seedAttemptWithMetrics(t, "CACHE-1", "0001", m)
+	h := newServerOver(t, root)
+
+	rr := get(t, h, "/ticket/CACHE-1/0001")
+	if rr.Code != 200 {
+		t.Fatalf("GET detail = %d", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`data-testid="cache-panel"`,
+		`data-testid="cache-active"`, // the caching_active: true flag
+		`data-testid="cache-read">8,000<`,
+		`data-testid="cache-creation">1,000<`,
+		`data-testid="cache-hit-ratio">80.0%<`,
+		`data-testid="cache-normalized-work">10,200<`,
+		`data-testid="cache-billed">3,050<`,
+		`data-testid="cache-uncached">10,000<`,
+		`data-testid="cache-saved">69.5%<`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cache panel missing %q", want)
+		}
+	}
+	// The panel is a diagnosis-first summary: it sits above the spec.
+	iCache := strings.Index(body, `data-testid="cache-panel"`)
+	iSpec := strings.Index(body, `data-testid="spec"`)
+	if !(iCache >= 0 && iCache < iSpec) {
+		t.Errorf("cache panel should sit above the spec (cache=%d spec=%d)", iCache, iSpec)
+	}
+}
+
+// TestCachePanelInactiveIsDistinct pins the second acceptance: caching_active:false
+// is visually distinct. The panel takes the .cache-inactive modifier and renders the
+// "never cached" flag rather than the healthy one.
+func TestCachePanelInactiveIsDistinct(t *testing.T) {
+	m := agent.Totals{InputTokens: 500, OutputTokens: 100}.Metrics() // all cache fields zero
+	if m.CachingActive {
+		t.Fatal("fixture should have caching inactive")
+	}
+	root := seedAttemptWithMetrics(t, "CACHE-2", "0001", m)
+	h := newServerOver(t, root)
+
+	body := get(t, h, "/ticket/CACHE-2/0001").Body.String()
+	for _, want := range []string{
+		`class="cache-panel cache-inactive"`, // the distinct modifier
+		`data-testid="cache-inactive"`,        // the "never cached" flag
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("inactive cache panel missing %q:\n%s", want, body)
+		}
+	}
+	// The healthy "active" flag must NOT appear when caching never engaged.
+	if strings.Contains(body, `data-testid="cache-active"`) {
+		t.Error("inactive attempt should not render the active flag")
+	}
+}
+
+// TestCachePanelPlaceholderWhenNoMetrics pins that an attempt with no folded-in
+// metrics (the common Running case) renders a quiet placeholder in the panel's
+// place rather than a grid of zeros — so the panel location is stable.
+func TestCachePanelPlaceholderWhenNoMetrics(t *testing.T) {
+	h := newServer(t) // seedBoard attempts carry no metrics
+	body := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+	if !strings.Contains(body, `class="cache-panel cache-empty"`) {
+		t.Errorf("expected empty cache panel modifier:\n%s", body)
+	}
+	if !strings.Contains(body, `data-testid="cache-empty-note"`) {
+		t.Error("expected the no-metrics placeholder note")
+	}
+	if strings.Contains(body, `data-testid="cache-grid"`) {
+		t.Error("no metrics should mean no stats grid")
+	}
+}
+
+// TestGroupInt pins the thousands grouping used across the cache panel.
+func TestGroupInt(t *testing.T) {
+	for _, tc := range []struct {
+		in   int
+		want string
+	}{
+		{0, "0"}, {7, "7"}, {42, "42"}, {999, "999"}, {1000, "1,000"},
+		{10200, "10,200"}, {1234567, "1,234,567"},
+	} {
+		if got := groupInt(tc.in); got != tc.want {
+			t.Errorf("groupInt(%d) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
