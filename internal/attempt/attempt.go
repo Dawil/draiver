@@ -14,14 +14,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 // Meta is an attempt's static provenance, persisted as attempt.md frontmatter.
-// The control state is derived from the log, not stored here. The commented
-// fields are reserved for later (metrics, worktree) and not populated in MVP.
+// The control state is derived from the log, not stored here.
 type Meta struct {
 	ID      string    `yaml:"id"`
 	Ticket  string    `yaml:"ticket"`
@@ -32,6 +32,11 @@ type Meta struct {
 	Actor   string    `yaml:"actor"`
 	Started time.Time `yaml:"started"`
 	From    string    `yaml:"from,omitempty"` // provenance: branched from this attempt
+
+	// Metrics is the meter's final token/caching tally, folded in on retire — the
+	// "reserved metrics room" made real (drvctl-031). Nil until an attempt retires
+	// with a metered session, so it renders only once there is something to record.
+	Metrics *agent.Metrics `yaml:"metrics,omitempty"`
 }
 
 // New identifies the parameters for creating an attempt.
@@ -220,6 +225,12 @@ func metaFrontmatter(m Meta) string {
 	}
 	if strings.TrimSpace(m.From) != "" {
 		b.WriteString(metaLine("from", m.From))
+	}
+	// Metrics renders as a nested block only when the meter has been folded in on
+	// retire — machine-written, not a hand-editable hint, so unlike the optional
+	// lines above it has no commented placeholder. parseMeta reads it straight back.
+	if m.Metrics != nil {
+		b.WriteString(yamlMarshalLine(map[string]agent.Metrics{"metrics": *m.Metrics}))
 	}
 	return b.String()
 }

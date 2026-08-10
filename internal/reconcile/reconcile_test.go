@@ -701,6 +701,56 @@ func TestRetireOnReview(t *testing.T) {
 	}
 }
 
+// On retire the meter's final Totals are folded into attempt.md metrics
+// (drvctl-031): a completed attempt carries its own token/caching record.
+func TestRetireFoldsMeterIntoAttemptMetrics(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+
+	// The session metered some cached work.
+	if _, err := sess.UpdateMeter(func(m *session.Meter) {
+		m.Totals = agent.Totals{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 50, CacheCreationTokens: 30}
+	}); err != nil {
+		t.Fatalf("seed meter: %v", err)
+	}
+
+	// Claim review → Review state → no longer desired → retire.
+	if _, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "review", Actor: "agent:x", Body: "done"}); err != nil {
+		t.Fatalf("append review: %v", err)
+	}
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("retire tick: %v", err)
+	}
+
+	meta, err := attempt.LoadMeta(w.root, ticket, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Metrics == nil {
+		t.Fatal("retire did not fold the meter into attempt.md metrics")
+	}
+	if meta.Metrics.CacheReadTokens != 50 || meta.Metrics.CacheCreationTokens != 30 {
+		t.Fatalf("raw cache fields not folded: %+v", *meta.Metrics)
+	}
+	if !meta.Metrics.CachingActive {
+		t.Fatal("caching_active should be true after cache reads/creations were metered")
+	}
+	if meta.Metrics.NormalizedWork != 200 {
+		t.Fatalf("normalized_work = %d, want 200", meta.Metrics.NormalizedWork)
+	}
+}
+
 // TestRetireOnReviewKeepsDirtyWorktree is the drvctl-014 regression: an attempt
 // that reaches Review with an *uncommitted* change must not have that change
 // force-removed on retire. The daemon keeps the dirty checkout warm, records a

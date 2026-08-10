@@ -45,12 +45,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
@@ -662,6 +664,13 @@ func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.St
 		_ = rn.sess.Close()
 	}
 
+	// Fold the meter's final tally into attempt.md metrics (drvctl-031). Done for
+	// every retire — including a Needs-me park — so a completed *or* parked attempt
+	// carries its own token/caching record. Ordered after the session teardown
+	// above (Kill + <-done + Close for a driven session) so meter.json holds the
+	// final aggregate before it is read.
+	r.foldMetrics(key)
+
 	// Needs-me is parked with its worktree kept warm; only a terminal retire is a
 	// candidate for reclaiming the checkout.
 	if st == project.NeedsMe {
@@ -723,6 +732,39 @@ func (r *Reconciler) recordRetire(key worktree.Key, st project.State, reclaimed 
 		Body:  body,
 	}); err != nil {
 		r.opt.Logf("reconcile: record retire %s/%s: %v", key.Ticket, key.Attempt, err)
+	}
+}
+
+// foldMetrics reads the session meter's final Totals and writes them into
+// attempt.md as the attempt's metric record (drvctl-031) — the "reserved metrics
+// room" made real. It is best-effort: a missing meter (an attempt that never
+// metered a frame) is a silent no-op, and any read/write failure is logged
+// operationally, never failing the retire. Writing overwrites any prior metrics
+// block, so a re-retired attempt records its latest tally.
+func (r *Reconciler) foldMetrics(key worktree.Key) {
+	sess, err := session.Open(r.opt.Root, key.Ticket, key.Attempt)
+	if err != nil {
+		r.opt.Logf("reconcile: fold metrics %s/%s: open session: %v", key.Ticket, key.Attempt, err)
+		return
+	}
+	defer sess.Close()
+
+	m, err := sess.ReadMeter()
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			r.opt.Logf("reconcile: fold metrics %s/%s: read meter: %v", key.Ticket, key.Attempt, err)
+		}
+		return // no meter — nothing metered, nothing to fold
+	}
+	meta, err := attempt.LoadMeta(r.opt.Root, key.Ticket, key.Attempt)
+	if err != nil {
+		r.opt.Logf("reconcile: fold metrics %s/%s: load attempt.md: %v", key.Ticket, key.Attempt, err)
+		return
+	}
+	metrics := m.Totals.Metrics()
+	meta.Metrics = &metrics
+	if err := attempt.WriteMeta(r.opt.Root, meta); err != nil {
+		r.opt.Logf("reconcile: fold metrics %s/%s: write attempt.md: %v", key.Ticket, key.Attempt, err)
 	}
 }
 

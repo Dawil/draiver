@@ -218,6 +218,49 @@ func TestProcess_CumulativeFrameDoesNotClobberContextGauge(t *testing.T) {
 	}
 }
 
+// The session-cumulative Totals sum every per-request frame — and only those.
+// The cumulative turn-end frame (ContextTokens == 0) must be excluded, or the
+// turn's requests are double-counted (its cache_read is already their sum).
+func TestProcess_TotalsSumPerRequestFramesOnly(t *testing.T) {
+	w, _, _, _, sess := newWatcher(t)
+
+	// Two per-request frames: their raw fields sum into Totals.
+	if _, err := w.Process(agent.Event{
+		Kind:  agent.EventUsage,
+		Usage: &agent.Usage{InputTokens: 100, OutputTokens: 20, CacheCreationTokens: 50, ContextTokens: 150},
+		Raw:   json.RawMessage(`{"u":1}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Process(agent.Event{
+		Kind:  agent.EventUsage,
+		Usage: &agent.Usage{InputTokens: 5, OutputTokens: 30, CacheReadTokens: 145, ContextTokens: 150},
+		Raw:   json.RawMessage(`{"u":2}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Cumulative turn-end frame: huge summed cache_read, ContextTokens 0. Excluded.
+	if _, err := w.Process(agent.Event{
+		Kind:  agent.EventTurnEnd,
+		Usage: &agent.Usage{InputTokens: 105, OutputTokens: 50, CacheReadTokens: 999999, ContextTokens: 0, CostUSD: 0.5},
+		Raw:   json.RawMessage(`{"u":3}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := sess.ReadMeter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := agent.Totals{InputTokens: 105, OutputTokens: 50, CacheReadTokens: 145, CacheCreationTokens: 50}
+	if m.Totals != want {
+		t.Fatalf("totals = %+v, want %+v (turn-end frame must not be summed)", m.Totals, want)
+	}
+	if !m.Totals.CachingActive() {
+		t.Fatal("caching_active should be true after a cache read/creation was seen")
+	}
+}
+
 func TestPromote_AdvancesHeartbeat(t *testing.T) {
 	w, _, _, _, sess := newWatcher(t)
 	fixed := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
