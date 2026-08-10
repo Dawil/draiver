@@ -45,6 +45,16 @@
          (outerHTML on #provenance) with the saved values. */}}
     {{template "provenance-panel" (provenance .Attempt)}}
 
+    {{/* Prompt-cache panel: the attempt's caching telemetry (drvctl-031), folded
+         into attempt.md on retire. caching_active is the headline yes/no — the
+         "is caching even on?" signal — styled distinctly when off (the prefix
+         never cached). The grid pairs cache read-vs-written, the hit ratio, the
+         caching-agnostic normalised work, and billed-vs-uncached input-token
+         equivalents (the cache's saving). Until an attempt retires with a metered
+         session it has no metrics, so the panel shows a quiet placeholder rather
+         than a grid of zeros. The cross-attempt amortisation view is drvweb-013. */}}
+    {{template "cache-panel" (cachePanel .Attempt)}}
+
     <section class="spec" data-testid="spec">
       <h2>Spec</h2>
       <div class="prose" data-testid="spec-prose">{{.SpecHTML}}</div>
@@ -326,6 +336,35 @@
     </div>
     {{if .Saved}}<span class="provenance-saved" data-testid="provenance-saved" role="status">saved ✓</span>{{end}}
   </form>
+</section>{{end}}
+
+{{/* cache-panel: per-attempt prompt-cache telemetry (drvctl-031). The status line
+     is the headline caching_active yes/no; when off the panel takes the
+     .cache-inactive modifier so "the prefix never cached" reads as a warning, not a
+     stat. The grid is pure display — every number is pre-formatted in cachePanel
+     (web.go). When the attempt has no metrics yet (.Present false — the common
+     Running case) it renders a quiet note instead, so the panel's place on the page
+     is stable whether or not a metered session has retired. */}}
+{{define "cache-panel"}}<section class="cache-panel{{if not .Present}} cache-empty{{else if not .Active}} cache-inactive{{end}}" data-testid="cache-panel">
+  <h2>Prompt cache</h2>
+  {{if not .Present}}
+  <p class="cache-note" data-testid="cache-empty-note">No cache telemetry yet — recorded when this attempt retires with a metered session.</p>
+  {{else}}
+  <p class="cache-status" data-testid="cache-status">
+    {{if .Active}}<span class="cache-flag cache-flag-on" data-testid="cache-active">✓ caching active</span>
+    {{else}}<span class="cache-flag cache-flag-off" data-testid="cache-inactive">✕ caching inactive — the prefix never cached</span>{{end}}
+  </p>
+  <dl class="cache-grid" data-testid="cache-grid">
+    <div class="cache-cell"><dt>read</dt><dd data-testid="cache-read">{{.CacheRead}}</dd></div>
+    <div class="cache-cell"><dt>written</dt><dd data-testid="cache-creation">{{.CacheCreation}}</dd></div>
+    <div class="cache-cell"><dt>hit ratio</dt><dd data-testid="cache-hit-ratio">{{.HitRatioPct}}</dd></div>
+    <div class="cache-cell"><dt>normalised work</dt><dd data-testid="cache-normalized-work">{{.NormalizedWork}}</dd></div>
+    <div class="cache-cell"><dt>billed <span class="cache-unit">input-equiv</span></dt><dd data-testid="cache-billed">{{.BilledInput}}</dd></div>
+    <div class="cache-cell"><dt>uncached <span class="cache-unit">input-equiv</span></dt><dd data-testid="cache-uncached">{{.UncachedInput}}</dd></div>
+    <div class="cache-cell cache-cell-saved"><dt>saved</dt><dd data-testid="cache-saved">{{.SavedPct}}</dd></div>
+  </dl>
+  <p class="cache-caption">Billed and uncached are prompt tokens as input-rate equivalents (output excluded); saved is what caching took off that bill. Cross-attempt amortisation is <code>drvweb-013</code>.</p>
+  {{end}}
 </section>{{end}}
 
 {{define "state-badge"}}<span id="state-badge" class="state state-{{.State}}" data-testid="state-badge"{{if .OOB}} hx-swap-oob="true"{{end}}>{{stateLabel .State}}</span>{{end}}
