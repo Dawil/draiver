@@ -49,6 +49,15 @@ type Meter struct {
 	// the live gauge the supervisor surfaces.
 	Usage agent.Usage `json:"usage"`
 
+	// Totals is the session-cumulative token tally — the raw cache_read /
+	// cache_creation / input / output fields summed across every per-request
+	// frame, plus the derived caching metrics (hit-ratio, normalised work,
+	// billed-input, caching_active) they serialize to. Unlike Usage (a single
+	// snapshot for the live gauge) it accumulates across turns and respawns, and
+	// is folded into attempt.md metrics on retire. See watch.meter for the fold
+	// rule (per-request frames only) and agent.Totals for the derivations.
+	Totals agent.Totals `json:"totals"`
+
 	// Respawns counts how many times this attempt's session has been reaped and
 	// restarted; the StartLimit ceiling watches this counter.
 	Respawns int `json:"respawns"`

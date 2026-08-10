@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
@@ -122,6 +123,62 @@ func TestWriteMetaRoundTripIsIdempotent(t *testing.T) {
 	}
 	if string(first) != string(second) {
 		t.Errorf("write→parse→write not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// The metrics block folded in on retire (drvctl-031) renders as a nested YAML
+// block and round-trips through write→parse: the raw fields, the derived metrics,
+// and caching_active all survive.
+func TestWriteMetaRoundTripsMetrics(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "human:x"}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := agent.Totals{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 50, CacheCreationTokens: 30}.Metrics()
+	m.Metrics = &metrics
+	if err := WriteMeta(root, m); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"metrics:", "cache_read_tokens: 50", "caching_active: true", "normalized_work: 200"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("metrics block missing %q:\n%s", want, data)
+		}
+	}
+
+	back, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Metrics == nil {
+		t.Fatalf("metrics lost across write/parse:\n%s", data)
+	}
+	if *back.Metrics != metrics {
+		t.Errorf("metrics round-trip = %+v, want %+v", *back.Metrics, metrics)
+	}
+
+	// A second write→parse cycle stays stable.
+	if err := WriteMeta(root, back); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(second) {
+		t.Errorf("metrics write not idempotent:\nfirst:\n%s\nsecond:\n%s", data, second)
 	}
 }
 

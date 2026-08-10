@@ -131,6 +131,12 @@ func (w *Watcher) tee(ev agent.Event) error {
 //     for exactly this reason; folding it in would clobber the live ~context fill
 //     with a session-wide aggregate (the drvctl-009 "2M context" artifact). So a
 //     zero-ContextTokens frame folds cost only and leaves the gauge untouched.
+//
+//   - The session-cumulative Totals (the prompt-caching telemetry) sums the same
+//     per-request frames — and only those — so it accumulates the raw cache_read /
+//     cache_creation / input / output across turns and respawns. Gating on the
+//     same ContextTokens > 0 as the gauge is what keeps the cumulative turn-end
+//     frame out of the sum: adding it would double-count the turn's requests.
 func (w *Watcher) meter(u agent.Usage) error {
 	_, err := w.sess.UpdateMeter(func(m *session.Meter) {
 		if u.CostUSD > m.Usage.CostUSD {
@@ -140,6 +146,7 @@ func (w *Watcher) meter(u agent.Usage) error {
 			cost := m.Usage.CostUSD
 			m.Usage = u
 			m.Usage.CostUSD = cost
+			m.Totals.Add(u)
 		}
 	})
 	if err != nil {
