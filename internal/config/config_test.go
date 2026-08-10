@@ -134,6 +134,33 @@ func TestLoad_PrimaryRemote(t *testing.T) {
 	}
 }
 
+func TestLoad_PromptCacheSurface(t *testing.T) {
+	// Omitted → the byte-identical-no-op default: toggle off, no append file.
+	c, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ExcludeDynamicSystemPromptSections {
+		t.Errorf("default ExcludeDynamicSystemPromptSections = true, want false")
+	}
+	if c.AppendSystemPromptFile != "" {
+		t.Errorf("default AppendSystemPromptFile = %q, want empty", c.AppendSystemPromptFile)
+	}
+
+	// Set → used verbatim.
+	path := writeConfig(t, `{"exclude_dynamic_system_prompt_sections": true, "append_system_prompt_file": "/etc/draiver/protocol.txt"}`)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ExcludeDynamicSystemPromptSections {
+		t.Errorf("ExcludeDynamicSystemPromptSections = false, want true (from file)")
+	}
+	if c.AppendSystemPromptFile != "/etc/draiver/protocol.txt" {
+		t.Errorf("AppendSystemPromptFile = %q, want the configured path", c.AppendSystemPromptFile)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")

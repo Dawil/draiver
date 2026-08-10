@@ -67,6 +67,24 @@ type Config struct {
 	// wrong forge). Empty (the default) leaves the choice unconfigured. This is
 	// prompt/agent policy — draiver itself does not push; see the onboarding skill.
 	PrimaryRemote string `json:"primary_remote"`
+
+	// ExcludeDynamicSystemPromptSections toggles the coding-agent's
+	// --exclude-dynamic-system-prompt-sections flag: it moves the per-machine
+	// system-prompt sections (cwd, env, memory paths, git status) into the first
+	// user message, so every worktree shares a byte-identical tools+prefix and the
+	// prompt cache is reused across tickets/worktrees on a repo (docs/prompt-caching.md,
+	// the M0 unlock). Default false → a byte-identical no-op vs today. Turning it on
+	// requires the pinned agent to support the flag; the daemon fails loud at
+	// construction if it does not (paired with the drvctl-033 version pin).
+	ExcludeDynamicSystemPromptSections bool `json:"exclude_dynamic_system_prompt_sections"`
+
+	// AppendSystemPromptFile is a path to a file whose contents the daemon passes
+	// as the coding-agent's --append-system-prompt, carrying draiver's invariant
+	// protocol *above* the excluded per-machine wall so it stays part of the shared,
+	// cacheable prefix. The file is read once at reconciler construction, so the
+	// text is byte-identical across every attempt in a daemon lifetime (the
+	// prefix-sharing invariant). Empty (the default) appends nothing.
+	AppendSystemPromptFile string `json:"append_system_prompt_file"`
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -83,12 +101,14 @@ func Default() Config {
 // context_limit: 0 to disable the auto-stop). A plain-int decode cannot make that
 // distinction, which is what makes "0 disables" expressible in the file at all.
 type file struct {
-	ContextWindow      *int              `json:"context_window"`
-	ContextLimit       *int              `json:"context_limit"`
-	PermissionsDefault *string           `json:"permissions_default"`
-	Permissions        map[string]string `json:"permissions"`
-	ReviewLinkHosts    []string          `json:"review_link_hosts"`
-	PrimaryRemote      *string           `json:"primary_remote"`
+	ContextWindow                      *int              `json:"context_window"`
+	ContextLimit                       *int              `json:"context_limit"`
+	PermissionsDefault                 *string           `json:"permissions_default"`
+	Permissions                        map[string]string `json:"permissions"`
+	ReviewLinkHosts                    []string          `json:"review_link_hosts"`
+	PrimaryRemote                      *string           `json:"primary_remote"`
+	ExcludeDynamicSystemPromptSections *bool             `json:"exclude_dynamic_system_prompt_sections"`
+	AppendSystemPromptFile             *string           `json:"append_system_prompt_file"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -151,6 +171,12 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.PrimaryRemote != nil {
 		c.PrimaryRemote = *f.PrimaryRemote
+	}
+	if f.ExcludeDynamicSystemPromptSections != nil {
+		c.ExcludeDynamicSystemPromptSections = *f.ExcludeDynamicSystemPromptSections
+	}
+	if f.AppendSystemPromptFile != nil {
+		c.AppendSystemPromptFile = *f.AppendSystemPromptFile
 	}
 	return c, nil
 }

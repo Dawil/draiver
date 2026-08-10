@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
@@ -789,4 +790,60 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// TestResolvePromptCache covers the drvctl-032 prompt-cache resolution: the
+// default is the byte-identical no-op (off, no probe), a named append file is
+// read into the prefix, a missing append file is a hard error, and the exclude
+// toggle fails loud when the agent lacks flag support but passes when it has it.
+func TestResolvePromptCache(t *testing.T) {
+	yes := func() (bool, error) { return true, nil }
+	no := func() (bool, error) { return false, nil }
+	probed := false
+	spy := func() (bool, error) { probed = true; return true, nil }
+
+	// Default: both keys off → no probe, empty append, exclude false.
+	exclude, appendPrompt, err := resolvePromptCache(config.Config{}, spy)
+	if err != nil || exclude || appendPrompt != "" {
+		t.Fatalf("default: got exclude=%v append=%q err=%v, want false/\"\"/nil", exclude, appendPrompt, err)
+	}
+	if probed {
+		t.Errorf("default (toggle off) must not probe agent support")
+	}
+
+	// Append file read into the shared prefix, verbatim.
+	pf := filepath.Join(t.TempDir(), "protocol.txt")
+	if err := os.WriteFile(pf, []byte("PROTOCOL ABOVE THE WALL\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, appendPrompt, err = resolvePromptCache(config.Config{AppendSystemPromptFile: pf}, no)
+	if err != nil {
+		t.Fatalf("append file: unexpected err %v", err)
+	}
+	if appendPrompt != "PROTOCOL ABOVE THE WALL\n" {
+		t.Errorf("append prompt = %q, want the file contents verbatim", appendPrompt)
+	}
+
+	// Named-but-missing append file is a hard error, not a silently-empty prefix.
+	if _, _, err := resolvePromptCache(config.Config{AppendSystemPromptFile: filepath.Join(t.TempDir(), "nope.txt")}, no); err == nil {
+		t.Errorf("missing append file: want error, got nil")
+	}
+
+	// Toggle on + agent supports the flag → exclude true.
+	exclude, _, err = resolvePromptCache(config.Config{ExcludeDynamicSystemPromptSections: true}, yes)
+	if err != nil || !exclude {
+		t.Errorf("toggle on + supported: got exclude=%v err=%v, want true/nil", exclude, err)
+	}
+
+	// Toggle on + agent lacks the flag → fail loud.
+	if _, _, err := resolvePromptCache(config.Config{ExcludeDynamicSystemPromptSections: true}, no); err == nil {
+		t.Errorf("toggle on + unsupported: want a loud error, got nil")
+	}
+
+	// A probe that itself errors (e.g. the binary could not be run) surfaces as an
+	// error too, so "couldn't check" is never mistaken for "supported".
+	boom := func() (bool, error) { return false, context.DeadlineExceeded }
+	if _, _, err := resolvePromptCache(config.Config{ExcludeDynamicSystemPromptSections: true}, boom); err == nil {
+		t.Errorf("probe error: want error, got nil")
+	}
 }

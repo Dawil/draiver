@@ -178,6 +178,23 @@ no sidecar, no rewrite:
 - `--append-system-prompt <static protocol file>` → draiver's invariant protocol
   is cached once per repo instead of cold-written per cold-start (rung E).
 
+**Config surface (drvctl-032, default off).** Two `~/.draiver/config.json` keys
+set these on every session the daemon brings up, so the flags are byte-uniform
+across attempts (a per-invocation flag could not guarantee that):
+
+- `exclude_dynamic_system_prompt_sections` (bool) → emits
+  `--exclude-dynamic-system-prompt-sections`. When on, the daemon verifies the
+  pinned `claude` actually accepts the flag at start-up and refuses to come up
+  otherwise (rather than silently launching without it; pairs with the
+  `drvctl-033` version pin).
+- `append_system_prompt_file` (path) → the file is read **once** at daemon
+  start-up and its contents passed as `--append-system-prompt`, so the text is
+  identical across every attempt in that daemon's lifetime. Keep it
+  byte-invariant (see the constraint below).
+
+Both default off/empty, so an unconfigured daemon launches byte-for-byte as
+before.
+
 **What is guaranteed to share:** tools + system prompt (preset + protocol append)
 — the bulk of the fixed cost paid cold on every ticket today. **What may not:**
 CLAUDE.md sharing across worktrees, because `exclude-dynamic` relocates the

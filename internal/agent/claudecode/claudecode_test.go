@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +215,55 @@ func TestBaseArgsAlwaysActivatesPermissionCallback(t *testing.T) {
 	if !strings.Contains(joined, "--permission-prompt-tool stdio") {
 		t.Errorf("baseArgs must always pass --permission-prompt-tool stdio; got: %s", joined)
 	}
+}
+
+// TestBaseArgsExcludeDynamicSystemPrompt covers the prompt-cache toggle
+// (drvctl-032): the valueless flag appears iff the spec sets it, and a spec that
+// leaves it off is byte-identical to before — the acceptance-#1 no-op.
+func TestBaseArgsExcludeDynamicSystemPrompt(t *testing.T) {
+	on := strings.Join(baseArgs(agent.SessionSpec{ExcludeDynamicSystemPromptSections: true}, "--session-id", "abc"), " ")
+	if !strings.Contains(on, "--exclude-dynamic-system-prompt-sections") {
+		t.Errorf("toggle on: missing --exclude-dynamic-system-prompt-sections in: %s", on)
+	}
+
+	// Off (and the zero spec) must not emit the flag at all — byte-identical launch.
+	for _, spec := range []agent.SessionSpec{{}, {ExcludeDynamicSystemPromptSections: false, Model: "opus"}} {
+		off := strings.Join(baseArgs(spec, "--session-id", "abc"), " ")
+		if strings.Contains(off, "--exclude-dynamic-system-prompt-sections") {
+			t.Errorf("toggle off: flag must be absent, got: %s", off)
+		}
+	}
+}
+
+// TestSupportsExcludeDynamicSystemPrompt drives the start-up support probe
+// (drvctl-032 spec #5) against fake `claude` binaries: a --help that lists the
+// flag reports supported, one that omits it reports unsupported, and a missing
+// binary is a probe error (not a silent "unsupported").
+func TestSupportsExcludeDynamicSystemPrompt(t *testing.T) {
+	supporting := fakeClaude(t, "usage\n  --exclude-dynamic-system-prompt-sections  strip per-machine sections\n")
+	if ok, err := SupportsExcludeDynamicSystemPrompt(context.Background(), supporting); err != nil || !ok {
+		t.Errorf("supporting binary: ok=%v err=%v, want ok=true err=nil", ok, err)
+	}
+
+	old := fakeClaude(t, "usage\n  --print  headless\n")
+	if ok, err := SupportsExcludeDynamicSystemPrompt(context.Background(), old); err != nil || ok {
+		t.Errorf("non-supporting binary: ok=%v err=%v, want ok=false err=nil", ok, err)
+	}
+
+	if _, err := SupportsExcludeDynamicSystemPrompt(context.Background(), filepath.Join(t.TempDir(), "no-such-claude")); err == nil {
+		t.Errorf("missing binary: want a probe error, got nil")
+	}
+}
+
+// fakeClaude writes an executable that prints help to stdout and exits 0.
+func fakeClaude(t *testing.T, help string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ncat <<'EOF'\n" + help + "EOF\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // next reads one event with a timeout so a wedged process fails the test

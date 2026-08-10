@@ -1072,6 +1072,14 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the prompt-cache surface (drvctl-032). Both keys default off, so an
+	// unset config leaves BaseSpec byte-identical to before.
+	excludeDynamic, appendPrompt, err := resolvePromptCache(cfg, func() (bool, error) {
+		return claudecode.SupportsExcludeDynamicSystemPrompt(context.Background(), "")
+	})
+	if err != nil {
+		return nil, err
+	}
 	return reconcile.New(reconcile.Options{
 		Root:         root,
 		DefaultRepo:  ctlRepo,
@@ -1082,6 +1090,12 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
+			// Prompt-cache surface (drvctl-032), resolved from config above. Both are
+			// off/empty by default, so an unconfigured daemon launches exactly as
+			// before. Turned on, they strip the per-machine system-prompt sections and
+			// carry draiver's protocol above the wall as a shared, cacheable prefix.
+			ExcludeDynamicSystemPromptSections: excludeDynamic,
+			SystemPromptAppend:                 appendPrompt,
 			// Pin the 1-hour prompt-cache TTL on every session. The shared per-repo
 			// prefix goes cold across gaps longer than the TTL — the interval between
 			// tickets on a repo, or a session parked on Needs-me awaiting a human. The
@@ -1118,6 +1132,36 @@ func resolvePermPolicy(cfg config.Config, flagRules map[string]string) (gate.Pol
 		return gate.Policy{}, fmt.Errorf("ctl: --permission: %w", err)
 	}
 	return gate.Layer(gate.AllowAll(), cfgPolicy, flagPolicy), nil
+}
+
+// resolvePromptCache resolves the drvctl-032 prompt-cache surface into the two
+// BaseSpec fields the adapter consumes. The append-prompt file is read ONCE here
+// so its text is byte-identical across every attempt this daemon brings up (the
+// prefix-sharing invariant); a named-but-unreadable file is a hard error rather
+// than a silently-empty prefix. When the exclude toggle is on it verifies the
+// pinned agent accepts the flag via supports and fails loud rather than launching
+// sessions without it (spec #5) — supports is a parameter so the check is testable
+// without a real claude on PATH. With both keys off (the default) it returns the
+// zero surface and never probes, keeping the launch byte-identical to today.
+func resolvePromptCache(cfg config.Config, supports func() (bool, error)) (exclude bool, appendPrompt string, err error) {
+	if cfg.AppendSystemPromptFile != "" {
+		data, rerr := os.ReadFile(cfg.AppendSystemPromptFile)
+		if rerr != nil {
+			return false, "", fmt.Errorf("ctl: read append_system_prompt_file %q: %w", cfg.AppendSystemPromptFile, rerr)
+		}
+		appendPrompt = string(data)
+	}
+	if cfg.ExcludeDynamicSystemPromptSections {
+		ok, serr := supports()
+		if serr != nil {
+			return false, "", fmt.Errorf("ctl: verify --exclude-dynamic-system-prompt-sections support: %w", serr)
+		}
+		if !ok {
+			return false, "", fmt.Errorf("ctl: exclude_dynamic_system_prompt_sections is set but the pinned `claude` does not accept " +
+				"--exclude-dynamic-system-prompt-sections; upgrade the agent or pin a supported version (drvctl-033), or unset the toggle")
+		}
+	}
+	return cfg.ExcludeDynamicSystemPromptSections, appendPrompt, nil
 }
 
 // claudeAdapters resolves adapter names to factories. Tier 0 knows only Claude

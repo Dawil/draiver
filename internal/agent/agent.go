@@ -108,6 +108,14 @@ type SessionSpec struct {
 	// SystemPromptAppend is appended to the agent's default system prompt.
 	SystemPromptAppend string
 
+	// ExcludeDynamicSystemPromptSections, when true, asks the agent to move the
+	// per-machine system-prompt sections (cwd, env, memory paths, git status) out
+	// of the system prompt and into the first user message, so worktrees on a repo
+	// share a byte-identical tools+prefix and the prompt cache is reused across
+	// them (docs/prompt-caching.md). Off by default; agent-specific — an adapter
+	// that cannot honor it ignores the field.
+	ExcludeDynamicSystemPromptSections bool
+
 	// PermissionMode selects how tool-use permission is handled. The values are
 	// agent-specific; the supervisor's escalation seam sets this (a later
 	// ticket). Empty means the agent's default.

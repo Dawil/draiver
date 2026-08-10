@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -344,6 +345,14 @@ func baseArgs(spec agent.SessionSpec, head ...string) []string {
 	if spec.SystemPromptAppend != "" {
 		args = append(args, "--append-system-prompt", spec.SystemPromptAppend)
 	}
+	// Strip the per-machine system-prompt sections (cwd/env/git) so every worktree
+	// shares a byte-identical prefix — the cross-worktree prompt-cache unlock. The
+	// flag takes no value and is only emitted when the toggle is on, so a spec that
+	// leaves it off launches byte-for-byte as before (drvctl-032). Support is
+	// verified before the daemon comes up (SupportsExcludeDynamicSystemPrompt).
+	if spec.ExcludeDynamicSystemPromptSections {
+		args = append(args, "--exclude-dynamic-system-prompt-sections")
+	}
 	if spec.PermissionMode != "" {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
@@ -360,6 +369,30 @@ func baseArgs(spec agent.SessionSpec, head ...string) []string {
 
 func buildCmd(ctx context.Context, bin string, args []string) *exec.Cmd {
 	return exec.CommandContext(ctx, bin, args...)
+}
+
+// excludeDynamicFlag is the claude flag that moves the per-machine system-prompt
+// sections into the first user message — the cross-worktree prompt-cache unlock.
+const excludeDynamicFlag = "--exclude-dynamic-system-prompt-sections"
+
+// SupportsExcludeDynamicSystemPrompt reports whether the claude binary at bin
+// accepts --exclude-dynamic-system-prompt-sections, by probing `bin --help` for
+// the flag. It lets the daemon fail loud at start-up when an operator turns the
+// toggle on but the pinned agent is too old to honor it, rather than silently
+// launching a session without the flag (drvctl-032 spec #5; pairs with the
+// drvctl-033 version pin). bin empty means DefaultBin resolved on PATH. A probe
+// that cannot run at all (binary missing, --help errored with no output) is
+// returned as an error so the caller can distinguish "unsupported" from
+// "couldn't check".
+func SupportsExcludeDynamicSystemPrompt(ctx context.Context, bin string) (bool, error) {
+	if bin == "" {
+		bin = DefaultBin
+	}
+	out, err := exec.CommandContext(ctx, bin, "--help").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false, fmt.Errorf("claudecode: probe %s --help: %w", bin, err)
+	}
+	return strings.Contains(string(out), excludeDynamicFlag), nil
 }
 
 // --- stream-json input frames ---
