@@ -2,6 +2,8 @@
 
 > Agents are cattle, and it takes a village of agents to raise a ticket.
 
+**Draiver is a [Coding Agent Platform](docs/coding-agent-platform.md)** — platform engineering's discipline (self-service, management-by-exception, codify-the-judgment-once, audit everything) pointed at AI coding agents instead of cloud infrastructure. That doc lays out the core values and compares them, row for row, with platform engineering.
+
 A Continuous Development tool that is a coordination substrate for supervising AI coding agents at the ticket level. It replaces the issue tracker's human-to-human status protocol with a human-to-agent one, on a single premise: agents are cattle, tickets are pets. You manage tickets, not agents. A fresh agent can pick up any ticket from disk, and a human attends only to the tickets that need them.
 
 Issue Tracking software manage the interface between managers and developers. This aims to manage the interface between developers and agents.
