@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -408,6 +407,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"reviewLink":  reviewLink,
 			"provenance":  func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
 			"cachePanel":  cachePanel,
+			"cohortRow":   cohortRow,
 			"sessionDot":  s.sessionDot,
 			"paletteVars": paletteVars,
 		}).
@@ -439,6 +439,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
 	mux.HandleFunc("GET /board", s.handleBoardPartial)
+	mux.HandleFunc("GET /cache", s.handleCacheRollup)
 	mux.HandleFunc("GET /favicon-state", s.handleFaviconState)
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
@@ -604,26 +605,20 @@ func cachePanel(a project.Attempt) cacheVM {
 	if m == nil {
 		return cacheVM{}
 	}
-	// Uncached-equivalent prompt cost: every prompt token (input + reads + writes)
-	// priced at the full input rate — what the session would have billed with no
-	// cache. Billed applies the multipliers; Saved is the fraction the cache shaved
-	// off, guarded against a zero-prompt-token attempt.
-	uncached := m.InputTokens + m.CacheReadTokens + m.CacheCreationTokens
-	saved := "—"
-	if uncached > 0 {
-		frac := (float64(uncached) - m.BilledInputTokens) / float64(uncached)
-		saved = fmt.Sprintf("%.1f%%", frac*100)
-	}
+	// Uncached-equivalent prompt cost and the saved fraction — the same projection
+	// the rollup aggregates use (cacheCost), so "saved" reads identically on the
+	// per-attempt panel and the /cache page.
+	uncached, saved := cacheCost(*m)
 	return cacheVM{
 		Present:        true,
 		Active:         m.CachingActive,
-		HitRatioPct:    fmt.Sprintf("%.1f%%", m.CacheHitRatio*100),
+		HitRatioPct:    pct(m.CacheHitRatio),
 		CacheRead:      groupInt(m.CacheReadTokens),
 		CacheCreation:  groupInt(m.CacheCreationTokens),
 		InputTokens:    groupInt(m.InputTokens),
 		OutputTokens:   groupInt(m.OutputTokens),
 		NormalizedWork: groupInt(m.NormalizedWork),
-		BilledInput:    groupInt(int(math.Round(m.BilledInputTokens))),
+		BilledInput:    groupInt(roundTokens(m.BilledInputTokens)),
 		UncachedInput:  groupInt(uncached),
 		SavedPct:       saved,
 	}
@@ -695,6 +690,22 @@ func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
 	// counts: emit the variant as a custom event htmx fires after the swap.
 	emitFaviconTrigger(w, vm)
 	s.render(w, "board.html", vm)
+}
+
+// handleCacheRollup renders the cross-attempt, per-repo prompt-cache rollup with
+// A/B cohorts (GET /cache) — the cross-ticket amortisation view the per-attempt
+// panel cannot show. It loads every attempt and folds their metrics into per-repo
+// aggregates (repoRollups); a static report, not a live region, since the totals are
+// dominated by retired attempts and move slowly.
+func (s *Server) handleCacheRollup(w http.ResponseWriter, r *http.Request) {
+	attempts, err := project.LoadAll(s.root)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm := repoRollups(attempts)
+	vm.FaviconHref = s.faviconHref()
+	s.render(w, "cache.html", vm)
 }
 
 // handleFaviconState answers the detail pages' favicon poll: it scans the board

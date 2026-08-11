@@ -218,6 +218,35 @@ body {
 .cache-caption { margin: 12px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
 .cache-caption code { background: var(--panel-2); border-radius: 4px; padding: 0 4px; }
 
+/* Cache rollup (drvweb-013): the cross-attempt, per-repo amortisation view at /cache.
+   Each repo is a panel with a health line, a whole-repo aggregate grid (reusing the
+   per-attempt .cache-grid/.cache-cell so numbers read identically to the attempt
+   panel), and two A/B cohort columns. The health chip and cohort accents lean on the
+   same done/review palette as the rest of the board so on/off reads consistently. */
+.topbar-link { display: inline-block; margin-top: 8px; color: var(--accent); text-decoration: none; font-size: 13px; }
+.topbar-link:hover { text-decoration: underline; }
+.rollup { display: flex; flex-direction: column; gap: 18px; }
+.repo-rollup { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.repo-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 14px; }
+.repo-path { margin: 0; font-size: 15px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); word-break: break-all; }
+.repo-attempts { color: var(--muted); font-size: 12px; }
+.health { margin-left: auto; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 12px; }
+.health-ok { color: var(--done); background: color-mix(in srgb, var(--done) 16%, transparent); border: 1px solid var(--done); }
+.health-warn { color: var(--review); background: color-mix(in srgb, var(--review) 16%, transparent); border: 1px solid var(--review); }
+.health-off { color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); }
+.repo-agg { margin-bottom: 16px; }
+.cohorts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .cohorts { grid-template-columns: 1fr; } }
+.cohort { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.cohort-on { border-left: 3px solid var(--done); }
+.cohort-off { border-left: 3px solid var(--review); }
+.cohort-head { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+.cohort-n { background: var(--panel); color: var(--ink); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
+.cohort-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin: 0; }
+.cohort-outcome { margin: 12px 0 0; font-size: 13px; color: var(--ink); }
+.cohort-outcome-label { text-transform: uppercase; font-size: 11px; letter-spacing: .06em; color: var(--muted); margin-right: 6px; }
+.rollup-caption { margin: 6px 2px 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+
 .timeline { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
 /* The DOM is always oldest-first; the toggle flips only the visual order (stored
    on .log-region, which survives htmx innerHTML swaps) so polling never resets

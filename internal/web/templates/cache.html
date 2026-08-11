@@ -1,0 +1,83 @@
+{{define "cache.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draiver — cache rollup</title>
+  <link rel="icon" id="favicon" type="image/svg+xml" href="{{.FaviconHref}}">
+  <link rel="stylesheet" href="/static/style.css">
+  {{paletteVars}}
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/favicon.js" defer></script>
+</head>
+<body>
+  {{/* Static report: the rollup is dominated by retired attempts and moves slowly,
+       so there is no live region. The hidden favicon poll keeps only the tab icon
+       tracking board state, the same channel the attempts index uses. */}}
+  <span id="favicon-poll" hidden hx-get="/favicon-state" hx-trigger="every 3s" hx-swap="none"></span>
+  <header class="topbar">
+    <a class="back" href="/">← board</a>
+    <h1>Cache rollup</h1>
+    <p class="tagline">Cross-attempt prompt-cache amortisation per repo, flag-on vs flag-off.
+      {{.Metered}} metered attempt(s){{if .Pending}} · <span data-testid="rollup-pending">{{.Pending}} pending (no metrics yet)</span>{{end}}.</p>
+  </header>
+  <main class="detail rollup" data-testid="cache-rollup">
+    {{range .Repos}}
+    <section class="repo-rollup" data-testid="repo-{{.Repo}}">
+      <div class="repo-head">
+        <h2 class="repo-path" data-testid="repo-path">{{.Repo}}</h2>
+        <span class="repo-attempts">{{.Attempts}} attempt(s)</span>
+        <span class="health health-{{.Health.Status}}" data-testid="repo-health"
+              title="cache_creation share: {{.Health.CreationSharePct}}">{{.Health.Label}}</span>
+      </div>
+
+      {{/* Whole-repo aggregate: every metered attempt on the repo, both cohorts,
+           summed then derived. This is the "is caching paying off here?" headline. */}}
+      <dl class="cache-grid repo-agg" data-testid="repo-agg">
+        <div class="cache-cell"><dt>hit ratio</dt><dd data-testid="repo-hit-ratio">{{.HitRatioPct}}</dd></div>
+        <div class="cache-cell"><dt>read</dt><dd data-testid="repo-read">{{.CacheRead}}</dd></div>
+        <div class="cache-cell"><dt>written</dt><dd data-testid="repo-creation">{{.CacheCreation}}</dd></div>
+        <div class="cache-cell"><dt>normalised work</dt><dd data-testid="repo-normalized-work">{{.NormalizedWork}}</dd></div>
+        <div class="cache-cell"><dt>billed <span class="cache-unit">input-equiv</span></dt><dd data-testid="repo-billed">{{.BilledInput}}</dd></div>
+        <div class="cache-cell"><dt>uncached <span class="cache-unit">input-equiv</span></dt><dd data-testid="repo-uncached">{{.UncachedInput}}</dd></div>
+        <div class="cache-cell cache-cell-saved"><dt>saved</dt><dd data-testid="repo-saved">{{.SavedPct}}</dd></div>
+      </dl>
+
+      {{/* A/B cohorts: the race/pick scoreboard applied to draiver's own cache
+           config. Each attempt is bucketed by whether caching engaged (CachingActive),
+           and the two are compared on normalised cost and outcome. */}}
+      <div class="cohorts" data-testid="cohorts">
+        {{template "cohort" (cohortRow "on" "caching on" .On)}}
+        {{template "cohort" (cohortRow "off" "caching off" .Off)}}
+      </div>
+    </section>
+    {{else}}
+    <p class="muted" data-testid="rollup-empty">No metered attempts yet — the rollup fills in as attempts retire with cache telemetry.</p>
+    {{end}}
+
+    <p class="rollup-caption">Cohorts split each metered attempt by whether prompt caching actually engaged
+      (a cache read or write landed), the only per-attempt signal recorded today — a flag-on run whose prefix
+      busted lands in <em>caching off</em>, which the per-repo health line flags as the silent-invalidator smell.
+      Billed and uncached are prompt tokens as input-rate equivalents (output excluded); saved is what caching
+      took off that bill. Normalised work prices every token at 1×, so cohorts compare on equal footing.</p>
+  </main>
+</body>
+</html>{{end}}
+
+{{/* cohort: one A/B column. cohortRow (web.go) tags it with a kind/label so the
+     template stays logic-free; an empty cohort renders muted rather than a row of
+     zeros. */}}
+{{define "cohort"}}<div class="cohort cohort-{{.Kind}}" data-testid="cohort-{{.Kind}}">
+  <h3 class="cohort-head">{{.Label}} <span class="cohort-n" data-testid="cohort-{{.Kind}}-attempts">{{.Attempts}}</span></h3>
+  {{if .Present}}
+  <dl class="cohort-grid">
+    <div class="cache-cell"><dt>normalised work</dt><dd data-testid="cohort-{{.Kind}}-normalized-work">{{.NormalizedWork}}</dd></div>
+    <div class="cache-cell"><dt>billed <span class="cache-unit">input-equiv</span></dt><dd data-testid="cohort-{{.Kind}}-billed">{{.BilledInput}}</dd></div>
+    <div class="cache-cell"><dt>hit ratio</dt><dd data-testid="cohort-{{.Kind}}-hit-ratio">{{.HitRatioPct}}</dd></div>
+    <div class="cache-cell cache-cell-saved"><dt>saved</dt><dd data-testid="cohort-{{.Kind}}-saved">{{.SavedPct}}</dd></div>
+  </dl>
+  <p class="cohort-outcome" data-testid="cohort-{{.Kind}}-outcome"><span class="cohort-outcome-label">outcome</span> {{.Outcome.Summary}}</p>
+  {{else}}
+  <p class="cache-note" data-testid="cohort-{{.Kind}}-empty">No attempts in this cohort.</p>
+  {{end}}
+</div>{{end}}
