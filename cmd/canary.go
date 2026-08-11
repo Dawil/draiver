@@ -82,7 +82,13 @@ func printRepo(out io.Writer, repo canary.RepoResult) {
 	fmt.Fprintf(out, "\n%s %s\n", status, repo.Repo)
 
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "  ticket@attempt\trole\tt1-read\tt1-create\tt1-share\thit-ratio\tnorm-work\tbilled-in\tverdict")
+	// t1-rd:cr is the turn-1 read:creation ratio (cache_read/cache_creation) — the
+	// amortization health signal Anthropic's own guidance names: >1.0x (>100%) means
+	// the shared prefix was read more than it was written on the first request, i.e.
+	// this attempt reused a prior attempt's prefix rather than cold-writing its own.
+	// Unlike hit-ratio (bounded 0–1), it is unbounded and rises the more a prefix is
+	// reused — the number the ">100% cache hit" goal actually refers to.
+	fmt.Fprintln(tw, "  ticket@attempt\trole\tt1-read\tt1-create\tt1-rd:cr\tt1-share\thit-ratio\tnorm-work\tbilled-in\tverdict")
 	for _, a := range repo.Attempts {
 		role := "reuse"
 		if a.Baseline {
@@ -98,14 +104,20 @@ func printRepo(out io.Writer, repo canary.RepoResult) {
 			verdict = "-"
 		}
 		share := "-"
-		read, create := "-", "-"
+		read, create, rdcr := "-", "-", "-"
 		if a.HasFirstTurn {
 			share = fmt.Sprintf("%.2f", a.ReadShare)
 			read = fmt.Sprintf("%d", a.FirstTurnRead)
 			create = fmt.Sprintf("%d", a.FirstTurnCreation)
+			switch {
+			case a.FirstTurnCreation > 0:
+				rdcr = fmt.Sprintf("%.2fx", float64(a.FirstTurnRead)/float64(a.FirstTurnCreation))
+			case a.FirstTurnRead > 0:
+				rdcr = "∞" // read with zero cold-write: a fully warm prefix
+			}
 		}
-		fmt.Fprintf(tw, "  %s@%s\t%s\t%s\t%s\t%s\t%.2f\t%d\t%.0f\t%s\n",
-			a.Ticket, a.Attempt, role, read, create, share,
+		fmt.Fprintf(tw, "  %s@%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%d\t%.0f\t%s\n",
+			a.Ticket, a.Attempt, role, read, create, rdcr, share,
 			a.HitRatio, a.NormalizedWork, a.BilledInput, verdict)
 	}
 	tw.Flush()

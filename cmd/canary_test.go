@@ -56,6 +56,22 @@ func TestCanaryQuietOnHealthyFleet(t *testing.T) {
 	}
 }
 
+func TestCanaryReadCreationColumn(t *testing.T) {
+	// The reuse attempt reads 20000 and cold-writes 1000 on turn-1 → 20.00x (2000%),
+	// the unbounded amortization signal the ">100% cache hit" goal refers to.
+	dir := twoAttemptRepo(t, 0, 20000, 20000, 1000, 50)
+	out, code := run(t, "--data", dir, "canary")
+	if code != 0 {
+		t.Fatalf("healthy fleet should exit 0, got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "t1-rd:cr") {
+		t.Errorf("expected the t1-rd:cr header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "20.00x") {
+		t.Errorf("expected read:creation 20.00x for the reuse attempt, got:\n%s", out)
+	}
+}
+
 func TestCanaryFiresOnBustedFleet(t *testing.T) {
 	// The second attempt re-creates the prefix on turn-1 instead of reading it.
 	dir := twoAttemptRepo(t, 0, 20000, 0, 20000, 500)
