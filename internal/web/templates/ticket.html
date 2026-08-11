@@ -365,26 +365,33 @@
        equivalent and the dollar bar is omitted — the panel never shows a bare "$". */}}
   <div class="cache-headline" data-testid="cache-cost">
     <p class="cache-cost-lead">
-      <span class="cache-cost-figure" data-testid="cache-cost-avoided">{{.CostAvoided}}</span>
-      <span class="cache-cost-label">equivalent API cost avoided — <span data-testid="cache-cost-avoided-pct">{{.CostAvoidedPct}}</span> of prompt spend</span>
+      <span class="cache-cost-figure" data-testid="cache-cost-avoided">{{.CostAvoided}}</span>{{if .CostAvoidedUnit}}<span class="cache-cost-unit" data-testid="cache-cost-avoided-unit">{{.CostAvoidedUnit}}</span>{{end}}
+      <span class="cache-cost-label">equivalent API cost avoided — <span data-testid="cache-cost-avoided-pct">{{.CostAvoidedPct}}</span> of prompt spend{{template "info-bubble" "Modelled input-rate cost the cache saved vs. an uncached run (reads bill ~0.1×, writes ~1.25×). The daemon runs on subscription OAuth, so it is a modelled figure, not an invoice. Higher is better; negative means the cache was written but never read back."}}</span>
     </p>
     {{if .HasRate}}
-    <p class="cache-cost-bar" data-testid="cache-cost-bar">paid ~<span data-testid="cache-billed-dollars">{{.BilledDollars}}</span> · uncached ~<span data-testid="cache-uncached-dollars">{{.UncachedDollars}}</span></p>
+    <p class="cache-cost-bar" data-testid="cache-cost-bar">paid ~<span data-testid="cache-billed-dollars">{{.BilledDollars}}</span> · uncached ~<span data-testid="cache-uncached-dollars">{{.UncachedDollars}}</span>{{template "info-bubble" "What the prompt tokens effectively cost with caching (paid) vs. what the same tokens would cost at full input rate with no cache (uncached). The gap is the cost avoided above."}}</p>
     {{end}}
-    <p class="cache-reuse" data-testid="cache-reuse">reuse factor <span class="cache-reuse-factor" data-testid="cache-reuse-factor">{{.ReuseFactor}}</span> <span class="cache-reuse-pct" data-testid="cache-reuse-pct">({{.ReusePct}})</span> — reads per token written</p>
+    <p class="cache-reuse" data-testid="cache-reuse">reuse factor <span class="cache-reuse-factor" data-testid="cache-reuse-factor">{{.ReuseFactor}}</span> <span class="cache-reuse-pct" data-testid="cache-reuse-pct">({{.ReusePct}})</span> — reads per token written{{template "info-bubble" "Cache reads per token written (R/C). Above ×1 (100%) means each written prefix was read back more than once — the real reuse win a capped hit ratio hides. Higher is better; “—” means nothing was written yet."}}</p>
   </div>
   <dl class="cache-grid" data-testid="cache-grid">
-    <div class="cache-cell"><dt>read</dt><dd data-testid="cache-read">{{.CacheRead}}</dd></div>
-    <div class="cache-cell"><dt>written</dt><dd data-testid="cache-creation">{{.CacheCreation}}</dd></div>
-    <div class="cache-cell"><dt>served from cache</dt><dd data-testid="cache-hit-ratio">{{.HitRatioPct}}</dd></div>
-    <div class="cache-cell"><dt>normalised work</dt><dd data-testid="cache-normalized-work">{{.NormalizedWork}}</dd></div>
-    <div class="cache-cell"><dt>billed <span class="cache-unit">input-equiv</span></dt><dd data-testid="cache-billed">{{.BilledInput}}</dd></div>
-    <div class="cache-cell"><dt>uncached <span class="cache-unit">input-equiv</span></dt><dd data-testid="cache-uncached">{{.UncachedInput}}</dd></div>
-    <div class="cache-cell cache-cell-saved"><dt>saved</dt><dd data-testid="cache-saved">{{.SavedPct}}</dd></div>
+    <div class="cache-cell"><dt>read{{template "info-bubble" "Tokens served from the cache this session — the reuse payoff, billed at ~0.1× input. Higher is better."}}</dt><dd data-testid="cache-read">{{.CacheRead}}</dd></div>
+    <div class="cache-cell"><dt>written{{template "info-bubble" "Tokens written into the cache, billed at ~1.25× input. Each prefix must be written once; you want reads to far exceed this."}}</dt><dd data-testid="cache-creation">{{.CacheCreation}}</dd></div>
+    <div class="cache-cell"><dt>served from cache{{template "info-bubble" "Share of prompt tokens served from cache: read / (read + written + input). A token-weighted average capped at 100%, so it understates reuse — see the reuse factor for the >100% view."}}</dt><dd data-testid="cache-hit-ratio">{{.HitRatioPct}}</dd></div>
+    <div class="cache-cell"><dt>normalised work{{template "info-bubble" "Every token counted at 1× (input + written + read + output) — a caching-agnostic measure of raw work, so two runs that cache differently compare on equal footing."}}</dt><dd data-testid="cache-normalized-work">{{.NormalizedWork}}</dd></div>
+    <div class="cache-cell"><dt>billed <span class="cache-unit">input-equiv</span>{{template "info-bubble" "Prompt tokens after cache pricing (input 1×, reads 0.1×, writes 1.25×) — what you effectively paid, as input-token equivalents. Lower than uncached is the win."}}</dt><dd data-testid="cache-billed">{{.BilledInput}}</dd></div>
+    <div class="cache-cell"><dt>uncached <span class="cache-unit">input-equiv</span>{{template "info-bubble" "The same prompt tokens priced with no cache (all at 1×) — the baseline the saving is measured against."}}</dt><dd data-testid="cache-uncached">{{.UncachedInput}}</dd></div>
+    <div class="cache-cell cache-cell-saved"><dt>saved{{template "info-bubble" "Share of the uncached bill the cache removed (billed vs. uncached). Higher is better; a negative value flags a write-only session that paid the write premium for no reads."}}</dt><dd data-testid="cache-saved">{{.SavedPct}}</dd></div>
   </dl>
   <p class="cache-caption">Cost avoided is the input-rate saving vs. an uncached run, priced at the model's input rate — a modelled figure (the daemon runs on subscription OAuth), not an invoice. "Served from cache" is the token-weighted share; billed and uncached are prompt tokens as input-rate equivalents (output excluded). Cross-attempt amortisation is <code>drvweb-013</code>.</p>
   {{end}}
 </section>{{end}}
+
+{{/* info-bubble: the same (i) hover/focus affordance the provenance editor uses,
+     reused on the cache panel so a confusing metric can explain itself and say what
+     a good result looks like. The dot ("."), the tip string passed by the caller, is
+     mirrored to both data-tip (the CSS tooltip) and aria-label (screen readers), and
+     tabindex makes it keyboard-reachable — identical to the provenance keys. */}}
+{{define "info-bubble"}}<span class="provenance-info" tabindex="0" role="note" aria-label="{{.}}" data-tip="{{.}}">i</span>{{end}}
 
 {{define "state-badge"}}<span id="state-badge" class="state state-{{.State}}" data-testid="state-badge"{{if .OOB}} hx-swap-oob="true"{{end}}>{{stateLabel .State}}</span>{{end}}
 

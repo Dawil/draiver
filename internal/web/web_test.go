@@ -1551,7 +1551,7 @@ func TestCachePanelRendersCostAndReuse(t *testing.T) {
 		`data-testid="cache-uncached-dollars">$0.05<`,
 		`data-testid="cache-reuse-factor">×8.0<`,
 		`data-testid="cache-reuse-pct">(800%)<`,
-		`>served from cache</dt>`, // the old "hit ratio" label is gone
+		`>served from cache<`, // the old "hit ratio" label is gone (an (i) bubble now follows the text)
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("cost/reuse cache panel missing %q", want)
@@ -1576,8 +1576,13 @@ func TestCachePanelUnknownModelOmitsDollars(t *testing.T) {
 		t.Fatalf("GET detail = %d, want 200 for unknown model", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, `data-testid="cache-cost-avoided">6,950 input-equiv<`) {
+	// The figure and its unit are separate spans now (drvweb-018 follow-up): the
+	// "input-equiv" words render at label size, not the 28px headline size.
+	if !strings.Contains(body, `data-testid="cache-cost-avoided">6,950<`) {
 		t.Error("unknown model should show a token-equivalent cost-avoided figure")
+	}
+	if !strings.Contains(body, `data-testid="cache-cost-avoided-unit">input-equiv<`) {
+		t.Error("unknown model should carry the input-equiv unit as a small suffix")
 	}
 	if strings.Contains(body, `data-testid="cache-cost-bar"`) {
 		t.Error("unknown model must omit the dollar billed-vs-uncached bar")

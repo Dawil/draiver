@@ -185,6 +185,56 @@ func TestWriteMetaRoundTripsMetrics(t *testing.T) {
 	}
 }
 
+// TestLoadMetaRecomputesDerivedMetricsFromRaw pins the drvweb-018 follow-up fix:
+// an attempt.md written before the derived cache metrics existed carries only the
+// raw token fields, so LoadMeta must recompute the derived view from those raw
+// fields rather than reading the absent derived values as their zero (the "$0 /
+// reuse — on every historical ticket" bug). Mirrors agent.Totals.UnmarshalJSON.
+func TestLoadMetaRecomputesDerivedMetricsFromRaw(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy attempt.md: raw token fields only, none of the drvweb-018 derived
+	// fields (cost_avoided_input_tokens, pct_cost_avoided, read_creation_ratio).
+	legacy := "---\n" +
+		"id: \"0001\"\n" +
+		"ticket: PROJ-1\n" +
+		"metrics:\n" +
+		"    input_tokens: 1000\n" +
+		"    output_tokens: 200\n" +
+		"    cache_read_tokens: 8000\n" +
+		"    cache_creation_tokens: 1000\n" +
+		"---\n"
+	if err := os.MkdirAll(root.AttemptDir(id, "0001"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root.AttemptMetaPath(id, "0001"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Metrics == nil {
+		t.Fatal("metrics should parse from the legacy raw fields")
+	}
+	// Derived values must equal a fresh recompute from the same raw totals, not 0/nil.
+	want := agent.Totals{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 8000, CacheCreationTokens: 1000}.Metrics()
+	if !reflect.DeepEqual(*m.Metrics, want) {
+		t.Errorf("derived metrics not recomputed from raw:\n got %+v\nwant %+v", *m.Metrics, want)
+	}
+	// Guard the specific symptom the user hit: cost avoided and reuse were 0/absent.
+	if m.Metrics.CostAvoidedInputTokens == 0 {
+		t.Error("cost_avoided should be recomputed (0.9*8000 - 0.25*1000 = 6950), not read as 0")
+	}
+	if m.Metrics.ReadCreationRatio == nil || *m.Metrics.ReadCreationRatio != 8 {
+		t.Errorf("read_creation_ratio should recompute to 8.0, got %v", m.Metrics.ReadCreationRatio)
+	}
+}
+
 func TestCreateRejectsUnknownTicket(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	if _, err := Create(root, "NOPE-1", New{Repo: "/repo", Actor: "a"}); err == nil {

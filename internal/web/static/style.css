@@ -215,6 +215,10 @@ body {
 .cache-cost-lead { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .cache-cost-figure { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--done); line-height: 1.1; }
 .cache-inactive .cache-cost-figure { color: var(--muted); }
+/* cache-cost-unit: the "input-equiv" suffix in the no-rate (unknown-model) case.
+   It rides beside the 28px figure but at label size, so the words no longer render
+   at headline scale (the "input-equiv visually too large" fix). */
+.cache-cost-unit { font-size: 13px; font-weight: 500; color: var(--muted); }
 .cache-cost-label { font-size: 12px; color: var(--muted); }
 .cache-cost-bar { margin: 8px 0 0; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink); }
 .cache-reuse { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
@@ -226,6 +230,11 @@ body {
 .cache-cell dt { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .cache-cell dd { margin: 0; font-size: 16px; font-variant-numeric: tabular-nums; color: var(--ink); }
 .cache-unit { text-transform: none; letter-spacing: 0; opacity: .8; }
+/* The (i) metric-help bubbles are the provenance editor's .provenance-info reused on
+   the cache panel. Inside a .cache-cell dt (uppercased, letter-spaced) the glyph and
+   its tooltip would inherit those transforms, upper-casing the whole tip — reset them
+   so the bubble stays a lowercase "i" and the tooltip reads as normal prose. */
+.cache-panel .provenance-info, .cache-panel .provenance-info::after { text-transform: none; letter-spacing: normal; }
 .cache-cell-saved dd { color: var(--done); font-weight: 600; }
 .cache-inactive .cache-cell-saved dd { color: var(--muted); font-weight: 400; }
 .cache-caption { margin: 12px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }

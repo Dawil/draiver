@@ -602,8 +602,12 @@ type cacheVM struct {
 	// the billed-vs-uncached bar carry dollar figures; otherwise they fall back to
 	// token-equivalents with no "$". CostAvoidedPct (share of prompt spend avoided)
 	// and the reuse factor are rate-independent and always populated.
-	HasRate         bool
-	CostAvoided     string // "$0.42" (HasRate) or "6,950 input-equiv"
+	HasRate     bool
+	CostAvoided string // "$0.42" (HasRate) or "6,950" — the headline figure only
+	// CostAvoidedUnit is the small unit suffix rendered beside CostAvoided: empty in
+	// the dollar case (the "$" is the unit), "input-equiv" in the token-equivalent
+	// fallback so the words do not ride at the 28px headline size.
+	CostAvoidedUnit string
 	CostAvoidedPct  string // "69.5%" — PctCostAvoided, the bounded share avoided
 	BilledDollars   string // "$0.02" — only meaningful when HasRate
 	UncachedDollars string // "$0.05" — only meaningful when HasRate
@@ -655,7 +659,8 @@ func cachePanel(a project.Attempt) cacheVM {
 		vm.BilledDollars = dollars(m.BilledInputTokens * rate)
 		vm.UncachedDollars = dollars(float64(uncached) * rate)
 	} else {
-		vm.CostAvoided = groupInt(roundTokens(m.CostAvoidedInputTokens)) + " input-equiv"
+		vm.CostAvoided = groupInt(roundTokens(m.CostAvoidedInputTokens))
+		vm.CostAvoidedUnit = "input-equiv"
 	}
 	return vm
 }

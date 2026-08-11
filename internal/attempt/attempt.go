@@ -289,5 +289,22 @@ func parseMeta(data []byte) (Meta, error) {
 	if err := yaml.Unmarshal([]byte(rest[:end]), &m); err != nil {
 		return Meta{}, fmt.Errorf("parse attempt.md frontmatter: %w", err)
 	}
+	// Recompute the derived caching metrics from the raw token fields rather than
+	// trusting the derived values in the file. attempt.md written before a derived
+	// field existed (drvweb-018 added cost_avoided_input_tokens / pct_cost_avoided /
+	// read_creation_ratio) carries only the raw fields, so a straight unmarshal reads
+	// those derived values as their zero value — the "$0 / — on every historical
+	// ticket" bug. Rebuilding from raw mirrors agent.Totals.UnmarshalJSON, which
+	// likewise ignores derived fields on the wire and recomputes, so a stale or
+	// absent derived value can never desync from the totals it describes.
+	if m.Metrics != nil {
+		recomputed := agent.Totals{
+			InputTokens:         m.Metrics.InputTokens,
+			OutputTokens:        m.Metrics.OutputTokens,
+			CacheReadTokens:     m.Metrics.CacheReadTokens,
+			CacheCreationTokens: m.Metrics.CacheCreationTokens,
+		}.Metrics()
+		m.Metrics = &recomputed
+	}
 	return m, nil
 }
