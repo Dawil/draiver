@@ -57,6 +57,43 @@ func (t Totals) CacheHitRatio() float64 {
 	return float64(t.CacheReadTokens) / float64(denom)
 }
 
+// ReadCreationRatio is cache_read / cache_creation: the honest reuse factor —
+// how many tokens were served from cache per token written to it. Unlike
+// CacheHitRatio (a token-weighted average bounded 0..1), this exceeds 1 whenever a
+// written prefix is read back more than once, so it can surface the ">100%" reuse
+// the average dilutes away. Undefined when nothing was written (C == 0): ok is
+// false so the display shows "—" rather than an infinity.
+func (t Totals) ReadCreationRatio() (ratio float64, ok bool) {
+	if t.CacheCreationTokens == 0 {
+		return 0, false
+	}
+	return float64(t.CacheReadTokens) / float64(t.CacheCreationTokens), true
+}
+
+// CostAvoidedInputTokens is the input-token-equivalent saved versus the no-cache
+// baseline: every prompt token billed at the full input rate. Caching changes the
+// per-token rate, not the token volume, so the baseline is I+R+C at 1x and the
+// saving is baseline − BilledInputTokens(), which simplifies to 0.9·R − 0.25·C
+// (reads bill at 0.1x, writes at 1.25x). It is deliberately NOT clamped: a
+// write-only session (cache written, never read) yields a negative figure, the
+// signal of a silent invalidator paying the write premium for nothing.
+func (t Totals) CostAvoidedInputTokens() float64 {
+	baseline := float64(t.InputTokens + t.CacheReadTokens + t.CacheCreationTokens)
+	return baseline - t.BilledInputTokens()
+}
+
+// PctCostAvoided is CostAvoidedInputTokens as a share of the no-cache baseline
+// (I+R+C) — the bounded, intuitive "share of prompt spend the cache avoided". Zero
+// when there were no prompt tokens to bill. It can go negative for a write-only
+// session, matching CostAvoidedInputTokens.
+func (t Totals) PctCostAvoided() float64 {
+	baseline := t.InputTokens + t.CacheReadTokens + t.CacheCreationTokens
+	if baseline == 0 {
+		return 0
+	}
+	return t.CostAvoidedInputTokens() / float64(baseline)
+}
+
 // NormalizedWork is input + cache_creation + cache_read + output, every token at
 // 1x — a caching-agnostic measure of the raw work a session did, so two runs that
 // cache differently can be compared on equal footing (A/B).
@@ -88,20 +125,34 @@ type Metrics struct {
 	NormalizedWork      int     `json:"normalized_work" yaml:"normalized_work"`
 	BilledInputTokens   float64 `json:"billed_input_tokens" yaml:"billed_input_tokens"`
 	CachingActive       bool    `json:"caching_active" yaml:"caching_active"`
+	// ReadCreationRatio is the reuse factor R/C; nil (rendered null / "—") when
+	// nothing was written, so a divide-by-zero never leaks an Inf into the file.
+	ReadCreationRatio *float64 `json:"read_creation_ratio" yaml:"read_creation_ratio"`
+	// CostAvoidedInputTokens is the input-token-equivalent the cache saved vs. the
+	// no-cache baseline; PctCostAvoided is that as a share of the baseline. Both may
+	// be negative for a write-only session (kept honest, not clamped).
+	CostAvoidedInputTokens float64 `json:"cost_avoided_input_tokens" yaml:"cost_avoided_input_tokens"`
+	PctCostAvoided         float64 `json:"pct_cost_avoided" yaml:"pct_cost_avoided"`
 }
 
 // Metrics computes the derived view from the raw totals.
 func (t Totals) Metrics() Metrics {
-	return Metrics{
-		InputTokens:         t.InputTokens,
-		OutputTokens:        t.OutputTokens,
-		CacheReadTokens:     t.CacheReadTokens,
-		CacheCreationTokens: t.CacheCreationTokens,
-		CacheHitRatio:       t.CacheHitRatio(),
-		NormalizedWork:      t.NormalizedWork(),
-		BilledInputTokens:   t.BilledInputTokens(),
-		CachingActive:       t.CachingActive(),
+	m := Metrics{
+		InputTokens:            t.InputTokens,
+		OutputTokens:           t.OutputTokens,
+		CacheReadTokens:        t.CacheReadTokens,
+		CacheCreationTokens:    t.CacheCreationTokens,
+		CacheHitRatio:          t.CacheHitRatio(),
+		NormalizedWork:         t.NormalizedWork(),
+		BilledInputTokens:      t.BilledInputTokens(),
+		CachingActive:          t.CachingActive(),
+		CostAvoidedInputTokens: t.CostAvoidedInputTokens(),
+		PctCostAvoided:         t.PctCostAvoided(),
 	}
+	if r, ok := t.ReadCreationRatio(); ok {
+		m.ReadCreationRatio = &r
+	}
+	return m
 }
 
 // MarshalJSON emits the full derived Metrics view, so meter.json carries the raw

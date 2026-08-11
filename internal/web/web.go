@@ -595,6 +595,22 @@ type cacheVM struct {
 	BilledInput   string
 	UncachedInput string
 	SavedPct      string
+
+	// Cost-avoided is the drvweb-018 business headline: the input-token saving vs.
+	// the no-cache baseline expressed as a modelled "equivalent API cost". HasRate
+	// is true when the attempt's model has a known $/token — then CostAvoided and
+	// the billed-vs-uncached bar carry dollar figures; otherwise they fall back to
+	// token-equivalents with no "$". CostAvoidedPct (share of prompt spend avoided)
+	// and the reuse factor are rate-independent and always populated.
+	HasRate         bool
+	CostAvoided     string // "$0.42" (HasRate) or "6,950 input-equiv"
+	CostAvoidedPct  string // "69.5%" — PctCostAvoided, the bounded share avoided
+	BilledDollars   string // "$0.02" — only meaningful when HasRate
+	UncachedDollars string // "$0.05" — only meaningful when HasRate
+	// ReuseFactor is the honest ">100%" reuse stat R/C: "×8.0" with ReusePct
+	// "800%", or "—" for both when nothing was written (C == 0, ratio undefined).
+	ReuseFactor string
+	ReusePct    string
 }
 
 // cachePanel projects an attempt's folded-in metrics into the cache-panel view.
@@ -609,7 +625,7 @@ func cachePanel(a project.Attempt) cacheVM {
 	// the rollup aggregates use (cacheCost), so "saved" reads identically on the
 	// per-attempt panel and the /cache page.
 	uncached, saved := cacheCost(*m)
-	return cacheVM{
+	vm := cacheVM{
 		Present:        true,
 		Active:         m.CachingActive,
 		HitRatioPct:    pct(m.CacheHitRatio),
@@ -621,7 +637,27 @@ func cachePanel(a project.Attempt) cacheVM {
 		BilledInput:    groupInt(roundTokens(m.BilledInputTokens)),
 		UncachedInput:  groupInt(uncached),
 		SavedPct:       saved,
+		CostAvoidedPct: pct(m.PctCostAvoided),
 	}
+
+	// Reuse factor R/C — the ">100%" stat. Nil pointer (nothing written) → "—".
+	vm.ReuseFactor, vm.ReusePct = "—", "—"
+	if m.ReadCreationRatio != nil {
+		vm.ReuseFactor = fmt.Sprintf("×%.1f", *m.ReadCreationRatio)
+		vm.ReusePct = fmt.Sprintf("%.0f%%", *m.ReadCreationRatio*100)
+	}
+
+	// Dollar figures when the model's input rate is known; otherwise fall back to
+	// input-token-equivalents (no "$"), so an unknown-model attempt still renders.
+	if rate, ok := inputRatePerToken(a.Model); ok {
+		vm.HasRate = true
+		vm.CostAvoided = dollars(m.CostAvoidedInputTokens * rate)
+		vm.BilledDollars = dollars(m.BilledInputTokens * rate)
+		vm.UncachedDollars = dollars(float64(uncached) * rate)
+	} else {
+		vm.CostAvoided = groupInt(roundTokens(m.CostAvoidedInputTokens)) + " input-equiv"
+	}
+	return vm
 }
 
 // groupInt formats a non-negative token count with thousands separators, so a

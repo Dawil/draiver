@@ -1467,7 +1467,7 @@ func TestAgentLogsUnknownAttempt404s(t *testing.T) {
 // seedAttemptWithMetrics writes a minimal attempt (spec + one created event) and
 // folds a metrics block into its attempt.md, mirroring what reconcile.retire does
 // on a metered retire. It is the fixture for the cache-panel tests.
-func seedAttemptWithMetrics(t *testing.T, id, att string, m agent.Metrics) store.Root {
+func seedAttemptWithMetrics(t *testing.T, id, att string, m agent.Metrics, model ...string) store.Root {
 	t.Helper()
 	root := store.Root{Dir: t.TempDir()}
 	if err := root.EnsureAttemptDirs(id, att); err != nil {
@@ -1482,6 +1482,9 @@ func seedAttemptWithMetrics(t *testing.T, id, att string, m agent.Metrics) store
 		t.Fatal(err)
 	}
 	meta.Ticket, meta.ID = id, att
+	if len(model) > 0 {
+		meta.Model = model[0]
+	}
 	meta.Metrics = &m
 	if err := attempt.WriteMeta(root, meta); err != nil {
 		t.Fatal(err)
@@ -1528,6 +1531,112 @@ func TestCachePanelRendersMetrics(t *testing.T) {
 	}
 }
 
+// TestCachePanelRendersCostAndReuse pins the drvweb-018 acceptance: a known-model
+// attempt renders the cost avoided ($ + %), the billed-vs-uncached dollar bar, and
+// the ">100%" reuse factor, and the old hit ratio is relabelled off "success metric".
+func TestCachePanelRendersCostAndReuse(t *testing.T) {
+	// I=1000 R=8000 C=1000 at opus-4.8 ($5/1M): reuse ×8.0 (800%);
+	// avoided = 0.9*8000 − 0.25*1000 = 6,950 tok → $0.03; pct 69.5%;
+	// billed 3,050 tok → $0.02; uncached 10,000 tok → $0.05.
+	m := agent.Totals{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 8000, CacheCreationTokens: 1000}.Metrics()
+	root := seedAttemptWithMetrics(t, "CACHE-COST", "0001", m, "opus-4.8")
+	h := newServerOver(t, root)
+
+	body := get(t, h, "/ticket/CACHE-COST/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="cache-cost-avoided">$0.03<`,
+		`data-testid="cache-cost-avoided-pct">69.5%<`,
+		`data-testid="cache-cost-bar"`,
+		`data-testid="cache-billed-dollars">$0.02<`,
+		`data-testid="cache-uncached-dollars">$0.05<`,
+		`data-testid="cache-reuse-factor">×8.0<`,
+		`data-testid="cache-reuse-pct">(800%)<`,
+		`>served from cache</dt>`, // the old "hit ratio" label is gone
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("cost/reuse cache panel missing %q", want)
+		}
+	}
+	// The success metric is no longer "hit ratio".
+	if strings.Contains(body, `>hit ratio</dt>`) {
+		t.Error(`the ratio cell should be relabelled off "hit ratio"`)
+	}
+}
+
+// TestCachePanelUnknownModelOmitsDollars pins that an attempt whose model has no
+// known input rate renders token-equivalents with no "$" and no dollar bar — and
+// crucially does not error. The reuse factor (rate-independent) still shows.
+func TestCachePanelUnknownModelOmitsDollars(t *testing.T) {
+	m := agent.Totals{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 8000, CacheCreationTokens: 1000}.Metrics()
+	root := seedAttemptWithMetrics(t, "CACHE-UNK", "0001", m, "some-future-model-x")
+	h := newServerOver(t, root)
+
+	rr := get(t, h, "/ticket/CACHE-UNK/0001")
+	if rr.Code != 200 {
+		t.Fatalf("GET detail = %d, want 200 for unknown model", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `data-testid="cache-cost-avoided">6,950 input-equiv<`) {
+		t.Error("unknown model should show a token-equivalent cost-avoided figure")
+	}
+	if strings.Contains(body, `data-testid="cache-cost-bar"`) {
+		t.Error("unknown model must omit the dollar billed-vs-uncached bar")
+	}
+	if strings.Contains(body, `data-testid="cache-cost-avoided">$`) {
+		t.Error("unknown model must not render a dollar cost figure")
+	}
+	// Reuse factor is rate-independent and must still render.
+	if !strings.Contains(body, `data-testid="cache-reuse-factor">×8.0<`) {
+		t.Error("reuse factor should render regardless of model rate")
+	}
+}
+
+// TestCachePanelReuseFactorDashWhenNoCreation pins the C==0 acceptance: the reuse
+// factor is undefined and shows "—" (no Inf, no crash), while cost avoided — reads
+// against a prefix written in an earlier session — is still a positive sub-cent $.
+func TestCachePanelReuseFactorDashWhenNoCreation(t *testing.T) {
+	// I=100 R=400 C=0: ratio undefined; avoided = 0.9*400 = 360 tok → $0.0018.
+	m := agent.Totals{InputTokens: 100, OutputTokens: 50, CacheReadTokens: 400, CacheCreationTokens: 0}.Metrics()
+	if m.ReadCreationRatio != nil {
+		t.Fatal("fixture should have an undefined reuse factor (C==0)")
+	}
+	root := seedAttemptWithMetrics(t, "CACHE-NOC", "0001", m, "opus-4.8")
+	h := newServerOver(t, root)
+
+	body := get(t, h, "/ticket/CACHE-NOC/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="cache-reuse-factor">—<`,
+		`data-testid="cache-reuse-pct">(—)<`,
+		`data-testid="cache-cost-avoided">$0.0018<`, // sub-cent precision, not $0.00
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("no-creation cache panel missing %q", want)
+		}
+	}
+}
+
+// TestCachePanelNegativeCostIsHonest pins that a write-only attempt (cache written,
+// never read — a silent invalidator) shows a NEGATIVE cost avoided rather than a
+// clamped zero, so the loss is legible on the panel.
+func TestCachePanelNegativeCostIsHonest(t *testing.T) {
+	// I=500 R=0 C=2000 at opus-4.8: avoided = −0.25*2000 = −500 tok → −$0.0025;
+	// pct = −500/2500 = −20.0%; reuse ×0.0 (0%).
+	m := agent.Totals{InputTokens: 500, OutputTokens: 100, CacheReadTokens: 0, CacheCreationTokens: 2000}.Metrics()
+	root := seedAttemptWithMetrics(t, "CACHE-NEG", "0001", m, "opus-4.8")
+	h := newServerOver(t, root)
+
+	body := get(t, h, "/ticket/CACHE-NEG/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="cache-cost-avoided">-$0.0025<`,
+		`data-testid="cache-cost-avoided-pct">-20.0%<`,
+		`data-testid="cache-reuse-factor">×0.0<`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("write-only cache panel missing %q", want)
+		}
+	}
+}
+
 // TestCachePanelInactiveIsDistinct pins the second acceptance: caching_active:false
 // is visually distinct. The panel takes the .cache-inactive modifier and renders the
 // "never cached" flag rather than the healthy one.
@@ -1542,7 +1651,7 @@ func TestCachePanelInactiveIsDistinct(t *testing.T) {
 	body := get(t, h, "/ticket/CACHE-2/0001").Body.String()
 	for _, want := range []string{
 		`class="cache-panel cache-inactive"`, // the distinct modifier
-		`data-testid="cache-inactive"`,        // the "never cached" flag
+		`data-testid="cache-inactive"`,       // the "never cached" flag
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("inactive cache panel missing %q:\n%s", want, body)

@@ -3,6 +3,7 @@ package attempt
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -165,7 +166,9 @@ func TestWriteMetaRoundTripsMetrics(t *testing.T) {
 	if back.Metrics == nil {
 		t.Fatalf("metrics lost across write/parse:\n%s", data)
 	}
-	if *back.Metrics != metrics {
+	// DeepEqual, not ==: Metrics carries a *float64 (ReadCreationRatio), so struct
+	// equality would compare pointer identity across the write/parse boundary.
+	if !reflect.DeepEqual(*back.Metrics, metrics) {
 		t.Errorf("metrics round-trip = %+v, want %+v", *back.Metrics, metrics)
 	}
 

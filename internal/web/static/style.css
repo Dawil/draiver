@@ -207,6 +207,19 @@ body {
 .cache-flag { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 12px; }
 .cache-flag-on { color: var(--done); background: color-mix(in srgb, var(--done) 16%, transparent); border: 1px solid var(--done); }
 .cache-flag-off { color: var(--review); background: color-mix(in srgb, var(--review) 16%, transparent); border: 1px solid var(--review); }
+/* cache-headline: the drvweb-018 business lead — cost avoided (the big figure),
+   the billed-vs-uncached bar, and the ">100%" reuse factor — sitting above the raw
+   token grid. On the .cache-inactive panel the cost figure de-emphasises to muted
+   (there is no win to celebrate when the prefix never cached). */
+.cache-headline { margin: 0 0 14px; padding: 0 0 12px; border-bottom: 1px solid var(--line); }
+.cache-cost-lead { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.cache-cost-figure { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--done); line-height: 1.1; }
+.cache-inactive .cache-cost-figure { color: var(--muted); }
+.cache-cost-label { font-size: 12px; color: var(--muted); }
+.cache-cost-bar { margin: 8px 0 0; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink); }
+.cache-reuse { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.cache-reuse-factor { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+.cache-reuse-pct { font-variant-numeric: tabular-nums; }
 .cache-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 16px; margin: 0; }
 @media (max-width: 560px) { .cache-grid { grid-template-columns: 1fr 1fr; } }
 .cache-cell { display: flex; flex-direction: column; gap: 2px; }
