@@ -160,15 +160,22 @@ The **off (control) column is measured** — from the 47 recorded flag-off attem
 append, so these off-arm attempts already include rung E). The **on column** is
 filled after the operator runs the on arm above (numbers per arm, averaged over N).
 
-| Metric | off (control) — measured | on (under test) | Assertion |
+Measured on-arm over 6 attempts — `drvctl-033@0002–0004` + `drvweb-013@0002–0004`,
+two ticket shapes on the **draiver** repo under `exclude_dynamic_system_prompt_sections:
+true` (`draiver canary --repo /home/david/Projects/draiver`). The fair off-column
+comparison is the **append-era** off attempts (`drvctl-032@0001 … drvweb-014@0001`),
+which already carry the same `drvctl-034` handbook append, so the *only* difference is
+the flag.
+
+| Metric | off (control) — measured | on (measured, N=6) | Assertion |
 | --- | --- | --- | --- |
-| ticket-2 turn-1 `cache_read` | **16,584–16,876** (every reuse attempt) | _tbd_ | (a) on ≫ 0, `verdict=ok` |
-| ticket-2 turn-1 read-share | **~0.69 avg** (0.66–0.74) | _tbd_ | (a) on ≥ floor (0.5) |
-| ticket-2 cache-normalised work | per-ticket (compare same ticket) | _tbd_ | (b) on ≤ off, same ticket |
-| ticket-2 billed-input (ref) | per-ticket (compare same ticket) | _tbd_ | (b) reference only |
-| turn-1 `verdict` | **`ok` for all 40 reuse attempts** (exit 0) | _tbd_ | (c)+(a) canary quiet |
-| reached Review/Done (of N) | fleet baseline: nearly all reach Done | _tbd_ | (c) parity |
-| cwd / git / path errors | baseline: none observed | _tbd_ | (c) no new errors on-arm |
+| ticket-2 turn-1 `cache_read` | 16,584–16,876 (append-era ~16,834 avg) | **17,646** (all 6, identical) | (a) **PASS** — on ≫ 0, `verdict=ok` |
+| ticket-2 turn-1 read-share | ~0.69 avg (0.66–0.74) | **0.77** (all 6) | (a) **PASS** — on well above 0.5 floor |
+| ticket-2 turn-1 cold-write (`t1-create`) | append-era ~6,378 avg (fleet ~7,200) | **5,271 avg** (5,128–5,310) | (b) **PASS** — −17% vs append-era off |
+| turn-1 `verdict` | `ok`, canary exit 0 | **`ok`, canary exit 0** | (c)+(a) canary quiet |
+| init `cwd` = own worktree (of 6) | baseline: correct | **6 / 6** | (c) **PASS** |
+| git-state probes resolved (of 6) | baseline: correct | **6 / 6** (4–15 probes each) | (c) **PASS** |
+| sibling-worktree path leakage | baseline: none | **0 / 6** | (c) **PASS** |
 
 **Off-arm baseline notes (measured this session):** across all three repos every
 non-baseline attempt reads the full shared prefix on turn 1 (`t1-read`
@@ -180,7 +187,58 @@ expected delta is a *larger, more stable* cached turn-1 prefix (the dynamic sect
 no longer sit inside it to be re-created per attempt) and correspondingly lower
 cold-write (`t1-create`) — not the appearance of caching from nothing.
 
-**Conclusion:** _tbd — flags safe to default? yes/no, with the numbers above._
+**Conclusion — the flags are safe to default, and are now the default.**
+`exclude_dynamic_system_prompt_sections: true` delivers the predicted win — a
+**larger** cached turn-1 prefix (+812 tokens: the cacheable boundary now extends past
+where cwd/git/platform used to fragment it), **−17%** turn-1 cold-write, read-share
+**0.69 → 0.77** — with **zero** behavioural regression: all 6 on-arm attempts resolved
+cwd, git state, and file paths correctly (6/6 on every parity check), and the canary
+stayed quiet (`verdict=ok`, exit 0). The flag is live in `~/.draiver/config.json`
+(set by the operator, drvctl-036 escalation #12/#19) and authorized permanent (#19).
+
+## Cache-hit reality — what the ceiling actually is
+
+The success metric was framed as "cache hit rate above 100%." A cache **hit ratio is
+bounded at 100%** — it is the fraction of input tokens served from cache
+(`cache_read / (cache_read + cache_creation + input)`), so it can never exceed 1.0.
+It is not a throughput multiplier. Where the fleet actually sits:
+
+- **Whole-session hit ratio is already ~0.95–1.00** across both arms — within-session
+  turn-to-turn caching dominates once a conversation is long, so this number is near
+  its ceiling regardless of the flag. (The 6 on-arm attempts average 0.968; the slight
+  spread below 1.0 tracks *conversation size*, not the flag — these attempts did
+  millions of tokens of real work, growing the prompt and forcing within-session
+  cache-creation.)
+- **Turn-1 read-share is the flag-sensitive number**, and it moved **0.69 → 0.77**.
+  It cannot reach 1.0 by construction: turn 1 always carries a per-ticket *first user
+  message* (the brief + the relocated cwd/git/platform context) that has never been
+  seen before, so it must be written (`cache_creation`), never read. The ~17.6K read
+  prefix is the byte-invariant tools + system + handbook append; the remaining ~23% is
+  the irreducible per-ticket payload.
+
+So "above 100%" is unreachable — but the useful levers are real, and the flag pulled
+them the right way.
+
+### What could push cache efficiency further
+
+1. **Land `drvctl-033` (version pin + version events).** Today the autoupdater is only
+   held off manually (`DISABLE_AUTOUPDATER=1`). An unpinned `claude` upgrade mid-fleet
+   silently rewrites the tools/system prefix and busts *every* repo's shared cache at
+   once — the highest-leverage remaining risk. Landing 033 also lets the canary
+   *attribute* a bust to a version bump instead of reporting "version unavailable".
+2. **Shrink the per-ticket first user message.** The turn-1 cold-write floor (~5.3K) is
+   dominated by the brief + relocated dynamic context. Any stable scaffolding still
+   living in that message could move into the byte-invariant append (which *is* cached);
+   only the genuinely per-ticket bytes need to stay uncacheable.
+3. **Keep the append strictly byte-invariant.** A single per-ticket byte (an id, a
+   timestamp) in the append re-fragments the shared prefix and erases the win. The
+   `draiver canary` guard exists precisely to catch this — run it in CI/cron.
+4. **Order same-repo attempts within the 1h TTL.** The win is cross-ticket prefix
+   *reuse*; a second attempt that cold-starts after the prefix has aged out of the 1h
+   window re-creates it. Scheduling repo-adjacent work close in time preserves warmth.
+5. **`drvweb-013` for visibility (UI only).** Not a cache lever, but surfacing the
+   per-repo rollup in the web UI (currently CLI-only via `draiver canary`) makes silent
+   regressions visible without a cron alert.
 
 ## The standing guard: `draiver canary`
 
@@ -221,12 +279,18 @@ only in `docs/prompt-caching.md`; confirmed by `git log --all`):
 - **Canary (criterion 2): done** — `internal/canary` + `draiver canary`, tested,
   installed fleet-wide, and demonstrated quiet on the live (healthy) fleet
   (exit `0`, all 40 reuse attempts `verdict=ok`).
-- **Validation run (criterion 1): OFF arm measured, ON arm handed off.**
-  Escalation #8 authorized the spend and chose the reduced-validation path
-  (skip building drvctl-033's version pin — autoupdater will not fire mid-run;
-  read the rollup from `draiver canary` in lieu of the unbuilt drvweb-013 web
-  rollup). Everything autonomously possible is done: OFF-arm baseline measured,
-  precondition verified, canary installed, append confirmed default-on, turnkey
-  runbook above. The **ON arm is operator-driven** — it flips one config key and
-  restarts the foreground `draiver ctl up` (the operator's terminal), then runs
-  `drvctl-033` / `drvweb-013` N times; `draiver canary` reads the verdict.
+- **Validation run (criterion 1): DONE — both arms measured, gate passed.**
+  Escalation #8 authorized the spend and chose the reduced-validation path (skip
+  building drvctl-033's version pin; read the rollup from `draiver canary` in lieu
+  of the unbuilt drvweb-013 web rollup). The operator flipped the key and restarted
+  the daemon (#12); the on arm ran 6 attempts (`drvctl-033@0002–0004`,
+  `drvweb-013@0002–0004`) on the draiver repo. All three assertions pass (verdict
+  table above): (a) turn-1 prefix read on every reuse attempt, (b) −17% cold-write
+  vs the append-era off control, (c) 6/6 clean on cwd, git-state, and file-path
+  parity with zero sibling-worktree leakage. Human authorized the flags permanent
+  (#19); the config key is live in `~/.draiver/config.json`.
+  - **Follow-up (not blocking):** the flag is permanent via the config key, but the
+    *code* default in `internal/config/config.go` (`ExcludeDynamicSystemPromptSections`)
+    is still the zero-value `false`. Baking the default to `true` there — so the flag
+    is on even absent the config key — is a one-line follow-up that belongs to the
+    drvctl-032 config surface, left out of this validation ticket to avoid scope creep.
