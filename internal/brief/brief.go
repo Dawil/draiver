@@ -14,13 +14,13 @@ import (
 	"github.com/Dawil/draiver/internal/store"
 )
 
-// workingInstructions is the standing how-to-work guidance every brief carries,
-// so it reaches every supervisor-driven session independent of whether the
-// onboarding skill is loaded. It is deliberately one line — the Markdown-when-
-// logging nudge from the onboarding skill's §3.5 — kept short so it does not
-// drown the spec or log. Keep the wording in sync with that section so the skill
-// and this injected prompt don't drift.
-const workingInstructions = "Write log, note, and escalation bodies in Markdown — fence code and errors, backtick file paths and identifiers, and use bullets for alternatives — so they stay skimmable on the board."
+// The standing how-to-work protocol (cold-start, log discipline, the Markdown-
+// when-logging nudge, escalate/review) no longer rides here in the brief. It is
+// byte-invariant across every ticket, so it moved *above the wall* into the
+// coding-agent's system-prompt append (internal/handbook, wired by drvctl-032's
+// append_system_prompt_file), where it caches once per repo instead of paying a
+// cold write on every ticket's cold-start (docs/prompt-caching.md, rung E). The
+// brief now carries only the per-ticket half: the spec and the attempt log.
 
 // Build assembles the brief for one attempt on a ticket.
 func Build(root store.Root, ticket, id string) (string, error) {
@@ -60,9 +60,6 @@ func Build(root store.Root, ticket, id string) (string, error) {
 	if a.Assignee != "" {
 		fmt.Fprintf(&b, " | Assignee: %s", a.Assignee)
 	}
-	b.WriteString("\n\n")
-
-	b.WriteString(workingInstructions)
 	b.WriteString("\n\n")
 
 	b.WriteString("## Spec\n\n")

@@ -37,6 +37,13 @@ type Identity struct {
 	PID       int       `json:"pid,omitempty"`   // live process; 0 when not running
 	Worktree  string    `json:"worktree"`        // the session's working directory
 	Started   time.Time `json:"started"`
+
+	// ProtocolVersion is the version handle (handbook.VersionOf) of the invariant
+	// protocol this session launched with in its system-prompt append — draiver's
+	// shipped protocol, an operator's override, or empty when none was appended. It
+	// is provenance for A/B and reproducibility (drvctl-034): it pins a run to the
+	// exact protocol text it ran against, and is folded into attempt.md on retire.
+	ProtocolVersion string `json:"protocol_version,omitempty"`
 }
 
 // Meter is a session's live cost + liveness tally — meter.json. It is folded

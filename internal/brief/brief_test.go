@@ -61,17 +61,19 @@ func TestBuildIncludesSpecLogAndEscalationPairing(t *testing.T) {
 	}
 }
 
-// The brief must carry the how-to-log nudge itself, so a supervisor-driven
-// session is told to write log/note bodies in Markdown even when the onboarding
-// skill isn't loaded. This guards the injected-prompt seam, not the skill file.
-func TestBuildCarriesMarkdownWorkingInstruction(t *testing.T) {
+// The brief no longer carries the invariant how-to-work protocol (drvctl-034):
+// it moved above the wall into the system-prompt append (internal/handbook), so
+// the brief holds only the per-ticket spec + log. This guards that the slim held —
+// the protocol nudge is not re-injected per cold-start — while the spec and log
+// still render.
+func TestBuildOmitsProtocolCarriesSpecAndLog(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	const id, att = "PROJ-2", "0001"
 	if err := root.EnsureAttemptDirs(id, att); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(root.SpecPath(id), []byte("---\nid: PROJ-2\ntitle: Thing\n---\n\n# Thing\n\nDo it."), 0o644)
-	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: PROJ-2\ntitle: Thing\n---\n\n# Thing\n\nDo the spec."), 0o644)
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "genesis event"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,15 +82,19 @@ func TestBuildCarriesMarkdownWorkingInstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The exact nudge (single-sourced from the const) and its concrete cues.
-	for _, want := range []string{
-		workingInstructions,
-		"Markdown",
-		"backtick",
-		"bullets",
+	// The protocol nudge (Markdown-when-logging) must be gone from the brief.
+	for _, gone := range []string{
+		"stay skimmable on the board",
+		"backtick file paths",
 	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("brief still carries the invariant protocol %q — it should live in the append now\n---\n%s", gone, out)
+		}
+	}
+	// The per-ticket half is still there: the spec body and the log event.
+	for _, want := range []string{"Do the spec.", "genesis event"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("brief missing working instruction %q\n---\n%s", want, out)
+			t.Errorf("brief missing per-ticket content %q\n---\n%s", want, out)
 		}
 	}
 }
