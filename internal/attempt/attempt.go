@@ -33,6 +33,13 @@ type Meta struct {
 	Started time.Time `yaml:"started"`
 	From    string    `yaml:"from,omitempty"` // provenance: branched from this attempt
 
+	// ProtocolVersion is the version handle of the invariant protocol the attempt's
+	// session launched with in its system-prompt append (drvctl-034), folded from
+	// session.json on retire. It pins the run to the exact protocol text for A/B and
+	// reproducibility. Empty when no protocol was appended (or the attempt predates
+	// the field), so it renders only once there is something to record.
+	ProtocolVersion string `yaml:"protocol_version,omitempty"`
+
 	// Metrics is the meter's final token/caching tally, folded in on retire — the
 	// "reserved metrics room" made real (drvctl-031). Nil until an attempt retires
 	// with a metered session, so it renders only once there is something to record.
@@ -225,6 +232,11 @@ func metaFrontmatter(m Meta) string {
 	}
 	if strings.TrimSpace(m.From) != "" {
 		b.WriteString(metaLine("from", m.From))
+	}
+	// ProtocolVersion renders only when recorded (machine-written on retire, like
+	// metrics below — not a hand-editable hint, so no commented placeholder).
+	if strings.TrimSpace(m.ProtocolVersion) != "" {
+		b.WriteString(metaLine("protocol_version", m.ProtocolVersion))
 	}
 	// Metrics renders as a nested block only when the meter has been folded in on
 	// retire — machine-written, not a hand-editable hint, so unlike the optional

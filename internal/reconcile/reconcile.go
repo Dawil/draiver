@@ -763,6 +763,14 @@ func (r *Reconciler) foldMetrics(key worktree.Key) {
 	}
 	metrics := m.Totals.Metrics()
 	meta.Metrics = &metrics
+	// Fold the run's protocol-append provenance (drvctl-034) alongside the metrics:
+	// the version handle of the invariant protocol this session launched with lives
+	// in session.json (recorded at spawn), and attempt.md is its durable A/B home.
+	// Best-effort and additive — a missing/unreadable identity leaves the field as
+	// loaded, never failing the retire.
+	if ident, ierr := sess.ReadIdentity(); ierr == nil && ident.ProtocolVersion != "" {
+		meta.ProtocolVersion = ident.ProtocolVersion
+	}
 	if err := attempt.WriteMeta(r.opt.Root, meta); err != nil {
 		r.opt.Logf("reconcile: fold metrics %s/%s: write attempt.md: %v", key.Ticket, key.Attempt, err)
 	}
