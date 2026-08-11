@@ -1,5 +1,11 @@
 # Targets & dependencies
 
+> **Superseded by [`capabilities-and-supervision.md`](./capabilities-and-supervision.md)**,
+> which folds the settled design (parent-with-e2e, the three relations, the Pending
+> state, the event-driven coordinator, and the supervision dial) into one spec. This
+> file is kept as the exploratory precursor — its reasoning and the "Decisions
+> locked" section remain the record of *how* the forks were settled.
+>
 > A companion to [`draiverctl.md`](./draiverctl.md). Where that doc maps the whole
 > systemd model onto the supervisor, this one drills into two rows of its analogy
 > table — **Targets (runlevels) → milestones/epics** and **`Requires=`/`After=`/
