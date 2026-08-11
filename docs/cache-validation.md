@@ -27,10 +27,22 @@ Two axes, from `docs/prompt-caching.md` §"Measuring the benefit":
 
 ## The two arms
 
+**Important — the append (rung E) is already default-on.** `drvctl-034` made
+`resolvePromptCache` default `SystemPromptAppend` to `handbook.Content()` (the
+byte-invariant protocol, embedded via `go:embed`). `append_system_prompt_file` only
+*overrides* that default; an empty override file disables it. So both arms already
+carry the invariant-protocol append — the **sole lever under test** is
+`exclude_dynamic_system_prompt_sections` (drvctl-034 left it default-off as the
+opt-in cache lever).
+
 | Arm | `~/.draiver/config.json` keys | Effect |
 | --- | --- | --- |
-| **off** (control) | *(unset — both keys absent)* | launches byte-for-byte as today |
-| **on** (under test) | `"exclude_dynamic_system_prompt_sections": true`, `"append_system_prompt_file": "<invariant-protocol>.txt"` | strips the dynamic system-prompt sections (rung D) and hoists the invariant protocol into the static append (rung E) |
+| **off** (control) | *(unset — `exclude_dynamic_system_prompt_sections` absent)* | append default-on (handbook); dynamic system-prompt sections retained — launches as today |
+| **on** (under test) | `"exclude_dynamic_system_prompt_sections": true` | append default-on (handbook, unchanged); strips the dynamic system-prompt sections (rung D), relocating cwd / git-state / platform into the first user message |
+
+`append_system_prompt_file` is optional in both arms: leave it unset to use the
+default handbook append (recommended — it is the canonical byte-invariant protocol),
+or point it at your own byte-invariant file to override.
 
 Both arms already run with `ENABLE_PROMPT_CACHING_1H=1` (set on `BaseSpec.Env` by
 `newReconciler`, drvctl-035), so TTL is held at 1h in either arm.
@@ -97,32 +109,76 @@ Compare on **cache-normalised work**, not billed cost (billed mixes in cache luc
 - This axis is partly manual (behavioural), by design: it is the gate, so a human
   reads the sample rather than trusting a single scalar.
 
-## Run protocol (turnkey once authorized)
+## Run protocol (turnkey — authorized on drvctl-036, escalation #8)
 
-1. Pick **representative tickets** — a mix of shapes (a small edit, a
-   multi-file change, one that reads git history) on **one repo**, so second-ticket
-   sharing is exercised.
-2. Pin the adapter (`DISABLE_AUTOUPDATER=1`, fixed binary) for the whole run.
-3. **Off arm:** ensure both config keys are unset; run each ticket N times,
-   letting the daemon bring the sessions up.
-4. **On arm:** set the two config keys; point `append_system_prompt_file` at the
-   byte-invariant protocol; restart the daemon; run the same tickets N times **in
-   the same per-repo order** (so ticket 2 follows ticket 1 within TTL).
-5. **Read the verdict:** `draiver canary` for (a) and (b); the transcript sample +
-   terminal states for (c). Fill the table below.
+The daemon is a foreground process (`draiver ctl up`, the operator's terminal), so
+the **operator drives the config flip + restart**; everything else is measured by
+`draiver canary`. Representative tickets: **`drvctl-033`** (reads git history / small
+config change) and **`drvweb-013`** (multi-file web change) on the **draiver** repo —
+two shapes on one repo, so second-ticket sharing is exercised. Working them also
+lands the two roadmap dependencies (see "Unmet dependencies").
+
+Preconditions verified this session: `claude 2.1.216` accepts
+`--exclude-dynamic-system-prompt-sections` (start-up probe passes); `draiver canary`
+installed (`go install .`).
+
+```sh
+# --- OFF arm (control) is ALREADY on disk ---
+# 47 recorded attempts are all flag-off (see baseline table below). No new off-arm
+# runs are strictly required; to run drvctl-033/drvweb-013 off-arm for a same-ticket
+# pair, do so BEFORE flipping the key, same steps as the on arm minus the config edit.
+
+# --- ON arm ---
+# 1. Pin the adapter for the run (belt-and-suspenders; autoupdater unlikely mid-run).
+export DISABLE_AUTOUPDATER=1
+
+# 2. Flip the sole lever in ~/.draiver/config.json (append stays default-on):
+#    add  "exclude_dynamic_system_prompt_sections": true
+
+# 3. Restart the daemon so it re-reads config (it re-adopts running sessions):
+#    Ctrl-C the foreground `draiver ctl up`, then relaunch it (same flags).
+
+# 4. Run the tickets N times each, in per-repo order (ticket 2 within the 1h TTL of
+#    ticket 1) so the shared prefix is warm. For each new run:
+draiver attempt new drvctl-033        # -> 000X ; then:
+draiver ctl enable  drvctl-033@000X
+draiver ctl start   drvctl-033@000X   # daemon spawns it in the background
+#    ...repeat for drvweb-013 and for N total (spec: N>=3).
+
+# 5. Read the verdict once the attempts retire:
+draiver canary --repo /home/david/Projects/draiver   # (a) + (b): rollup + exit code
+draiver ctl logs <ticket>@000X                        # (c): read cwd/git/path behaviour
+```
+
+Then fill the verdict table below (on-arm column) and compare against the OFF-arm
+baseline already recorded there.
 
 ## Verdict template
 
-Fill after the run (numbers per arm, averaged over N):
+The **off (control) column is measured** — from the 47 recorded flag-off attempts
+(`draiver canary`, this session; `main` already carries the drvctl-034 handbook
+append, so these off-arm attempts already include rung E). The **on column** is
+filled after the operator runs the on arm above (numbers per arm, averaged over N).
 
-| Metric | off (control) | on (under test) | Assertion |
+| Metric | off (control) — measured | on (under test) | Assertion |
 | --- | --- | --- | --- |
-| ticket-2 turn-1 `cache_read` | _tbd_ | _tbd_ | (a) on ≫ 0, `verdict=ok` |
-| ticket-2 turn-1 read-share | _tbd_ | _tbd_ | (a) on ≥ floor |
-| ticket-2 cache-normalised work | _tbd_ | _tbd_ | (b) on < off |
-| ticket-2 billed-input (ref) | _tbd_ | _tbd_ | (b) reference only |
-| reached Review/Done (of N) | _tbd_ | _tbd_ | (c) parity |
-| cwd / git / path errors | _tbd_ | _tbd_ | (c) no new errors on-arm |
+| ticket-2 turn-1 `cache_read` | **16,584–16,876** (every reuse attempt) | _tbd_ | (a) on ≫ 0, `verdict=ok` |
+| ticket-2 turn-1 read-share | **~0.69 avg** (0.66–0.74) | _tbd_ | (a) on ≥ floor (0.5) |
+| ticket-2 cache-normalised work | per-ticket (compare same ticket) | _tbd_ | (b) on ≤ off, same ticket |
+| ticket-2 billed-input (ref) | per-ticket (compare same ticket) | _tbd_ | (b) reference only |
+| turn-1 `verdict` | **`ok` for all 40 reuse attempts** (exit 0) | _tbd_ | (c)+(a) canary quiet |
+| reached Review/Done (of N) | fleet baseline: nearly all reach Done | _tbd_ | (c) parity |
+| cwd / git / path errors | baseline: none observed | _tbd_ | (c) no new errors on-arm |
+
+**Off-arm baseline notes (measured this session):** across all three repos every
+non-baseline attempt reads the full shared prefix on turn 1 (`t1-read`
+16,584–16,876 ≈ the machine-warm tools+system+append prefix), `t1-share` 0.66–0.74,
+`hit-ratio` ≥ 0.91, and `verdict=ok` — `draiver canary` exits `0` (healthy). This is
+the control the on arm must **match or beat** on cache metrics (a)/(b) **without**
+regressing behaviour (c). Because the append is already default-on, the on arm's
+expected delta is a *larger, more stable* cached turn-1 prefix (the dynamic sections
+no longer sit inside it to be re-created per attempt) and correspondingly lower
+cold-write (`t1-create`) — not the appearance of caching from nothing.
 
 **Conclusion:** _tbd — flags safe to default? yes/no, with the numbers above._
 
@@ -163,9 +219,14 @@ only in `docs/prompt-caching.md`; confirmed by `git log --all`):
 ## Status
 
 - **Canary (criterion 2): done** — `internal/canary` + `draiver canary`, tested,
-  and demonstrated quiet on the live (healthy) fleet.
-- **Validation run (criterion 1): mechanism ready, execution gated.** Executing the
-  live run spends real subscription budget and reconfigures the running daemon, and
-  depends on the two unmet tickets above. That authorization + parameters
-  (representative tickets, N, whether to build 033/drvweb-013 first) is an open
-  escalation on drvctl-036.
+  installed fleet-wide, and demonstrated quiet on the live (healthy) fleet
+  (exit `0`, all 40 reuse attempts `verdict=ok`).
+- **Validation run (criterion 1): OFF arm measured, ON arm handed off.**
+  Escalation #8 authorized the spend and chose the reduced-validation path
+  (skip building drvctl-033's version pin — autoupdater will not fire mid-run;
+  read the rollup from `draiver canary` in lieu of the unbuilt drvweb-013 web
+  rollup). Everything autonomously possible is done: OFF-arm baseline measured,
+  precondition verified, canary installed, append confirmed default-on, turnkey
+  runbook above. The **ON arm is operator-driven** — it flips one config key and
+  restarts the foreground `draiver ctl up` (the operator's terminal), then runs
+  `drvctl-033` / `drvweb-013` N times; `draiver canary` reads the verdict.
