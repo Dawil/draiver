@@ -26,6 +26,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent/claudecode"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/gate"
+	"github.com/Dawil/draiver/internal/handbook"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/store"
@@ -1135,15 +1136,21 @@ func resolvePermPolicy(cfg config.Config, flagRules map[string]string) (gate.Pol
 }
 
 // resolvePromptCache resolves the drvctl-032 prompt-cache surface into the two
-// BaseSpec fields the adapter consumes. The append-prompt file is read ONCE here
-// so its text is byte-identical across every attempt this daemon brings up (the
-// prefix-sharing invariant); a named-but-unreadable file is a hard error rather
-// than a silently-empty prefix. When the exclude toggle is on it verifies the
-// pinned agent accepts the flag via supports and fails loud rather than launching
-// sessions without it (spec #5) — supports is a parameter so the check is testable
-// without a real claude on PATH. With both keys off (the default) it returns the
-// zero surface and never probes, keeping the launch byte-identical to today.
+// BaseSpec fields the adapter consumes. The append text defaults to draiver's
+// shipped invariant protocol (handbook.Content(), drvctl-034) so every session
+// carries it above the wall as a shared, cacheable prefix; append_system_prompt_file
+// overrides that with an operator's own file, and an override file that is empty
+// disables the append entirely. Whatever the source, the text is resolved ONCE
+// here so it is byte-identical across every attempt this daemon brings up (the
+// prefix-sharing invariant); a named-but-unreadable override file is a hard error
+// rather than a silently-empty prefix. When the exclude toggle is on it verifies
+// the pinned agent accepts the flag via supports and fails loud rather than
+// launching sessions without it (spec #5) — supports is a parameter so the check
+// is testable without a real claude on PATH. The exclude toggle still defaults off,
+// so an unconfigured daemon appends the protocol without stripping the wall (the
+// cross-ticket cache win is the opt-in exclude lever, docs/prompt-caching.md).
 func resolvePromptCache(cfg config.Config, supports func() (bool, error)) (exclude bool, appendPrompt string, err error) {
+	appendPrompt = handbook.Content()
 	if cfg.AppendSystemPromptFile != "" {
 		data, rerr := os.ReadFile(cfg.AppendSystemPromptFile)
 		if rerr != nil {

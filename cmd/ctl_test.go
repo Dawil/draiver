@@ -14,6 +14,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/handbook"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -792,9 +793,10 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// TestResolvePromptCache covers the drvctl-032 prompt-cache resolution: the
-// default is the byte-identical no-op (off, no probe), a named append file is
-// read into the prefix, a missing append file is a hard error, and the exclude
+// TestResolvePromptCache covers the prompt-cache resolution: the append defaults
+// to draiver's shipped protocol (drvctl-034) with the exclude toggle still off and
+// unprobed, a config file overrides the append verbatim, an empty override file
+// disables the append, a missing override file is a hard error, and the exclude
 // toggle fails loud when the agent lacks flag support but passes when it has it.
 func TestResolvePromptCache(t *testing.T) {
 	yes := func() (bool, error) { return true, nil }
@@ -802,16 +804,19 @@ func TestResolvePromptCache(t *testing.T) {
 	probed := false
 	spy := func() (bool, error) { probed = true; return true, nil }
 
-	// Default: both keys off → no probe, empty append, exclude false.
+	// Default: exclude off and unprobed, append defaults to the shipped protocol.
 	exclude, appendPrompt, err := resolvePromptCache(config.Config{}, spy)
-	if err != nil || exclude || appendPrompt != "" {
-		t.Fatalf("default: got exclude=%v append=%q err=%v, want false/\"\"/nil", exclude, appendPrompt, err)
+	if err != nil || exclude {
+		t.Fatalf("default: got exclude=%v err=%v, want false/nil", exclude, err)
+	}
+	if appendPrompt != handbook.Content() {
+		t.Errorf("default append = %q, want the shipped handbook protocol", appendPrompt)
 	}
 	if probed {
 		t.Errorf("default (toggle off) must not probe agent support")
 	}
 
-	// Append file read into the shared prefix, verbatim.
+	// A config file overrides the shipped protocol, read into the prefix verbatim.
 	pf := filepath.Join(t.TempDir(), "protocol.txt")
 	if err := os.WriteFile(pf, []byte("PROTOCOL ABOVE THE WALL\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -822,6 +827,15 @@ func TestResolvePromptCache(t *testing.T) {
 	}
 	if appendPrompt != "PROTOCOL ABOVE THE WALL\n" {
 		t.Errorf("append prompt = %q, want the file contents verbatim", appendPrompt)
+	}
+
+	// An empty override file disables the append (opt out of the shipped default).
+	empty := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, appendPrompt, err = resolvePromptCache(config.Config{AppendSystemPromptFile: empty}, no); err != nil || appendPrompt != "" {
+		t.Errorf("empty override: got append=%q err=%v, want \"\"/nil", appendPrompt, err)
 	}
 
 	// Named-but-missing append file is a hard error, not a silently-empty prefix.

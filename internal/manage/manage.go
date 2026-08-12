@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/handbook"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/worktree"
 )
@@ -124,7 +125,8 @@ func (h *Handle) Spawn(ctx context.Context) error {
 	}
 
 	a := h.newAdapter()
-	id, spawnErr := a.Spawn(ctx, h.spec(wt.Path))
+	sp := h.spec(wt.Path)
+	id, spawnErr := a.Spawn(ctx, sp)
 	ident := session.Identity{
 		Adapter:   h.cfg.Adapter,
 		Model:     h.cfg.Model,
@@ -132,6 +134,9 @@ func (h *Handle) Spawn(ctx context.Context) error {
 		PID:       pidOf(a),
 		Worktree:  wt.Path,
 		Started:   h.now(),
+		// Record the exact invariant protocol this session launched with, so the
+		// run's provenance pins it to that protocol text (drvctl-034).
+		ProtocolVersion: handbook.VersionOf(sp.SystemPromptAppend),
 	}
 	if spawnErr != nil {
 		// The id is allocated before the process is confirmed, so persist whatever
