@@ -23,6 +23,10 @@ const (
 	ExitEscalated = 3
 	// ExitAuditFailed signals a broken hash chain.
 	ExitAuditFailed = 4
+	// ExitCanaryFired signals the silent-invalidator canary found a busted shared
+	// prompt-cache prefix on at least one repo (drvctl-036). Distinct from a plain
+	// failure so a CI/cron loop can branch on "cache regressed" versus "errored".
+	ExitCanaryFired = 5
 )
 
 var (

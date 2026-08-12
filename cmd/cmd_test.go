@@ -45,6 +45,8 @@ func run(t *testing.T, args ...string) (string, int) {
 	inboxMine = false
 	ctlLogsFollow, ctlLogsJSON = false, false
 	ctlStatusAll = false
+	canaryRepo = ""
+	canaryMinPrefix, canaryReadFloor = 0, 0
 	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
 	mergeRemote = ""
 	t.Setenv("DRAIVER_ATTEMPT", "")
