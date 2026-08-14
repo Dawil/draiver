@@ -191,27 +191,39 @@ func LoadAll(root store.Root) ([]Attempt, error) {
 }
 
 func loadSpecMeta(specPath string) (SpecMeta, error) {
+	block, ok, err := specFrontmatter(specPath)
+	if err != nil || !ok {
+		return SpecMeta{}, err
+	}
+	var m SpecMeta
+	if err := yaml.Unmarshal([]byte(block), &m); err != nil {
+		return SpecMeta{}, fmt.Errorf("parse spec frontmatter: %w", err)
+	}
+	return m, nil
+}
+
+// specFrontmatter returns the YAML text between a spec.md's leading `---` fences.
+// ok is false (with a nil error) when the file is missing or opens straight into
+// prose with no frontmatter — the tolerant framing shared by every spec reader:
+// a doc without frontmatter simply carries no metadata, it is not an error.
+func specFrontmatter(specPath string) (block string, ok bool, err error) {
 	data, err := os.ReadFile(specPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return SpecMeta{}, nil
+			return "", false, nil
 		}
-		return SpecMeta{}, fmt.Errorf("read spec: %w", err)
+		return "", false, fmt.Errorf("read spec: %w", err)
 	}
 	s := string(data)
 	if !strings.HasPrefix(s, "---\n") {
-		return SpecMeta{}, nil
+		return "", false, nil
 	}
 	rest := s[len("---\n"):]
 	end := strings.Index(rest, "\n---")
 	if end < 0 {
-		return SpecMeta{}, nil
+		return "", false, nil
 	}
-	var m SpecMeta
-	if err := yaml.Unmarshal([]byte(rest[:end]), &m); err != nil {
-		return SpecMeta{}, fmt.Errorf("parse spec frontmatter: %w", err)
-	}
-	return m, nil
+	return rest[:end], true, nil
 }
 
 // RenderState renders the generated per-attempt state.md projection. It is a
