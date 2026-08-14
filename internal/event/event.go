@@ -37,8 +37,14 @@ type Event struct {
 	Refs      []int     `yaml:"refs,omitempty"`
 	Artefacts []string  `yaml:"artefacts,omitempty"`
 	Links     []Link    `yaml:"links,omitempty"`
-	Prev      string    `yaml:"prev"`
-	Hash      string    `yaml:"hash"`
+	// Outcome is an optional sentiment carried by an event whose type has more than
+	// one flavour — today only `archive` (accepted vs abandoned), so a board archive
+	// records whether a human accepted a finished attempt or abandoned an unfinished
+	// one without a second event type. It is omitempty, so every event that does not
+	// set it (all but archive) hashes and serialises exactly as before.
+	Outcome string `yaml:"outcome,omitempty"`
+	Prev    string `yaml:"prev"`
+	Hash    string `yaml:"hash"`
 
 	Body string `yaml:"-"`
 }
@@ -56,6 +62,7 @@ type hashable struct {
 	Refs      []int    `yaml:"refs,omitempty"`
 	Artefacts []string `yaml:"artefacts,omitempty"`
 	Links     []Link   `yaml:"links,omitempty"`
+	Outcome   string   `yaml:"outcome,omitempty"`
 	Prev      string   `yaml:"prev"`
 }
 
@@ -73,6 +80,7 @@ func (e Event) ComputeHash() string {
 		Refs:      e.Refs,
 		Artefacts: e.Artefacts,
 		Links:     e.Links,
+		Outcome:   e.Outcome,
 		Prev:      e.Prev,
 	}
 	front, err := yaml.Marshal(h)

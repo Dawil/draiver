@@ -72,6 +72,39 @@ func TestDeriveEnabled(t *testing.T) {
 	}
 }
 
+func TestDeriveArchived(t *testing.T) {
+	cases := []struct {
+		name   string
+		events []event.Event
+		want   bool
+	}{
+		{"default is un-archived", []event.Event{ev(1, "created")}, false},
+		{"empty is un-archived", nil, false},
+		{"archive takes it off the board", []event.Event{ev(1, "created"), ev(2, "archive")}, true},
+		{"unarchive after archive brings it back", []event.Event{ev(1, "created"), ev(2, "archive"), ev(3, "unarchive")}, false},
+		{"re-archive after unarchive", []event.Event{ev(1, "archive"), ev(2, "unarchive"), ev(3, "archive")}, true},
+		{"other events do not archive", []event.Event{ev(1, "created"), ev(2, "done"), ev(3, "enable")}, false},
+		{"last write wins", []event.Event{ev(1, "archive"), ev(2, "unarchive"), ev(3, "archive"), ev(4, "unarchive")}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DeriveArchived(c.events); got != c.want {
+				t.Errorf("DeriveArchived = %v want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestArchiveDoesNotChangeState: archive is board-membership, a separate axis; an
+// archive/unarchive event must never move an attempt off its lifecycle state. A
+// Done attempt stays Done when archived (its bit is orthogonal).
+func TestArchiveDoesNotChangeState(t *testing.T) {
+	events := []event.Event{ev(1, "created"), ev(2, "done"), ev(3, "archive"), ev(4, "unarchive")}
+	if got, _ := Derive(events); got != Done {
+		t.Errorf("state = %q want Done (archive/unarchive are not lifecycle)", got)
+	}
+}
+
 // TestEnableDisableDoNotChangeState: enablement is a separate axis; enable/disable
 // events must never move an attempt off Running.
 func TestEnableDisableDoNotChangeState(t *testing.T) {

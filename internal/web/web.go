@@ -11,11 +11,15 @@
 // green play button (POST /ticket/{id}/{attempt}/enable) opts a parked attempt
 // into daemon supervision; and the attempt's provenance panel (POST
 // /ticket/{id}/{attempt}/provenance) sets the repo/base that gate merge/sync, so a
-// human can unblock a base-less Review attempt from the UI. Each write shells the
-// same verb a human runs at a terminal (draiver log / draiver done / draiver
-// resolve / draiver ctl merge --remote / draiver ctl enable / draiver attempt set
-// — see runDraiverLog, runDraiverResolve, runDraiverMergeRemote, runDraiverEnable,
-// runDraiverAttemptSet), so there is a single code path per write.
+// human can unblock a base-less Review attempt from the UI; and the board card's
+// archive affordance (POST /ticket/{id}/{attempt}/archive) takes an attempt off the
+// board — a green tick to accept a Done card, a grey cross to abandon an active one.
+// Most writes shell the same verb a human runs at a terminal (draiver log / draiver
+// done / draiver resolve / draiver ctl merge --remote / draiver ctl enable / draiver
+// attempt set — see runDraiverLog, runDraiverResolve, runDraiverMergeRemote,
+// runDraiverEnable, runDraiverAttemptSet), so there is a single code path per write;
+// archive is the exception — it has no CLI verb, so handleArchive appends the
+// `archive` event via ticketlog.Append directly (the primitive those verbs share).
 package web
 
 import (
@@ -42,6 +46,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -246,6 +251,51 @@ func canEnable(a project.Attempt) bool {
 	return a.State == project.Running && !a.Enabled
 }
 
+// canArchive reports whether an attempt's card should show the archive affordance
+// (the tick/cross): any attempt still on the board, i.e. not already archived. An
+// archived attempt is emitted by no column (board() skips it), so in practice every
+// rendered card is archivable; the !Archived gate is the idempotency guard the
+// handler shares (handleArchive's no-op), matching canEnable — the button and the
+// effect never disagree about which cards write.
+func canArchive(a project.Attempt) bool {
+	return !a.Archived
+}
+
+// archiveVM drives the card's archive affordance and encodes its sentiment. The
+// glyph/colour is column-derived: a Done card accepts (green tick), an active card
+// (Running/Stuck/Review) closes (grey cross). It keeps the template logic-free —
+// the confirm copy, aria-label, colour class, and the Outcome the POST records are
+// all chosen here — and it is the single source the handler reuses to stamp the
+// event's Outcome, so the rendered sentiment and the recorded one cannot diverge.
+type archiveVM struct {
+	Outcome string // "accepted" (Done) | "abandoned" (active) — the event's sentiment
+	Class   string // colour-selection class: archive-accept | archive-close
+	Accept  bool   // true => tick (Done); false => cross (active columns)
+	Aria    string // aria-label — the action's meaning, not colour alone
+	Title   string // hover tooltip
+	Confirm string // hx-confirm copy, sentiment-specific
+}
+
+// archiveAction is the colour-selection + copy helper for the card's archive
+// button: green tick + accept copy for a Done card, grey cross + close copy for a
+// Running/Stuck/Review one. The colours themselves are not chosen here — the Class
+// maps to a CSS rule that pulls from the --dot-* palette custom properties (green
+// var(--dot-running), muted grey var(--dot-disabled)), so no hex is hand-typed.
+func archiveAction(a project.Attempt) archiveVM {
+	if a.State == project.Done {
+		return archiveVM{
+			Outcome: "accepted", Class: "archive-accept", Accept: true,
+			Aria: "accept and archive", Title: "Accept and archive",
+			Confirm: "Accept this attempt and archive it?",
+		}
+	}
+	return archiveVM{
+		Outcome: "abandoned", Class: "archive-close", Accept: false,
+		Aria: "archive attempt", Title: "Close and remove from board",
+		Confirm: "Close this attempt and remove it from the board?",
+	}
+}
+
 // linkVM is a hyperlink surfaced on a served page — a board-card review action or
 // a detail-timeline chip. Rel is the opaque, forge-neutral label (pr, mr, diff,
 // ci, …) used only to pick a primary and to label a chip; Href is the URL, always
@@ -400,16 +450,18 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	}
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
-			"stateLabel":  stateLabel,
-			"badge":       func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
-			"cardHref":    cardHref,
-			"canEnable":   canEnable,
-			"reviewLink":  reviewLink,
-			"provenance":  func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
-			"cachePanel":  cachePanel,
-			"cohortRow":   cohortRow,
-			"sessionDot":  s.sessionDot,
-			"paletteVars": paletteVars,
+			"stateLabel":    stateLabel,
+			"badge":         func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
+			"cardHref":      cardHref,
+			"canEnable":     canEnable,
+			"canArchive":    canArchive,
+			"archiveAction": archiveAction,
+			"reviewLink":    reviewLink,
+			"provenance":    func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
+			"cachePanel":    cachePanel,
+			"cohortRow":     cohortRow,
+			"sessionDot":    s.sessionDot,
+			"paletteVars":   paletteVars,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -429,12 +481,13 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum, Waratah))
 }
 
-// Handler returns the route mux. Every route is a GET but five writes: POST
+// Handler returns the route mux. Every route is a GET but six writes: POST
 // .../log appends a composed log event, POST .../resolve answers an open
 // escalation, POST .../enable opts an attempt into daemon supervision, POST
-// .../merge-remote closes a Review attempt landed by an external PR and pulls its
-// base (via `ctl merge --remote`), and POST .../provenance sets the repo/base that
-// gate merge/sync (via `attempt set`).
+// .../archive takes an attempt off the board (an `archive` event, accepted or
+// abandoned), POST .../merge-remote closes a Review attempt landed by an external
+// PR and pulls its base (via `ctl merge --remote`), and POST .../provenance sets
+// the repo/base that gate merge/sync (via `attempt set`).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -448,6 +501,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/merge-remote", s.handleMergeRemote)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
@@ -698,6 +752,11 @@ func (s *Server) board() (boardVM, error) {
 	}
 	var vm boardVM
 	for _, a := range attempts {
+		// An archived attempt lands in no column — that is the whole board effect of
+		// archive: the card stops being emitted (see DeriveArchived / handleArchive).
+		if a.Archived {
+			continue
+		}
 		switch a.State {
 		case project.Running:
 			vm.Running = append(vm.Running, a)
@@ -1092,6 +1151,77 @@ func (s *Server) runDraiverEnable(id, att string) error {
 		return fmt.Errorf("draiver ctl enable: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// handleArchive takes an attempt off the board (POST
+// /ticket/{id}/{attempt}/archive): the card's tick (Done → accepted) or cross
+// (active → abandoned) both post here, and the server derives the sentiment from
+// the attempt's current State so the client never chooses the outcome. Unlike the
+// other web writes it appends the `archive` event via ticketlog.Append directly —
+// the same primitive setEnabled uses, and the server already holds store.Root —
+// because there is no `draiver archive` CLI verb to shell (see decision #7). The
+// event carries the resolved board actor and an Outcome of accepted|abandoned, so
+// metrics can tell an accepted close from an abandoned one.
+//
+// It is idempotent like handleEnable: canArchive (!Archived) is the same gate the
+// button renders behind, so a re-POST racing the 3s board poll is a no-op that
+// still re-renders the board. Archive is orthogonal to lifecycle state — it does
+// not close or reopen the attempt, only removes it from board(); an `unarchive`
+// event (DeriveArchived, last-wins) brings it back. The response is the re-rendered
+// board region (board.html) so htmx swaps the card away in place and the column
+// counts update in the same swap; the same-origin guard matches the other writes.
+func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Only an on-board attempt writes; canArchive is the same gate the button renders
+	// behind, so a POST for an already-archived card (a double-submit) is a no-op that
+	// just re-renders the board. The sentiment is server-derived from State, never the
+	// posted form, via the same helper the card renders with.
+	if canArchive(a) {
+		act := archiveAction(a)
+		if _, err := ticketlog.Append(s.root, id, att, event.Event{
+			Type:    "archive",
+			Actor:   s.actor,
+			Outcome: act.Outcome,
+			Body:    archiveBody(act.Outcome),
+		}); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	// Re-render the whole board region: the archived card is gone (board() skips it)
+	// and the column counts reflect the removal in one htmx swap. Keep the favicon in
+	// sync like handleBoardPartial — archiving a Stuck card can change the variant.
+	vm, err := s.board()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	emitFaviconTrigger(w, vm)
+	s.render(w, "board.html", vm)
+}
+
+// archiveBody is the human-readable body stamped on an archive event, keyed off the
+// server-derived sentiment. The machine-readable truth is the event's Outcome
+// field; this is the prose a human reads on the timeline.
+func archiveBody(outcome string) string {
+	if outcome == "accepted" {
+		return "Accepted and archived from the board."
+	}
+	return "Closed and archived from the board."
 }
 
 // handleMergeRemote closes a Review attempt whose change landed via a PR merged

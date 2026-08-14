@@ -52,6 +52,7 @@ type Attempt struct {
 
 	State           State
 	Enabled         bool // opted into daemon supervision (see DeriveEnabled)
+	Archived        bool // taken off the board (see DeriveArchived)
 	Events          []event.Event
 	OpenEscalations []event.Event // escalations with no later resolution
 
@@ -138,6 +139,29 @@ func DeriveEnabled(events []event.Event) bool {
 	return enabled
 }
 
+// DeriveArchived reports whether an attempt has been taken off the board. Archive
+// is board-membership ("is this on my board"), a separate axis from the lifecycle
+// State — a finished Done attempt and an abandoned Running one are equally
+// archivable, and archiving neither closes nor reopens an attempt. It mirrors
+// DeriveEnabled exactly: the last archive/unarchive event wins and the default is
+// un-archived, so an `unarchive` brings a card back with nothing destroyed (the log
+// is immutable; only this derived bit flips). The sentiment of an archive — accepted
+// (a Done card's green tick) vs abandoned (an active card's grey cross) — rides on
+// the archive event's Outcome field, not on this bit: both are the same archive
+// axis, distinguished only for metrics.
+func DeriveArchived(events []event.Event) bool {
+	archived := false
+	for _, e := range events {
+		switch e.Type {
+		case "archive":
+			archived = true
+		case "unarchive":
+			archived = false
+		}
+	}
+	return archived
+}
+
 // LoadAttempt reads one attempt's log + provenance + the ticket spec identity and
 // derives its state.
 func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
@@ -161,7 +185,8 @@ func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
 	return Attempt{
 		Ticket: ticket, ID: id, Title: title, Assignee: spec.Assignee,
 		Tool: am.Tool, Model: am.Model, Repo: am.Repo, Base: am.Base,
-		State: state, Enabled: DeriveEnabled(events), Events: events, OpenEscalations: open,
+		State: state, Enabled: DeriveEnabled(events), Archived: DeriveArchived(events),
+		Events: events, OpenEscalations: open,
 		Metrics: am.Metrics,
 	}, nil
 }
