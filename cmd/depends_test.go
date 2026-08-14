@@ -120,6 +120,78 @@ func TestDependsPrependsFrontmatter(t *testing.T) {
 	}
 }
 
+// TestDependsSetReplaces pins that --set replaces a relation's whole set (adding
+// and removing in one edit) rather than unioning — the semantics the web editor
+// shells so a deleted id actually leaves the spec.
+func TestDependsSetReplaces(t *testing.T) {
+	dir := newTicket(t)
+	addTicket(t, dir, "PROJ-2")
+	addTicket(t, dir, "PROJ-3")
+
+	if _, code := run(t, "--data", dir, "depends", "PROJ-1", "--wants", "PROJ-2,PROJ-3"); code != 0 {
+		t.Fatal("setup edges failed")
+	}
+	// --set wants=PROJ-3 drops PROJ-2 and keeps PROJ-3: a true replace, not a union.
+	if _, code := run(t, "--data", dir, "depends", "--set", "PROJ-1", "--wants", "PROJ-3"); code != 0 {
+		t.Fatal("depends --set failed")
+	}
+	e, _ := project.LoadEdges(store.Root{Dir: dir}, "PROJ-1")
+	if strings.Join(e.Wants, ",") != "PROJ-3" {
+		t.Errorf("set wants = %v, want [PROJ-3]", e.Wants)
+	}
+}
+
+// TestDependsSetClearsAndLeavesUntouched pins that a blank --set value clears that
+// relation while an omitted relation is left exactly as it was.
+func TestDependsSetClearsAndLeavesUntouched(t *testing.T) {
+	dir := newTicket(t)
+	addTicket(t, dir, "PROJ-2")
+	addTicket(t, dir, "PROJ-3")
+
+	if _, code := run(t, "--data", dir, "depends", "PROJ-1",
+		"--wants", "PROJ-2", "--after", "PROJ-3"); code != 0 {
+		t.Fatal("setup edges failed")
+	}
+	// Clear wants (blank value), pass no --after: wants empties, after survives.
+	if _, code := run(t, "--data", dir, "depends", "--set", "PROJ-1", "--wants", ""); code != 0 {
+		t.Fatal("depends --set clear failed")
+	}
+	e, _ := project.LoadEdges(store.Root{Dir: dir}, "PROJ-1")
+	if len(e.Wants) != 0 {
+		t.Errorf("wants should be cleared, got %v", e.Wants)
+	}
+	if strings.Join(e.After, ",") != "PROJ-3" {
+		t.Errorf("untouched after should survive, got %v", e.After)
+	}
+}
+
+// TestDependsSetCycleRefused pins that --set is cycle-checked on the resulting set
+// and writes nothing when it would close a loop — the refusal the web surfaces.
+func TestDependsSetCycleRefused(t *testing.T) {
+	dir := newTicket(t)
+	addTicket(t, dir, "PROJ-2")
+
+	if _, code := run(t, "--data", dir, "depends", "PROJ-1", "--wants", "PROJ-2"); code != 0 {
+		t.Fatal("setup edge failed")
+	}
+	before := readSpec2(t, dir, "PROJ-2")
+	if _, code := run(t, "--data", dir, "depends", "--set", "PROJ-2", "--after", "PROJ-1"); code == 0 {
+		t.Fatal("expected nonzero exit for cycle under --set")
+	}
+	if readSpec2(t, dir, "PROJ-2") != before {
+		t.Error("a refused --set cycle must not rewrite the spec")
+	}
+}
+
+// TestDependsSetNothingToAuthor pins that --set with no relation flag is still an
+// error — the clear signal is a *passed* blank flag, not an empty invocation.
+func TestDependsSetNothingToAuthor(t *testing.T) {
+	dir := newTicket(t)
+	if _, code := run(t, "--data", dir, "depends", "--set", "PROJ-1"); code == 0 {
+		t.Fatal("expected nonzero exit for --set with no relation flag")
+	}
+}
+
 // readSpec2 reads an arbitrary ticket's spec.md under dir.
 func readSpec2(t *testing.T, dir, ticket string) string {
 	t.Helper()

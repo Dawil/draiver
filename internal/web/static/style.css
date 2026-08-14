@@ -222,6 +222,11 @@ body {
 .provenance-input::placeholder { color: var(--muted); opacity: .6; font-style: italic; }
 .provenance-saved { grid-column: 2; justify-self: start; font-size: 12px; color: var(--done); animation: provenance-fade 2.6s ease forwards; }
 @keyframes provenance-fade { 0%, 62% { opacity: 1; } 100% { opacity: 0; } }
+/* edges editor (drvweb-016): the provenance inline-edit table reused at ticket
+   level. Only the heading is new — a quiet label so the relations read as the
+   ticket's dependency edges on a page that has no spec context. */
+.edges { margin: 4px 0 24px; }
+.edges-heading { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 8px; }
 
 /* Prompt-cache panel: per-attempt caching telemetry (drvweb-012). Sits between the
    provenance table and the spec. The caching_active status is the headline; when

@@ -21,6 +21,13 @@
     <p class="tagline">{{.Title}} · {{len .Attempts}} attempt(s)</p>
   </header>
   <main class="detail" data-testid="attempt-index">
+    {{/* Ticket-level dependency-edge editor (drvweb-016): edges live in spec.md,
+         shared across every attempt, so the editor belongs on this index page, not
+         the per-attempt detail. It reuses the provenance inline-edit style/CSS —
+         each relation prefills as a comma-separated id list, edited in place and
+         saved on blur (outerHTML swap on #edges), a cycle/self-edge refusal shown
+         inline. */}}
+    {{template "edges-panel" .Edges}}
     <ol class="attempt-list">
       {{range .Attempts}}
       <li>
@@ -39,3 +46,41 @@
   </main>
 </body>
 </html>{{end}}
+
+{{/* edges-panel: the ticket-level dependency-edge editor, rendered on the index
+     page and again as the POST response (outerHTML on #edges). It mirrors the
+     provenance-panel exactly — a quiet key/value table where each value is an
+     input styled to read as plain text until focused, the enclosing form posting
+     on any child's change (a blur that altered the value) or Enter, so a whole-set
+     edit saves with no Save button. Each relation prefills as its comma-separated
+     id set; unlike provenance a blank field is a real edit (clear that relation),
+     because `depends --set` treats the panel as WYSIWYG. Each key carries an (i)
+     bubble explaining the relation's reconciler semantics. Error holds a self-edge
+     or cycle refusal — shown inline; the verb wrote nothing, so the fields keep the
+     values the human tried. Saved is set only on the successful-save response. */}}
+{{define "edges-panel"}}<section class="provenance edges" id="edges" data-testid="edges">
+  <h2 class="edges-heading">Dependencies</h2>
+  {{if .Error}}
+  <p class="provenance-callout" data-testid="edges-error" role="alert">{{.Error}}</p>
+  {{end}}
+  <form class="provenance-table" data-testid="edges-form"
+    hx-post="/ticket/{{.Ticket}}/edges"
+    hx-trigger="change, submit" hx-target="#edges" hx-swap="outerHTML">
+    <div class="provenance-row">
+      <span class="provenance-key">wants{{template "info-bubble" "Tickets this one pulls in: enabling this ticket enables them, and an escalation in one wakes this ticket. Comma-separated ids; blank to clear."}}</span>
+      <input type="text" name="wants" class="provenance-input" data-testid="edges-wants"
+        value="{{.Wants}}" placeholder="add ticket ids…" aria-label="wants" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="provenance-row">
+      <span class="provenance-key">after{{template "info-bubble" "Tickets this one is admitted after they reach Review. A soft gate — comma-separated ids; blank to clear."}}</span>
+      <input type="text" name="after" class="provenance-input" data-testid="edges-after"
+        value="{{.After}}" placeholder="add ticket ids…" aria-label="after" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="provenance-row">
+      <span class="provenance-key">requires{{template "info-bubble" "Tickets this one is admitted after they reach Done. A hard gate — comma-separated ids; blank to clear."}}</span>
+      <input type="text" name="requires" class="provenance-input" data-testid="edges-requires"
+        value="{{.Requires}}" placeholder="add ticket ids…" aria-label="requires" autocomplete="off" spellcheck="false">
+    </div>
+    {{if .Saved}}<span class="provenance-saved" data-testid="edges-saved" role="status">saved ✓</span>{{end}}
+  </form>
+</section>{{end}}
