@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -177,6 +178,33 @@ func (s *Server) runDraiverAttemptSet(id, att, repo, base string) error {
 	cmd := exec.Command(exe, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("draiver attempt set: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runDraiverEdges rewrites a ticket's dependency edges by invoking `draiver
+// depends --set` rather than writing spec.md from the web layer — the same
+// frontmatter-merge verb a human runs at a terminal (drvctl-037), so the board
+// and the CLI share one write path (see runDraiverAttemptSet). --set makes each
+// relation a whole-set replace: the panel is a WYSIWYG editor, so all three
+// relations are always passed (a blank one clears that relation). The verb owns
+// the self-edge and cycle refusal and writes nothing when it refuses; on a
+// nonzero exit this returns the CLI's combined output so the caller can surface
+// the refusal inline. No --actor: `depends` appends no hash-chained event (edges
+// are metadata outside the audited log), so there is nothing to attribute.
+func (s *Server) runDraiverEdges(id string, e project.Edges) error {
+	exe, err := draiverExe()
+	if err != nil {
+		return err
+	}
+	args := []string{"depends", "--set", "--data", s.root.Dir,
+		"--wants", strings.Join(e.Wants, ","),
+		"--after", strings.Join(e.After, ","),
+		"--requires", strings.Join(e.Requires, ","),
+		"--", id}
+	cmd := exec.Command(exe, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -495,6 +523,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /cache", s.handleCacheRollup)
 	mux.HandleFunc("GET /favicon-state", s.handleFaviconState)
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
+	mux.HandleFunc("POST /ticket/{id}/edges", s.handleEdges)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/agent-logs", s.handleAgentLogs)
@@ -624,6 +653,56 @@ type provenanceVM struct {
 	Saved   bool
 }
 
+// edgesVM drives the "edges-panel" partial: the dependency-edge editor on the
+// attempts-index page (GET /ticket/{id}). Unlike provenanceVM this is
+// ticket-level, not per-attempt — edges live in spec.md, shared across attempts.
+// Each relation prefills as a comma-joined id list the human edits in place; the
+// three fields are always posted together (a whole-set replace, see
+// runDraiverEdges). Saved is true only on a successful-save response so the panel
+// can confirm the write after an htmx swap. Error carries a self-edge or cycle
+// refusal to render inline — the verb wrote nothing, so the panel re-shows the
+// values the human tried and the reason they were rejected.
+type edgesVM struct {
+	Ticket   string
+	Wants    string
+	After    string
+	Requires string
+	Saved    bool
+	Error    string
+}
+
+// edgesPanel projects a ticket's authored edges into the editor view model,
+// joining each relation's id set into the single comma-separated string the
+// inline input prefills from.
+func edgesPanel(ticket string, e project.Edges) edgesVM {
+	return edgesVM{
+		Ticket:   ticket,
+		Wants:    strings.Join(e.Wants, ", "),
+		After:    strings.Join(e.After, ", "),
+		Requires: strings.Join(e.Requires, ", "),
+	}
+}
+
+// parseEdgeField splits one relation's free-text input (the human types
+// comma- or whitespace-separated ids) into a cleaned id list: trimmed, blanks
+// dropped, first-seen order preserved. It is deliberately lenient about the
+// separator so "a, b" and "a b\nc" both parse; the CLI re-validates on write.
+func parseEdgeField(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range fields {
+		if f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	return out
+}
+
 // cacheVM drives the "cache-panel" partial on the attempt detail page: the
 // per-attempt prompt-cache telemetry folded in from drvctl-031. It is a display
 // projection of agent.Metrics — every number is pre-formatted here so the
@@ -740,6 +819,9 @@ type indexVM struct {
 	Ticket   string
 	Title    string
 	Attempts []project.Attempt
+	// Edges is the ticket-level dependency-edge editor (drvweb-016) — spec.md is
+	// shared across attempts, so it lives on this page, not the per-attempt detail.
+	Edges edgesVM
 	// FaviconHref is the current board variant, server-rendered into the index
 	// page's <link rel="icon"> (see detailVM.FaviconHref).
 	FaviconHref string
@@ -847,6 +929,12 @@ func (s *Server) handleAttemptIndex(w http.ResponseWriter, r *http.Request) {
 		vm.Title = a.Title
 		vm.Attempts = append(vm.Attempts, a)
 	}
+	edges, err := project.LoadEdges(s.root, id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm.Edges = edgesPanel(id, edges)
 	s.render(w, "attempts.html", vm)
 }
 
@@ -1347,6 +1435,62 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "provenance-panel", provenanceVM{Attempt: a, Saved: true})
+}
+
+// handleEdges rewrites a ticket's dependency edges from the attempts-index page's
+// edge editor (POST /ticket/{id}/edges) — the ticket-level surface, since edges
+// live in spec.md and are shared across attempts (drvweb-016). It shells `draiver
+// depends --set` (runDraiverEdges), which owns the spec.md frontmatter write and
+// the self-edge/cycle refusal; the web layer never writes spec.md itself. The
+// editor is WYSIWYG: all three relations are posted every save, each free-text
+// field parsed into an id set, so an emptied field clears that relation. A cycle
+// or self-edge is surfaced inline — the panel re-renders (200) with the attempted
+// values and the refusal reason, and because the verb refuses before writing,
+// nothing changed on disk. On success it re-renders the panel with a confirmation.
+func (s *Server) handleEdges(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	if !s.root.Exists(id) {
+		http.NotFound(w, r)
+		return
+	}
+	want := project.Edges{
+		Wants:    parseEdgeField(r.FormValue("wants")),
+		After:    parseEdgeField(r.FormValue("after")),
+		Requires: parseEdgeField(r.FormValue("requires")),
+	}
+	if err := s.runDraiverEdges(id, want); err != nil {
+		// A refusal (self-edge/cycle) is user-facing, not a server fault: re-render
+		// the panel in place with the values the human tried and the reason, so the
+		// edit is not lost and the refusal reads inline. The verb wrote nothing.
+		vm := edgesVM{
+			Ticket:   id,
+			Wants:    strings.Join(want.Wants, ", "),
+			After:    strings.Join(want.After, ", "),
+			Requires: strings.Join(want.Requires, ", "),
+			Error:    refusalMessage(err),
+		}
+		s.render(w, "edges-panel", vm)
+		return
+	}
+	e, err := project.LoadEdges(s.root, id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm := edgesPanel(id, e)
+	vm.Saved = true
+	s.render(w, "edges-panel", vm)
+}
+
+// refusalMessage trims a shelled verb's error to the human-facing sentence: cobra
+// prefixes its RunE errors with "Error: " on stderr, which is noise once the text
+// is shown in the panel's own error row.
+func refusalMessage(err error) string {
+	return strings.TrimSpace(strings.TrimPrefix(err.Error(), "Error:"))
 }
 
 // handleResolve answers an open escalation from the attempt timeline (POST

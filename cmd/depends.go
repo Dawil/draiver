@@ -15,6 +15,7 @@ var (
 	dependsWants    []string
 	dependsAfter    []string
 	dependsRequires []string
+	dependsSet      bool
 )
 
 var dependsCmd = &cobra.Command{
@@ -27,11 +28,24 @@ var dependsCmd = &cobra.Command{
 		"Semantics (see docs/capabilities-and-supervision.md): wants = enable-" +
 		"propagation, after = gate on Review, requires = gate on Done. The three form " +
 		"a DAG; a self-edge or any edge that would close a cycle is refused with the " +
-		"offending path.",
+		"offending path.\n\n" +
+		"With --set, each relation you pass *replaces* its existing set rather than " +
+		"adding to it (a blank value clears that relation); relations you omit are left " +
+		"untouched. This is the whole-set edit the web UI shells.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
-		if len(dependsWants) == 0 && len(dependsAfter) == 0 && len(dependsRequires) == 0 {
+		// In --set mode a relation counts as touched when its flag was passed, even
+		// with a blank value (a deliberate "clear"); in the default add mode a flag
+		// only matters when it carries ids. Either way at least one relation must be
+		// named, or there is nothing to write.
+		touched := func(name string, vals []string) bool {
+			if dependsSet {
+				return cmd.Flags().Changed(name)
+			}
+			return len(vals) > 0
+		}
+		if !touched("wants", dependsWants) && !touched("after", dependsAfter) && !touched("requires", dependsRequires) {
 			return fmt.Errorf("nothing to author: pass at least one of --wants/--after/--requires")
 		}
 		root, err := resolveRoot()
@@ -59,10 +73,23 @@ var dependsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// pick resolves one relation's final set: in --set mode a passed flag
+		// replaces (its cleaned values, possibly empty) while an omitted flag keeps
+		// the existing set; in the default mode every flag unions into the existing
+		// set. cleanIDs and unionIDs share the trim/dedup/order discipline.
+		pick := func(name string, existingVals, flagVals []string) []string {
+			if dependsSet {
+				if cmd.Flags().Changed(name) {
+					return cleanIDs(flagVals)
+				}
+				return existingVals
+			}
+			return unionIDs(existingVals, flagVals)
+		}
 		merged := project.Edges{
-			Wants:    unionIDs(existing.Wants, dependsWants),
-			After:    unionIDs(existing.After, dependsAfter),
-			Requires: unionIDs(existing.Requires, dependsRequires),
+			Wants:    pick("wants", existing.Wants, dependsWants),
+			After:    pick("after", existing.After, dependsAfter),
+			Requires: pick("requires", existing.Requires, dependsRequires),
 		}
 
 		// Build the graph the edit *would* produce — every other ticket's edges as
@@ -85,13 +112,13 @@ var dependsCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("read spec: %w", err)
 		}
-		if len(dependsWants) > 0 {
+		if touched("wants", dependsWants) {
 			data = injectListField(data, "wants", merged.Wants)
 		}
-		if len(dependsAfter) > 0 {
+		if touched("after", dependsAfter) {
 			data = injectListField(data, "after", merged.After)
 		}
-		if len(dependsRequires) > 0 {
+		if touched("requires", dependsRequires) {
 			data = injectListField(data, "requires", merged.Requires)
 		}
 		if err := os.WriteFile(specPath, data, 0o644); err != nil {
@@ -121,6 +148,14 @@ func unionIDs(existing, add []string) []string {
 		}
 	}
 	return out
+}
+
+// cleanIDs trims whitespace and drops blanks and duplicates from a single group,
+// preserving first-seen order — the replace-mode counterpart to unionIDs (which
+// is cleanIDs over two groups). An all-blank input yields an empty slice, the
+// "clear this relation" signal.
+func cleanIDs(vals []string) []string {
+	return unionIDs(nil, vals)
 }
 
 func fmtList(v []string) string {
@@ -217,5 +252,6 @@ func init() {
 	dependsCmd.Flags().StringSliceVar(&dependsWants, "wants", nil, "ticket ids this ticket wants (enable-propagation); repeatable, comma-separated")
 	dependsCmd.Flags().StringSliceVar(&dependsAfter, "after", nil, "ticket ids to admit after they reach Review; repeatable, comma-separated")
 	dependsCmd.Flags().StringSliceVar(&dependsRequires, "requires", nil, "ticket ids to admit after they reach Done; repeatable, comma-separated")
+	dependsCmd.Flags().BoolVar(&dependsSet, "set", false, "replace each given relation's set instead of adding to it (a blank value clears that relation); the whole-set edit the web UI shells")
 	rootCmd.AddCommand(dependsCmd)
 }
