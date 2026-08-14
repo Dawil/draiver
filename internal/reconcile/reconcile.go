@@ -517,33 +517,9 @@ func (r *Reconciler) propagateWants(all []project.Attempt, out map[worktree.Key]
 		return err
 	}
 
-	// Transitive closure over `wants:` from every source ticket. The authoring seam
-	// refuses cycles (drvctl-037), but the `seen` guard keeps a hand-edited cyclic
-	// spec from spinning here regardless. Sources are seeded into the frontier so
-	// their edges are traversed (reaching grand-children) even though the sources
-	// themselves are already desired; only *non*-source reachable tickets become
-	// wanted children to resolve.
-	seen := map[string]bool{}
-	var frontier []string
-	for t := range sources {
-		seen[t] = true
-		frontier = append(frontier, t)
-	}
-	wanted := map[string]bool{}
-	for len(frontier) > 0 {
-		t := frontier[0]
-		frontier = frontier[1:]
-		for _, child := range edges[t].Wants {
-			if seen[child] {
-				continue
-			}
-			seen[child] = true
-			frontier = append(frontier, child)
-			if !sources[child] {
-				wanted[child] = true
-			}
-		}
-	}
+	// Transitive closure over `wants:` from every source ticket — shared with the
+	// project-tier desired/Pending projection so both agree on who is pulled in.
+	wanted := project.WantsClosure(sources, edges)
 
 	// Resolve each wanted child to a target attempt, in a stable order so any mint
 	// and any operational log line is deterministic across ticks.

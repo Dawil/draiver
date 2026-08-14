@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
 )
 
@@ -27,6 +28,82 @@ func TestStatusWritesStateAndBoard(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "state: Needs me") {
 		t.Errorf("state.md wrong:\n%s", data)
+	}
+}
+
+// TestStatusPendingCount drives the Pending projection end to end: an enabled
+// attempt with no live agent counts as Pending; giving it a live session flips it
+// to Running; an escalation makes it Needs-me — never Pending.
+func TestStatusPendingCount(t *testing.T) {
+	dir := newTicket(t) // PROJ-1/0001 — Running, disabled by default
+	root := store.Root{Dir: dir}
+
+	// Disabled + Running + no agent is plain Running, not Pending: being in Running
+	// is not consent to supervise.
+	out, code := run(t, "--data", dir, "status")
+	if code != 0 {
+		t.Fatalf("status exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "Running: 1") || !strings.Contains(out, "Pending: 0") {
+		t.Errorf("disabled Running should be Running, not Pending:\n%s", out)
+	}
+
+	// Enable it: now enabled + Running + no live agent = Pending (the enabled-via-
+	// parent-but-not-yet-admitted case).
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "ctl", "enable", "PROJ-1@0001"); code != 0 {
+		t.Fatal("enable failed")
+	}
+	out, _ = run(t, "--data", dir, "status")
+	if !strings.Contains(out, "Running: 0") || !strings.Contains(out, "Pending: 1") {
+		t.Errorf("enabled Running with no agent should be Pending:\n%s", out)
+	}
+
+	// A live agent session flips it back to Running. Record session.json with this
+	// test process's pid — a definitely-live process.
+	s, err := session.Open(root, "PROJ-1", "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteIdentity(session.Identity{Adapter: "claude-code", PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	out, _ = run(t, "--data", dir, "status")
+	if !strings.Contains(out, "Running: 1") || !strings.Contains(out, "Pending: 0") {
+		t.Errorf("a live agent should be Running, not Pending:\n%s", out)
+	}
+
+	// An escalation outranks everything: Needs-me, never Pending — even though the
+	// live pid is now gone (identity still on disk, but we escalate, and an open
+	// escalation is Needs-me by the log alone).
+	run(t, "--data", dir, "--actor", "agent:x", "escalate", "PROJ-1", "blocked") // exits 3 by protocol
+	out, _ = run(t, "--data", dir, "status")
+	if !strings.Contains(out, "Needs me: 1") || !strings.Contains(out, "Pending: 0") {
+		t.Errorf("an escalated attempt should be Needs-me, not Pending:\n%s", out)
+	}
+}
+
+// TestStatusPendingViaParent is acceptance #1 end to end: a child pulled into the
+// fleet only because an enabled parent `wants:` it — with no `enable` event of its
+// own — still derives Pending in `status`.
+func TestStatusPendingViaParent(t *testing.T) {
+	dir := t.TempDir()
+	run(t, "--data", dir, "--actor", "human:test", "new", "CAP", "--title", "Cap", "--repo", dir)
+	run(t, "--data", dir, "--actor", "human:test", "new", "CHILD", "--title", "Child", "--repo", dir)
+	run(t, "--data", dir, "--actor", "human:test", "depends", "CAP", "--wants", "CHILD")
+	// Enable only the parent. The child has no enable event of its own.
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "ctl", "enable", "CAP@0001"); code != 0 {
+		t.Fatal("enable CAP failed")
+	}
+
+	out, code := run(t, "--data", dir, "status")
+	if code != 0 {
+		t.Fatalf("status exited %d: %s", code, out)
+	}
+	// Both the enabled parent and its via-parent child are desired, Running, and
+	// have no live agent: Pending: 2.
+	if !strings.Contains(out, "Pending: 2") || !strings.Contains(out, "Running: 0") {
+		t.Errorf("enabled parent + via-parent child should both be Pending:\n%s", out)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
 )
 
@@ -31,9 +32,31 @@ var statusCmd = &cobra.Command{
 				return err
 			}
 		}
-		printBoard(cmd, attempts)
+		// Desiredness (for the Pending projection) must be computed over the whole
+		// fleet + all edges even when the board is filtered to one ticket, since a
+		// desired parent pulling a child in via `wants:` may live under another ticket.
+		desired, err := computeDesired(root)
+		if err != nil {
+			return err
+		}
+		printBoard(cmd, root, attempts, desired)
 		return nil
 	},
+}
+
+// computeDesired derives the declaratively-desired attempt set across the whole
+// root — the read-side of who the daemon would supervise (direct enable + enabled-
+// via-parent down `wants:`). It is the "desired" input to the Pending projection.
+func computeDesired(root store.Root) (map[project.Ref]bool, error) {
+	all, err := project.LoadAll(root)
+	if err != nil {
+		return nil, err
+	}
+	edges, err := project.LoadAllEdges(root)
+	if err != nil {
+		return nil, err
+	}
+	return project.DeriveDesired(all, edges), nil
 }
 
 // gatherAttempts returns the attempts a status run covers: a single attempt when
@@ -83,14 +106,23 @@ func writeState(root store.Root, a project.Attempt, now time.Time) error {
 	return nil
 }
 
-func printBoard(cmd *cobra.Command, attempts []project.Attempt) {
+func printBoard(cmd *cobra.Command, root store.Root, attempts []project.Attempt, desired map[project.Ref]bool) {
 	out := cmd.OutOrStdout()
-	var running, done int
+	var running, pending, done int
 	var needsMe, review []project.Attempt
 	for _, a := range attempts {
-		switch a.State {
+		// Pending is a read-time projection: a desired, log-Running attempt with no
+		// live agent is waiting on a gate/activation, not working. Fill the runtime
+		// bits here — desiredness from the fleet-wide set, liveness from the session
+		// pid probe — rather than in the log-pure loader, so the count reflects the
+		// fleet's real state at status time.
+		a.Desired = desired[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
+		a.Live = session.Alive(root, a.Ticket, a.ID)
+		switch a.Control() {
 		case project.Running:
 			running++
+		case project.Pending:
+			pending++
 		case project.Done:
 			done++
 		case project.NeedsMe:
@@ -99,8 +131,8 @@ func printBoard(cmd *cobra.Command, attempts []project.Attempt) {
 			review = append(review, a)
 		}
 	}
-	fmt.Fprintf(out, "Running: %d   Needs me: %d   Review: %d   Done: %d\n",
-		running, len(needsMe), len(review), done)
+	fmt.Fprintf(out, "Running: %d   Pending: %d   Needs me: %d   Review: %d   Done: %d\n",
+		running, pending, len(needsMe), len(review), done)
 	for _, a := range needsMe {
 		fmt.Fprintf(out, "  [Needs me] %s/%s — %s (%d open)\n", a.Ticket, a.ID, a.Title, len(a.OpenEscalations))
 	}
