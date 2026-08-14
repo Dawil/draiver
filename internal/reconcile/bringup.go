@@ -104,7 +104,10 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		Ticket:  a.Ticket,
 		Attempt: a.ID,
 		Adapter: adapterName,
-		Model:   a.Model,
+		// Pin the adapter version resolved once at daemon start into every session's
+		// provenance (drvctl-033); empty when the version probe couldn't run.
+		AdapterVersion: r.opt.AdapterVersion,
+		Model:          a.Model,
 		// Cut the attempt's branch from its recorded base so a fresh land is a clean
 		// fast-forward (base is an ancestor by construction). Empty for a legacy
 		// attempt that recorded no base, which falls back to HEAD as before

@@ -46,12 +46,13 @@ func TestOpenRejectsMissingAttempt(t *testing.T) {
 func TestIdentityRoundTrips(t *testing.T) {
 	_, _, _, s := newAttempt(t)
 	want := Identity{
-		Adapter:   "claude-code",
-		Model:     "opus-4.8",
-		SessionID: "sess-abc123",
-		PID:       4242,
-		Worktree:  "/tmp/wt/PROJ-1-0001",
-		Started:   time.Date(2026, 8, 4, 9, 0, 0, 0, time.UTC),
+		Adapter:        "claude-code",
+		AdapterVersion: "2.1.216",
+		Model:          "opus-4.8",
+		SessionID:      "sess-abc123",
+		PID:            4242,
+		Worktree:       "/tmp/wt/PROJ-1-0001",
+		Started:        time.Date(2026, 8, 4, 9, 0, 0, 0, time.UTC),
 	}
 	if err := s.WriteIdentity(want); err != nil {
 		t.Fatal(err)

@@ -185,6 +185,52 @@ func TestWriteMetaRoundTripsMetrics(t *testing.T) {
 	}
 }
 
+// TestWriteMetaRoundTripsAdapterVersion pins the drvctl-033 provenance fold: the
+// pinned adapter version renders as a frontmatter line and reads straight back,
+// and an unset version renders nothing (machine-written on retire, no placeholder).
+func TestWriteMetaRoundTripsAdapterVersion(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "human:x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unset → no line.
+	base, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(base), "adapter_version") {
+		t.Errorf("unset adapter_version should render nothing:\n%s", base)
+	}
+
+	m, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.AdapterVersion = "2.1.216"
+	if err := WriteMeta(root, m); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(root.AttemptMetaPath(id, "0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "adapter_version: 2.1.216") {
+		t.Errorf("adapter_version line missing:\n%s", data)
+	}
+	back, err := LoadMeta(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.AdapterVersion != "2.1.216" {
+		t.Errorf("adapter_version round-trip = %q, want %q", back.AdapterVersion, "2.1.216")
+	}
+}
+
 // TestLoadMetaRecomputesDerivedMetricsFromRaw pins the drvweb-018 follow-up fix:
 // an attempt.md written before the derived cache metrics existed carries only the
 // raw token fields, so LoadMeta must recompute the derived view from those raw

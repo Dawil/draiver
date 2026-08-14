@@ -157,11 +157,21 @@ func loadFirstTurn(root store.Root, ticket, attempt string) (agent.Usage, bool) 
 	return agent.Usage{}, false
 }
 
-// adapterVersion reads the pinned adapter version recorded for the attempt. The
-// drvctl-033 version event is not yet implemented, so today session.Identity
-// carries no version and this returns "" — which the analysis reports as
-// "unattributable" rather than treating as a match. This is the seam that lights
-// up once drvctl-033 records the version.
+// adapterVersion reads the pinned adapter version recorded for the attempt in
+// session.json (drvctl-033), so the analysis can attribute a busted turn-1 prefix
+// to an operator-driven adapter upgrade. It reads the file directly rather than
+// via session.Open, keeping the canary strictly read-only (no session dir is
+// materialised). A missing/unparseable identity, or one predating the field,
+// reads as "" — which the analysis reports as "unattributable" rather than
+// treating as a match.
 func adapterVersion(root store.Root, ticket, attempt string) string {
-	return ""
+	data, err := os.ReadFile(root.SessionMetaPath(ticket, attempt))
+	if err != nil {
+		return ""
+	}
+	var id session.Identity
+	if err := json.Unmarshal(data, &id); err != nil {
+		return ""
+	}
+	return id.AdapterVersion
 }

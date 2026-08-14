@@ -133,7 +133,9 @@ the subscription default silently degrades.
 ```go
 BaseSpec: agent.SessionSpec{
     ...
-    Env: []string{"ENABLE_PROMPT_CACHING_1H=1"},
+    // DISABLE_AUTOUPDATER=1 pins the adapter version for the session (drvctl-033),
+    // so a background upgrade cannot rewrite the tools/system prefix mid-fleet.
+    Env: []string{"ENABLE_PROMPT_CACHING_1H=1", "DISABLE_AUTOUPDATER=1"},
 },
 ```
 

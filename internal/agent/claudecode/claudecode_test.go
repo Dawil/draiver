@@ -255,6 +255,26 @@ func TestSupportsExcludeDynamicSystemPrompt(t *testing.T) {
 	}
 }
 
+// TestVersion drives the adapter-version probe (drvctl-033) against fake `claude`
+// binaries: a decorated "2.1.216 (Claude Code)" line reduces to the bare version
+// token, a plain version prints as-is, and a missing binary is a probe error (so
+// the daemon records an empty version rather than a bogus one).
+func TestVersion(t *testing.T) {
+	decorated := fakeClaude(t, "2.1.216 (Claude Code)\n")
+	if v, err := Version(context.Background(), decorated); err != nil || v != "2.1.216" {
+		t.Errorf("decorated version: got %q err=%v, want %q nil", v, err, "2.1.216")
+	}
+
+	plain := fakeClaude(t, "3.0.0\n")
+	if v, err := Version(context.Background(), plain); err != nil || v != "3.0.0" {
+		t.Errorf("plain version: got %q err=%v, want %q nil", v, err, "3.0.0")
+	}
+
+	if _, err := Version(context.Background(), filepath.Join(t.TempDir(), "no-such-claude")); err == nil {
+		t.Errorf("missing binary: want a probe error, got nil")
+	}
+}
+
 // fakeClaude writes an executable that prints help to stdout and exits 0.
 func fakeClaude(t *testing.T, help string) string {
 	t.Helper()

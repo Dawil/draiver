@@ -47,6 +47,12 @@ type Config struct {
 	// factory.
 	Adapter string
 
+	// AdapterVersion is the version string of the adapter binary (e.g. "2.1.216"),
+	// resolved once at daemon start and pinned for the session's lifetime. It is
+	// recorded in session.json at spawn as provenance for attributing prompt-cache
+	// prefix busts to adapter upgrades (drvctl-033). Empty when unknown.
+	AdapterVersion string
+
 	// Model is an optional model id, recorded in session.json and used as the
 	// spec's Model when Spec.Model is empty.
 	Model string
@@ -137,6 +143,9 @@ func (h *Handle) Spawn(ctx context.Context) error {
 		// Record the exact invariant protocol this session launched with, so the
 		// run's provenance pins it to that protocol text (drvctl-034).
 		ProtocolVersion: handbook.VersionOf(sp.SystemPromptAppend),
+		// Pin the adapter binary version this session launched against, so a later
+		// prompt-cache prefix bust is attributable to an operator upgrade (drvctl-033).
+		AdapterVersion: h.cfg.AdapterVersion,
 	}
 	if spawnErr != nil {
 		// The id is allocated before the process is confirmed, so persist whatever

@@ -189,10 +189,11 @@ func newFixture(t *testing.T) (*session.Store, *worktree.Manager, string, string
 func newHandle(t *testing.T, sess *session.Store, wm *worktree.Manager, f *factory, ticket, att string) *manage.Handle {
 	t.Helper()
 	h, err := manage.New(sess, wm, f.new, manage.Config{
-		Ticket:  ticket,
-		Attempt: att,
-		Adapter: "claude-code",
-		Model:   "opus-4.8",
+		Ticket:         ticket,
+		Attempt:        att,
+		Adapter:        "claude-code",
+		AdapterVersion: "2.1.216",
+		Model:          "opus-4.8",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -386,6 +387,43 @@ func TestSpawnPersistsHandleOnFailure(t *testing.T) {
 	}
 	if id.SessionID != "sess-partial" {
 		t.Fatalf("cattle handle not persisted on failure: got %q", id.SessionID)
+	}
+}
+
+// TestSpawnRecordsAdapterVersion: the configured adapter version is stamped into
+// session.json at spawn (drvctl-033 provenance) and, because it is pinned for the
+// session's lifetime, survives a kill+resume unchanged.
+func TestSpawnRecordsAdapterVersion(t *testing.T) {
+	ctx := context.Background()
+	sess, wm, ticket, att := newFixture(t)
+	f := &factory{}
+	h := newHandle(t, sess, wm, f, ticket, att) // newHandle configures version "2.1.216"
+
+	if err := h.Spawn(ctx); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	id, err := h.Identity()
+	if err != nil {
+		t.Fatalf("Identity after spawn: %v", err)
+	}
+	if id.AdapterVersion != "2.1.216" {
+		t.Fatalf("adapter version = %q, want %q", id.AdapterVersion, "2.1.216")
+	}
+
+	// The pin holds across the cattle loop: kill drops the pid but keeps the version.
+	if err := h.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if err := h.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	defer h.Kill()
+	id2, err := h.Identity()
+	if err != nil {
+		t.Fatalf("Identity after resume: %v", err)
+	}
+	if id2.AdapterVersion != "2.1.216" {
+		t.Fatalf("adapter version after resume = %q, want it pinned at %q", id2.AdapterVersion, "2.1.216")
 	}
 }
 
