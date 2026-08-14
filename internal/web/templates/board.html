@@ -22,13 +22,15 @@
 </div>
 {{end}}
 
-{{/* A card is a single link (cardHref) for the whole tile. Two optional siblings
-     sit over the tile inside .card-wrap (neither can nest in the card <a>): a
-     Running-not-yet-enabled attempt's green play button, which posts the enable
-     without also following the card's href (handleEnable answers with this same
-     template, so the htmx swap drops the button and reflows the session-dot in
-     place); and, on Review-column cards with a scheme-checked review link, an
-     external "Review changes" action (see reviewLink). */}}
+{{/* A card is a single link (cardHref) for the whole tile. Its top-right corner
+     holds a .card-actions cluster of siblings that must NOT nest in the card <a>:
+     a Running-not-yet-enabled attempt's green play button (posts the enable and
+     swaps the card in place via handleEnable), and the always-present archive
+     affordance — a green tick on a Done card (accept) or a hover-revealed grey
+     cross on an active card (close), which confirms then POSTs .../archive to take
+     the attempt off the board (handleArchive re-renders the board region so the
+     card swaps away). A bottom-corner external "Review changes" action appears on
+     Review-column cards with a scheme-checked review link (see reviewLink). */}}
 {{define "card"}}{{$a := .}}
 <div class="card-wrap" data-testid="card-{{.Ticket}}-{{.ID}}">
   <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
@@ -40,15 +42,29 @@
       {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
     </span>
   </a>
-  {{if canEnable .}}
-  <form class="enable-form" method="post" action="/ticket/{{.Ticket}}/{{.ID}}/enable"
-        hx-post="/ticket/{{.Ticket}}/{{.ID}}/enable" hx-target="closest .card-wrap" hx-swap="outerHTML">
-    <button type="submit" class="enable-btn" data-testid="enable-btn-{{.Ticket}}-{{.ID}}"
-            aria-label="enable supervision" title="Enable supervision">
-      <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>
-    </button>
-  </form>
-  {{end}}
+  <div class="card-actions">
+    {{if canEnable .}}
+    <form class="enable-form" method="post" action="/ticket/{{.Ticket}}/{{.ID}}/enable"
+          hx-post="/ticket/{{.Ticket}}/{{.ID}}/enable" hx-target="closest .card-wrap" hx-swap="outerHTML">
+      <button type="submit" class="enable-btn" data-testid="enable-btn-{{.Ticket}}-{{.ID}}"
+              aria-label="enable supervision" title="Enable supervision">
+        <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4 3l9 5-9 5z" fill="currentColor"/></svg>
+      </button>
+    </form>
+    {{end}}
+    {{if canArchive .}}{{with archiveAction $a}}
+    <form class="archive-form" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/archive"
+          hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/archive" hx-target="#board-region" hx-swap="innerHTML"
+          hx-confirm="{{.Confirm}}">
+      <button type="submit" class="archive-btn {{.Class}}"
+              data-testid="archive-btn-{{$a.Ticket}}-{{$a.ID}}" data-outcome="{{.Outcome}}"
+              aria-label="{{.Aria}}" title="{{.Title}}">
+        {{if .Accept}}<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        {{else}}<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>{{end}}
+      </button>
+    </form>
+    {{end}}{{end}}
+  </div>
   {{with reviewLink $a}}<a class="card-review" data-testid="review-link-{{$a.Ticket}}-{{$a.ID}}" href="{{.Href}}" target="_blank" rel="noopener noreferrer">Review changes ↗</a>{{end}}
 </div>
 {{end}}

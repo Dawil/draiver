@@ -715,6 +715,234 @@ func enableEvents(t *testing.T, root store.Root, id, att string) []event.Event {
 	return out
 }
 
+// seedColumns builds one attempt in each of the four columns — Running, Stuck,
+// Review, Done — so an archive test can assert the tick renders only for Done and
+// the cross for the three active columns.
+func seedColumns(t *testing.T) store.Root {
+	t.Helper()
+	root := store.Root{Dir: t.TempDir()}
+	mk := func(id string, extra ...event.Event) {
+		if err := root.EnsureAttemptDirs(id, "0001"); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: "+id+"\n---\n\nspec"), 0o644)
+		if _, err := ticketlog.Append(root, id, "0001", event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range extra {
+			if _, err := ticketlog.Append(root, id, "0001", e); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mk("RUN-1")                                                         // Running
+	mk("STK-1", event.Event{Type: "escalation", Actor: "a", Body: "?"}) // Stuck
+	mk("REV-1", event.Event{Type: "review", Actor: "a", Body: "done"})  // Review
+	mk("DON-1", event.Event{Type: "done", Actor: "a", Body: "shipped"}) // Done
+	return root
+}
+
+// archiveEvents returns an attempt's archive/unarchive events, for asserting the
+// write landed exactly once and carries the right actor and sentiment.
+func archiveEvents(t *testing.T, root store.Root, id, att string) []event.Event {
+	t.Helper()
+	events, err := ticketlog.Read(root, id, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []event.Event
+	for _, e := range events {
+		if e.Type == "archive" || e.Type == "unarchive" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestArchiveGlyphPerColumn pins that a hovered Done card shows a green tick
+// (accept) while a Running/Stuck/Review card shows a grey cross (close): the button
+// renders on every column with the column-derived sentiment, and the hover-reveal
+// (hidden until :hover/:focus-within) is enforced by a CSS rule so neither glyph is
+// visible at rest.
+func TestArchiveGlyphPerColumn(t *testing.T) {
+	h := newServerOver(t, seedColumns(t))
+	board := get(t, h, "/board").Body.String()
+
+	// Every card carries an archive button.
+	for _, id := range []string{"RUN-1", "STK-1", "REV-1", "DON-1"} {
+		if !strings.Contains(board, `data-testid="archive-btn-`+id+`-0001"`) {
+			t.Errorf("card %s missing archive button", id)
+		}
+	}
+	// Done accepts (green tick); the three active columns close (grey cross). The
+	// sentiment is data-outcome + the colour-selection class + the aria-label.
+	if !strings.Contains(board, `data-testid="archive-btn-DON-1-0001" data-outcome="accepted"`) {
+		t.Errorf("Done card should show the accept (tick) affordance:\n%s", board)
+	}
+	for _, want := range []string{"archive-accept", `aria-label="accept and archive"`} {
+		if !strings.Contains(board, want) {
+			t.Errorf("Done card archive button should carry %q", want)
+		}
+	}
+	for _, id := range []string{"RUN-1", "STK-1", "REV-1"} {
+		want := `data-testid="archive-btn-` + id + `-0001" data-outcome="abandoned"`
+		if !strings.Contains(board, want) {
+			t.Errorf("active card %s should show the close (cross) affordance:\n%s", id, board)
+		}
+	}
+	if !strings.Contains(board, `aria-label="archive attempt"`) {
+		t.Errorf("active cards should carry the 'archive attempt' aria-label")
+	}
+	// Clicking confirms before it writes (hx-confirm), with sentiment-specific copy.
+	for _, want := range []string{
+		`hx-confirm="Accept this attempt and archive it?"`,
+		`hx-confirm="Close this attempt and remove it from the board?"`,
+	} {
+		if !strings.Contains(board, want) {
+			t.Errorf("archive action missing confirmation copy %q", want)
+		}
+	}
+	// A Done card must not carry the abandoned sentiment, nor an active card the
+	// accepted one.
+	if strings.Contains(board, `data-testid="archive-btn-DON-1-0001" data-outcome="abandoned"`) {
+		t.Errorf("Done card must not show the abandoned (cross) sentiment")
+	}
+	if strings.Contains(board, `data-testid="archive-btn-RUN-1-0001" data-outcome="accepted"`) {
+		t.Errorf("Running card must not show the accepted (tick) sentiment")
+	}
+
+	// The hover-reveal is a tested contract, not incidental: the button is hidden at
+	// rest and revealed on card hover/focus (colour is not the only signal — it also
+	// has an aria-label, asserted above).
+	css := get(t, h, "/static/style.css").Body.String()
+	for _, want := range []string{
+		".archive-form { margin: 0; opacity: 0;",
+		".card-wrap:hover .archive-form",
+		".card-wrap:focus-within .archive-form",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("style.css missing archive hover-reveal rule %q", want)
+		}
+	}
+}
+
+// TestArchivePostRemovesCardAndAppendsEvent pins the write: POSTing the archive
+// route appends exactly one `archive` event with the column-derived Outcome,
+// attributed to the resolved actor, and returns the re-rendered board region with
+// the card gone (htmx swaps it away). It covers both sentiments (an active close
+// and a Done accept) and idempotency (a re-POST is a no-op).
+func TestArchivePostRemovesCardAndAppendsEvent(t *testing.T) {
+	root := seedColumns(t)
+	h := newServerOver(t, root)
+
+	// Active card → abandoned. The response is the board partial without the card.
+	rr := post(t, h, "/ticket/RUN-1/0001/archive")
+	if rr.Code != 200 {
+		t.Fatalf("POST archive = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	out := rr.Body.String()
+	if strings.Contains(out, `data-testid="card-RUN-1-0001"`) {
+		t.Errorf("archived card must be gone from the re-rendered board:\n%s", out)
+	}
+	if !strings.Contains(out, `data-testid="col-running"`) {
+		t.Errorf("archive response must be the re-rendered board region:\n%s", out)
+	}
+	got := archiveEvents(t, root, "RUN-1", "0001")
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 archive event, got %d", len(got))
+	}
+	if got[0].Type != "archive" || got[0].Outcome != "abandoned" {
+		t.Errorf("archive event = {type:%q outcome:%q}, want abandoned archive", got[0].Type, got[0].Outcome)
+	}
+	if got[0].Actor != "human:webui" {
+		t.Errorf("archive actor = %q, want default human:webui", got[0].Actor)
+	}
+
+	// Done card → accepted.
+	if rr := post(t, h, "/ticket/DON-1/0001/archive"); rr.Code != 200 {
+		t.Fatalf("POST archive (Done) = %d", rr.Code)
+	}
+	if got := archiveEvents(t, root, "DON-1", "0001"); len(got) != 1 || got[0].Outcome != "accepted" {
+		t.Errorf("Done archive = %+v, want one accepted archive", got)
+	}
+
+	// Idempotent: a re-POST (double-click racing the 3s board poll) writes nothing new.
+	if rr := post(t, h, "/ticket/RUN-1/0001/archive"); rr.Code != 200 {
+		t.Fatalf("re-POST archive = %d", rr.Code)
+	}
+	if n := len(archiveEvents(t, root, "RUN-1", "0001")); n != 1 {
+		t.Errorf("re-POST must be a no-op; archive events = %d, want 1", n)
+	}
+}
+
+// TestArchivedAttemptOmittedFromBoard pins the board effect: an archived attempt
+// lands in no column, so its card is not emitted anywhere on the board.
+func TestArchivedAttemptOmittedFromBoard(t *testing.T) {
+	root := seedColumns(t)
+	// Archive one attempt from each column directly (the derivation, not the route).
+	for _, id := range []string{"RUN-1", "STK-1", "REV-1", "DON-1"} {
+		if _, err := ticketlog.Append(root, id, "0001", event.Event{Type: "archive", Actor: "a", Body: "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	board := get(t, newServerOver(t, root), "/board").Body.String()
+	for _, id := range []string{"RUN-1", "STK-1", "REV-1", "DON-1"} {
+		if strings.Contains(board, `data-testid="card-`+id+`-0001"`) {
+			t.Errorf("archived attempt %s must not appear on the board:\n%s", id, board)
+		}
+	}
+	// Every column is empty now.
+	for _, c := range []string{`count-running">0<`, `count-stuck">0<`, `count-review">0<`, `count-done">0<`} {
+		if !strings.Contains(board, `data-testid="`+c) {
+			t.Errorf("expected an empty column (%s):\n%s", c, board)
+		}
+	}
+}
+
+// TestUnarchiveRestoresToColumn pins reversibility: a later `unarchive` event
+// returns an attempt to its lifecycle-derived column (last-wins), with nothing
+// destroyed.
+func TestUnarchiveRestoresToColumn(t *testing.T) {
+	root := seedColumns(t)
+	ticketlog.Append(root, "REV-1", "0001", event.Event{Type: "archive", Actor: "a", Body: "x"})
+	// While archived, the card is off the board.
+	if b := get(t, newServerOver(t, root), "/board").Body.String(); strings.Contains(b, `data-testid="card-REV-1-0001"`) {
+		t.Fatalf("archived REV-1 should be off the board")
+	}
+	// Unarchive brings it back to its Review column.
+	ticketlog.Append(root, "REV-1", "0001", event.Event{Type: "unarchive", Actor: "a", Body: "back"})
+	b := get(t, newServerOver(t, root), "/board").Body.String()
+	if !strings.Contains(b, `data-testid="card-REV-1-0001"`) {
+		t.Errorf("unarchived REV-1 should be back on the board:\n%s", b)
+	}
+	if !strings.Contains(b, `data-testid="count-review">1<`) {
+		t.Errorf("unarchived REV-1 should land back in the Review column")
+	}
+}
+
+// TestArchiveUnknownAttemptAndCrossOrigin pins the guards: a POST to a non-existent
+// attempt is a 404 that writes nothing, and a cross-origin POST is blocked with 403
+// and appends nothing — matching handleEnable.
+func TestArchiveUnknownAttemptAndCrossOrigin(t *testing.T) {
+	root := seedColumns(t)
+	h := newServerOver(t, root)
+
+	if rr := post(t, h, "/ticket/NOPE-1/0001/archive"); rr.Code != 404 {
+		t.Errorf("POST archive to a missing attempt = %d, want 404", rr.Code)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/ticket/RUN-1/0001/archive", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin archive POST = %d, want 403", rr.Code)
+	}
+	if n := len(archiveEvents(t, root, "RUN-1", "0001")); n != 0 {
+		t.Errorf("a blocked POST must not write; archive events = %d, want 0", n)
+	}
+}
+
 func TestUnknownRoutes404(t *testing.T) {
 	h := newServer(t)
 	if rr := get(t, h, "/ticket/NOPE-1"); rr.Code != 404 {

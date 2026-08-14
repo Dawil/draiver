@@ -58,13 +58,18 @@ body {
   padding: 10px 12px; margin-bottom: 8px; text-decoration: none; color: var(--ink);
 }
 .card:hover { border-color: var(--accent); }
-/* Reserve room for the corner play button so it never overlaps the ticket id. */
-.card-wrap:has(.enable-form) .card { padding-right: 36px; }
+/* The top-right action cluster: the optional play button and the always-present
+   archive tick/cross, laid out in a flex row so two buttons never overlap. Reserve
+   room on the tile so the corner actions never sit over the ticket id — 36px for
+   the archive button alone, more when the play button is also present. */
+.card-actions { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; z-index: 1; }
+.card-wrap:has(.card-actions) .card { padding-right: 36px; }
+.card-wrap:has(.enable-form) .card { padding-right: 62px; }
 /* Green play button: enable a parked Running attempt into supervision. Colour is
    the eucalypt --dot-running (the same green the running dot uses); the play
    triangle carries the meaning as shape, not colour alone, and it is a real
    <button> with an aria-label. */
-.enable-form { position: absolute; top: 8px; right: 8px; margin: 0; }
+.enable-form { margin: 0; }
 .enable-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; padding: 0; line-height: 0; cursor: pointer;
@@ -74,6 +79,31 @@ body {
 }
 .enable-btn:hover { background: var(--dot-running); color: var(--panel-2); }
 .enable-btn:focus-visible { outline: 2px solid var(--dot-running); outline-offset: 2px; }
+/* Archive affordance: take a card off the board. The glyph carries the sentiment
+   as shape (a tick for accept, a cross for close) with an aria-label, never colour
+   alone. Hidden until the card is hovered or something inside it is focused, so it
+   is keyboard-reachable (focus-within reveals it on tab) without cluttering the
+   resting board. Colours come from the --dot-* palette custom properties — green
+   var(--dot-running) for accept, muted grey var(--dot-disabled) for close — so no
+   hex is typed here. */
+.archive-form { margin: 0; opacity: 0; transition: opacity .12s ease; }
+.card-wrap:hover .archive-form, .card-wrap:focus-within .archive-form { opacity: 1; }
+.archive-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; line-height: 0; cursor: pointer;
+  border-radius: 50%; background: transparent;
+}
+.archive-accept {
+  border: 1px solid var(--dot-running); color: var(--dot-running);
+  background: color-mix(in srgb, var(--dot-running) 18%, transparent);
+}
+.archive-accept:hover { background: var(--dot-running); color: var(--panel-2); }
+.archive-close {
+  border: 1px solid var(--dot-disabled); color: var(--dot-disabled);
+  background: color-mix(in srgb, var(--dot-disabled) 16%, transparent);
+}
+.archive-close:hover { background: var(--dot-disabled); color: var(--panel-2); }
+.archive-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card-review {
   position: absolute; bottom: 8px; right: 10px; z-index: 1;
   font-size: 11px; text-decoration: none; white-space: nowrap;
