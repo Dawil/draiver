@@ -40,6 +40,7 @@ func run(t *testing.T, args ...string) (string, int) {
 	logURLs, logLinks, reviewURLs, reviewLinks = nil, nil, nil, nil
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
 	newTool, newModel, newRepo, newBase = "", "", "", ""
+	dependsWants, dependsAfter, dependsRequires = nil, nil, nil
 	attemptTool, attemptModel, attemptFrom, attemptRepo, attemptBase = "", "", "", "", ""
 	attemptSetTool, attemptSetModel, attemptSetRepo, attemptSetBase = "", "", "", ""
 	inboxMine = false
