@@ -472,6 +472,15 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	if err := r.propagateWants(all, out); err != nil {
 		return nil, err
 	}
+
+	// The forward success gate (drvctl-040): hold Pending any desired attempt whose
+	// `after:`/`requires:` ordering predecessors have not yet reached Review/Done.
+	// Applied last so enable still flows down `wants:` from a gate-held parent; the
+	// gate trims admission, not desired-ness. Fire-once — an already-admitted
+	// dependent is never re-gated (see forward_gate.go).
+	if err := r.applyForwardGate(all, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
