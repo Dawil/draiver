@@ -24,6 +24,7 @@ type State string
 
 const (
 	Running State = "Running"  // agent working, no action; rendered as a count
+	Pending State = "Pending"  // enabled, no live agent, self-resolving wait; a count, below Needs-me
 	NeedsMe State = "Needs me" // unresolved escalation — the board
 	Review  State = "Review"   // agent claims done; a claim, not a fact
 	Done    State = "Done"     // closed
@@ -51,10 +52,19 @@ type Attempt struct {
 	Base     string // branch the attempt lands back into (from attempt.md; drvctl-021)
 
 	State           State
-	Enabled         bool // opted into daemon supervision (see DeriveEnabled)
+	Enabled         bool // directly opted into daemon supervision (durable; see DeriveEnabled)
 	Archived        bool // taken off the board (see DeriveArchived)
 	Events          []event.Event
 	OpenEscalations []event.Event // escalations with no later resolution
+
+	// Desired and Live are runtime bits a presentation caller fills to derive the
+	// Pending control state (see Control); both default false on a log-only load, so
+	// the log tier (reconciler, brief) is unaffected. Desired is effective
+	// supervised-desiredness — directly enabled OR enabled-via-parent down `wants:`
+	// (drvctl-038), computed by DeriveDesired — as distinct from the durable, direct
+	// Enabled bit. Live is whether a runtime probe (session.Alive) found a live agent.
+	Desired bool
+	Live    bool
 
 	// Metrics is the attempt's final prompt-caching tally, folded into attempt.md
 	// on retire (drvctl-031). Nil until an attempt retires with a metered session,
@@ -118,6 +128,39 @@ func Derive(events []event.Event) (State, []event.Event) {
 		return Running, open
 	}
 }
+
+// Control folds runtime desiredness + liveness into the log-derived control state
+// to yield the board's effective state — the one place Pending is named. Pending
+// is the sole control state the log cannot name on its own: a desired attempt
+// whose log state is Running but which has no live agent is not being worked, it is
+// a self-resolving wait for a gate to open or an activation to fire (zero human
+// attention, below Needs-me). Every other state passes through unchanged; an
+// undesired or already-live Running attempt is not Pending.
+//
+// `desired` is effective supervised-desiredness — directly enabled OR
+// enabled-via-parent (see DeriveDesired) — not the durable, direct Enabled bit: an
+// enabled-via-parent child not yet admitted must still derive Pending. `live` is
+// the caller's runtime probe (session.Alive); the project tier never touches the
+// process table itself.
+//
+// This is deliberately a read-time projection, kept OFF Attempt.State and OUT of
+// Derive (the log tier stays pure — no new event, the hash chain stays clean). The
+// reconciler admits precisely the log-Running desired attempts (see
+// reconcile.desired); folding Pending into Attempt.State would make those very
+// attempts stop looking Running and the daemon would never admit them — Pending
+// would be a black hole. So the log projection keeps saying Running and only the
+// board view (this function) shows Pending.
+func Control(state State, desired, live bool) State {
+	if state == Running && desired && !live {
+		return Pending
+	}
+	return state
+}
+
+// Control is the attempt's effective board state, folding its runtime Desired and
+// Live bits (which a presentation caller fills via DeriveDesired and session.Alive)
+// into the log-derived State. See the package-level Control function.
+func (a Attempt) Control() State { return Control(a.State, a.Desired, a.Live) }
 
 // DeriveEnabled reports whether an attempt has opted into daemon supervision.
 // Enablement is a separate axis from control state (State): a Running attempt is

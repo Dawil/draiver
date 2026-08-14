@@ -72,6 +72,44 @@ func TestDeriveEnabled(t *testing.T) {
 	}
 }
 
+func TestControl(t *testing.T) {
+	cases := []struct {
+		name    string
+		state   State
+		desired bool
+		live    bool
+		want    State
+	}{
+		// The Pending case: desired, log-Running, no live agent — the enabled-via-
+		// parent-but-not-yet-admitted attempt, and the between-wakes coordinator.
+		{"desired running no agent is pending", Running, true, false, Pending},
+		// Liveness wins: a live agent is Running, never Pending.
+		{"live agent stays running", Running, true, true, Running},
+		// Desiredness is required: an undesired Running attempt is a human's to pick
+		// up, not the supervisor's to advance — plain Running, not Pending.
+		{"undesired running is not pending", Running, false, false, Running},
+		{"undesired running with live agent", Running, false, true, Running},
+		// Every non-Running state passes through untouched — the overlay only ever
+		// turns Running into Pending.
+		{"needs-me is never pending", NeedsMe, true, false, NeedsMe},
+		{"review is never pending", Review, true, false, Review},
+		{"done is never pending", Done, true, false, Done},
+		{"done with no agent stays done", Done, true, false, Done},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Control(c.state, c.desired, c.live); got != c.want {
+				t.Errorf("Control(%q, desired=%v, live=%v) = %q want %q", c.state, c.desired, c.live, got, c.want)
+			}
+			// The Attempt.Control() method must agree with the free function.
+			a := Attempt{State: c.state, Desired: c.desired, Live: c.live}
+			if got := a.Control(); got != c.want {
+				t.Errorf("Attempt.Control() = %q want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestDeriveArchived(t *testing.T) {
 	cases := []struct {
 		name   string
