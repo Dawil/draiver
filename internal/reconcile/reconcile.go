@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -463,7 +464,139 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 			r.opt.Logf("reconcile: sweep desired marker %s/%s: %v", a.Ticket, a.ID, err)
 		}
 	}
+
+	// The third path — enabled-via-parent (drvctl-038): desired-ness flows down the
+	// `wants:` edge, so a ticket a desired parent (transitively) wants joins the
+	// fleet alongside it. Layered on top of the direct pass so a child that is
+	// *also* directly desired is already in `out` and untouched.
+	if err := r.propagateWants(all, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// propagateWants extends the desired set down the `wants:` edge (drvctl-038): a
+// ticket transitively wanted by a ticket with a desired attempt is itself
+// desired. It targets each wanted child's latest attempt when that is Running and
+// mints a fresh one (default launch config) for a child with no attempt yet —
+// the same start a manual `enable` would give it.
+//
+// Withdrawal on `disable` needs no code here: desired() is recomputed every tick,
+// so a parent leaving the desired set simply stops sourcing its children next
+// tick, while a child that is also directly desired stays in `out` from the
+// direct pass. That is the symmetric withdrawal the spec asks for, for free.
+func (r *Reconciler) propagateWants(all []project.Attempt, out map[worktree.Key]project.Attempt) error {
+	// Index attempts by ticket. LoadAll is sorted by ticket then attempt id, so the
+	// last entry for a ticket is its latest attempt.
+	byTicket := map[string][]project.Attempt{}
+	for _, a := range all {
+		byTicket[a.Ticket] = append(byTicket[a.Ticket], a)
+	}
+	// Tickets that already have a desired attempt (direct enable or a valid
+	// imperative `ctl start` marker) are the propagation sources — desired-ness
+	// flows down from them.
+	sources := map[string]bool{}
+	for k := range out {
+		sources[k.Ticket] = true
+	}
+	if len(sources) == 0 {
+		return nil // nothing enabled ⇒ nothing to propagate; skip the edge read.
+	}
+
+	edges, err := project.LoadAllEdges(r.opt.Root)
+	if err != nil {
+		return err
+	}
+
+	// Transitive closure over `wants:` from every source ticket. The authoring seam
+	// refuses cycles (drvctl-037), but the `seen` guard keeps a hand-edited cyclic
+	// spec from spinning here regardless. Sources are seeded into the frontier so
+	// their edges are traversed (reaching grand-children) even though the sources
+	// themselves are already desired; only *non*-source reachable tickets become
+	// wanted children to resolve.
+	seen := map[string]bool{}
+	var frontier []string
+	for t := range sources {
+		seen[t] = true
+		frontier = append(frontier, t)
+	}
+	wanted := map[string]bool{}
+	for len(frontier) > 0 {
+		t := frontier[0]
+		frontier = frontier[1:]
+		for _, child := range edges[t].Wants {
+			if seen[child] {
+				continue
+			}
+			seen[child] = true
+			frontier = append(frontier, child)
+			if !sources[child] {
+				wanted[child] = true
+			}
+		}
+	}
+
+	// Resolve each wanted child to a target attempt, in a stable order so any mint
+	// and any operational log line is deterministic across ticks.
+	children := make([]string, 0, len(wanted))
+	for t := range wanted {
+		children = append(children, t)
+	}
+	sort.Strings(children)
+	for _, child := range children {
+		r.desireWantedChild(child, byTicket[child], out)
+	}
+	return nil
+}
+
+// desireWantedChild adds a parent-wanted child ticket's target attempt to the
+// desired set, per drvctl-038's admission rule (§Attempt admission): target the
+// latest attempt, or mint one when there is none.
+func (r *Reconciler) desireWantedChild(ticket string, attempts []project.Attempt, out map[worktree.Key]project.Attempt) {
+	if len(attempts) == 0 {
+		r.mintWantedChild(ticket, out)
+		return
+	}
+	// Target the latest attempt — but only when it is Running, the desired-set
+	// invariant every entry upholds. A latest that is a Review claim, a Needs-me
+	// block, or a closed Done is left alone: parent-sourced desired-ness never
+	// force-admits a non-Running attempt, and it does not re-mint over a terminal
+	// one — auto-freshness on a spent child is the deferred new-attempt-on-retrigger
+	// follow-on, not this ticket.
+	latest := attempts[len(attempts)-1]
+	if latest.State != project.Running {
+		return
+	}
+	out[worktree.Key{Ticket: latest.Ticket, Attempt: latest.ID}] = latest
+}
+
+// mintWantedChild creates a child's first attempt with the default launch config
+// — the same start a manual `enable` would give it (drvctl-038). Best-effort: a
+// mint that cannot proceed is logged and the tick moves on, never failing over
+// one wanted child.
+func (r *Reconciler) mintWantedChild(ticket string, out map[worktree.Key]project.Attempt) {
+	// Repo is the one mandatory launch field (drvctl-017): attempt.Create rejects a
+	// repo-less attempt and the daemon could cut no worktree for it. With no
+	// recorded child attempt to inherit from, the only default is the daemon's
+	// `ctl up --repo` fallback; absent that, there is nothing to mint against.
+	repo := strings.TrimSpace(r.opt.DefaultRepo)
+	if repo == "" {
+		r.opt.Logf("reconcile: wants: no attempt for %s and no --repo fallback to mint one; create it manually or enable it directly", ticket)
+		return
+	}
+	m, err := attempt.Create(r.opt.Root, ticket, attempt.New{Repo: repo, Actor: r.opt.Actor})
+	if err != nil {
+		// A `wants:` edge is a bare ticket id; it can name a ticket with no dir yet.
+		// attempt.Create surfaces that (and any other mint failure) as an error here.
+		r.opt.Logf("reconcile: wants: mint attempt for %s: %v", ticket, err)
+		return
+	}
+	a, err := project.LoadAttempt(r.opt.Root, ticket, m.ID)
+	if err != nil {
+		r.opt.Logf("reconcile: wants: load minted attempt %s/%s: %v", ticket, m.ID, err)
+		return
+	}
+	out[worktree.Key{Ticket: ticket, Attempt: m.ID}] = a
 }
 
 // stateOf reads an attempt's current control state, treating a vanished or
