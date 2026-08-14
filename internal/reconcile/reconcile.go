@@ -114,6 +114,14 @@ type Options struct {
 	// Tier 0 ships a single "claude-code" entry.
 	Adapters AdapterFor
 
+	// AdapterVersion is the version string of the adapter binary (e.g. "2.1.216"),
+	// resolved once at daemon start and pinned into every session's provenance
+	// (drvctl-033). With auto-update gated off (DISABLE_AUTOUPDATER in BaseSpec.Env)
+	// the binary cannot move under the daemon, so one resolution holds fleet-wide.
+	// Empty when the version probe could not run — the canary degrades to
+	// "unattributable" rather than the daemon refusing to start.
+	AdapterVersion string
+
 	// Actor is the identity stamped on promoted log events and escalations, e.g.
 	// "agent:claude-code". Required.
 	Actor string
@@ -768,8 +776,15 @@ func (r *Reconciler) foldMetrics(key worktree.Key) {
 	// in session.json (recorded at spawn), and attempt.md is its durable A/B home.
 	// Best-effort and additive — a missing/unreadable identity leaves the field as
 	// loaded, never failing the retire.
-	if ident, ierr := sess.ReadIdentity(); ierr == nil && ident.ProtocolVersion != "" {
-		meta.ProtocolVersion = ident.ProtocolVersion
+	// Fold both provenance handles the same way: the protocol text this session
+	// launched with (drvctl-034) and the pinned adapter binary version (drvctl-033).
+	if ident, ierr := sess.ReadIdentity(); ierr == nil {
+		if ident.ProtocolVersion != "" {
+			meta.ProtocolVersion = ident.ProtocolVersion
+		}
+		if ident.AdapterVersion != "" {
+			meta.AdapterVersion = ident.AdapterVersion
+		}
 	}
 	if err := attempt.WriteMeta(r.opt.Root, meta); err != nil {
 		r.opt.Logf("reconcile: fold metrics %s/%s: write attempt.md: %v", key.Ticket, key.Attempt, err)

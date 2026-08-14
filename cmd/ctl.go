@@ -1081,13 +1081,24 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the adapter version ONCE, here at daemon start, and pin it into every
+	// session's provenance (drvctl-033). With auto-update gated off (DISABLE_AUTOUPDATER
+	// below) the binary cannot move under the daemon, so one resolution holds fleet-wide.
+	// Unlike the exclude-flag probe above, a failed version probe is NOT fatal: version
+	// is provenance, not a correctness gate, so log it and record an empty version (the
+	// canary degrades to "unattributable") rather than refusing to boot.
+	adapterVersion, err := claudecode.Version(context.Background(), "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "draiverctld: adapter version probe failed, provenance will omit it: %v\n", err)
+	}
 	return reconcile.New(reconcile.Options{
-		Root:         root,
-		DefaultRepo:  ctlRepo,
-		Adapters:     claudeAdapters,
-		Actor:        resolveActor(),
-		ContextLimit: contextLimit,
-		PermPolicy:   permPolicy,
+		Root:           root,
+		DefaultRepo:    ctlRepo,
+		Adapters:       claudeAdapters,
+		AdapterVersion: adapterVersion,
+		Actor:          resolveActor(),
+		ContextLimit:   contextLimit,
+		PermPolicy:     permPolicy,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
@@ -1104,7 +1115,14 @@ func newReconciler() (*reconcile.Reconciler, error) {
 			// TTL is automatic but silently drops to 5m in usage-credit overage (and is
 			// 5m by default on an API key). This drop-in holds 1h regardless. See
 			// docs/prompt-caching.md.
-			Env: []string{"ENABLE_PROMPT_CACHING_1H=1"},
+			//
+			// DISABLE_AUTOUPDATER=1 gates Claude Code's background auto-update off for
+			// every supervised session (drvctl-033). A mid-session upgrade would shift
+			// the system prompt / tool definitions and bust the shared cache prefix
+			// fleet-wide; pinning the version for a session's life is exactly the
+			// invariant the control plane is placed to hold. Upgrades are operator-driven
+			// and happen between sessions; the pinned version is recorded in provenance.
+			Env: []string{"ENABLE_PROMPT_CACHING_1H=1", "DISABLE_AUTOUPDATER=1"},
 		},
 		// Route the daemon's operational log to its own stderr. Left unset it
 		// defaults to a no-op — the gap drvctl-027 named: an admit that failed

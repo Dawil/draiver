@@ -44,6 +44,15 @@ type Identity struct {
 	// is provenance for A/B and reproducibility (drvctl-034): it pins a run to the
 	// exact protocol text it ran against, and is folded into attempt.md on retire.
 	ProtocolVersion string `json:"protocol_version,omitempty"`
+
+	// AdapterVersion is the version string of the coding-agent adapter binary this
+	// session launched against (e.g. "2.1.216" for claude-code), captured at spawn
+	// and pinned for the session's lifetime (auto-update is gated off via
+	// DISABLE_AUTOUPDATER). It is provenance for attributing a fleet-wide
+	// prompt-cache prefix bust to an operator-driven upgrade rather than a config
+	// regression (drvctl-033); the drvctl-036 canary reads it, and it is folded into
+	// attempt.md on retire. Empty when the version probe could not run.
+	AdapterVersion string `json:"adapter_version,omitempty"`
 }
 
 // Meter is a session's live cost + liveness tally — meter.json. It is folded

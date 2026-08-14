@@ -395,6 +395,36 @@ func SupportsExcludeDynamicSystemPrompt(ctx context.Context, bin string) (bool, 
 	return strings.Contains(string(out), excludeDynamicFlag), nil
 }
 
+// Version reports the version string of the claude binary at bin by probing
+// `bin --version`, whose output is a line like "2.1.216 (Claude Code)"; the
+// leading whitespace-delimited token ("2.1.216") is returned. It records the
+// pinned adapter version in session provenance (drvctl-033) so a fleet-wide
+// prompt-cache prefix bust can be attributed to an operator-driven upgrade rather
+// than a config regression (the drvctl-036 canary consumes it). bin empty means
+// DefaultBin resolved on PATH. Version is provenance, not a correctness gate: a
+// probe that cannot run is surfaced as an error so the daemon can record an empty
+// version and degrade the canary to "unattributable" rather than refusing to boot.
+func Version(ctx context.Context, bin string) (string, error) {
+	if bin == "" {
+		bin = DefaultBin
+	}
+	out, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return "", fmt.Errorf("claudecode: probe %s --version: %w", bin, err)
+	}
+	// "2.1.216 (Claude Code)\n" → "2.1.216". Take the first whitespace-delimited
+	// field of the first non-empty line, so a bare "2.1.216" or a decorated line
+	// both reduce to the version token.
+	line := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	if fields := strings.Fields(line); len(fields) > 0 {
+		return fields[0], nil
+	}
+	return "", fmt.Errorf("claudecode: %s --version produced no version string", bin)
+}
+
 // --- stream-json input frames ---
 
 type inputMessage struct {

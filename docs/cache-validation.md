@@ -44,8 +44,9 @@ opt-in cache lever).
 default handbook append (recommended — it is the canonical byte-invariant protocol),
 or point it at your own byte-invariant file to override.
 
-Both arms already run with `ENABLE_PROMPT_CACHING_1H=1` (set on `BaseSpec.Env` by
-`newReconciler`, drvctl-035), so TTL is held at 1h in either arm.
+Both arms already run with `ENABLE_PROMPT_CACHING_1H=1` and `DISABLE_AUTOUPDATER=1`
+(set on `BaseSpec.Env` by `newReconciler`, drvctl-035 / drvctl-033), so TTL is held
+at 1h and Claude Code cannot auto-upgrade mid-session in either arm.
 
 **Preconditions:**
 
@@ -54,10 +55,11 @@ Both arms already run with `ENABLE_PROMPT_CACHING_1H=1` (set on `BaseSpec.Env` b
 - The append file must be **byte-invariant** — no ticket id, no timestamp, nothing
   per-ticket — or the shared prefix re-fragments (`docs/prompt-caching.md`
   "Constraint — the append must be byte-invariant").
-- Pin the adapter version for the run so a mid-run Claude Code upgrade does not
-  bust the prefix fleet-wide. **Caveat:** `drvctl-033` (version pin + version
-  events) is *not yet implemented*, so this must be enforced manually for now
-  (`DISABLE_AUTOUPDATER=1`, fixed `claude` binary) — see "Unmet dependencies".
+- The adapter version is pinned for the run so a mid-run Claude Code upgrade does
+  not bust the prefix fleet-wide. `drvctl-033` now enforces this automatically: the
+  daemon sets `DISABLE_AUTOUPDATER=1` on every session and records the resolved
+  `claude` version in session provenance (`session.json` → folded to `attempt.md`),
+  which the canary reads to attribute a bust to a version bump.
 
 ## The three assertions and how each is measured
 
@@ -245,11 +247,13 @@ is now a first-class column (`t1-rd:cr`) in `draiver canary`.
 
 ### What could push cache efficiency further
 
-1. **Land `drvctl-033` (version pin + version events).** Today the autoupdater is only
-   held off manually (`DISABLE_AUTOUPDATER=1`). An unpinned `claude` upgrade mid-fleet
-   silently rewrites the tools/system prefix and busts *every* repo's shared cache at
-   once — the highest-leverage remaining risk. Landing 033 also lets the canary
-   *attribute* a bust to a version bump instead of reporting "version unavailable".
+1. **`drvctl-033` (version pin + version events) — landed.** The daemon now gates the
+   autoupdater off on every session (`DISABLE_AUTOUPDATER=1` on `BaseSpec.Env`) and
+   pins + records the resolved `claude` version in provenance, so an unpinned upgrade
+   can no longer silently rewrite the tools/system prefix and bust *every* repo's
+   shared cache at once. The canary reads the recorded version and now *attributes* a
+   bust to a version bump instead of reporting "version unavailable". Upgrades are
+   operator-driven, between sessions.
 2. **Shrink the per-ticket first user message.** The turn-1 cold-write floor (~5.3K) is
    dominated by the brief + relocated dynamic context. Any stable scaffolding still
    living in that message could move into the byte-invariant append (which *is* cached);
@@ -274,9 +278,9 @@ signature of a bust:
 - **per-ticket data leaked into the append** — turn-1 re-creates the prefix, no
   adapter-version change ⇒ finding points at the append.
 - **an unpinned adapter upgrade** — turn-1 re-creates the prefix *and* the adapter
-  version changed ⇒ finding points at the version bump (this attribution lights up
-  once `drvctl-033` records version events; today it reports "version
-  unavailable").
+  version changed ⇒ finding points at the version bump. This attribution is live now
+  that `drvctl-033` records the version in provenance; it reports "version
+  unavailable" only for attempts predating the pin (empty recorded version).
 - **a sub-minimum / hard invalidator** — caching never engaged at all
   (`caching_active=false`).
 

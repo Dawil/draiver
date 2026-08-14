@@ -40,6 +40,14 @@ type Meta struct {
 	// the field), so it renders only once there is something to record.
 	ProtocolVersion string `yaml:"protocol_version,omitempty"`
 
+	// AdapterVersion is the version of the coding-agent adapter binary the attempt's
+	// session launched against (e.g. "2.1.216" for claude-code, drvctl-033), folded
+	// from session.json on retire. Pinned for the session (auto-update gated off), it
+	// pins the run to the adapter build for A/B and for attributing a prompt-cache
+	// prefix bust to an operator upgrade. Empty when unknown (probe failed, or the
+	// attempt predates the field), so it renders only once there is something to record.
+	AdapterVersion string `yaml:"adapter_version,omitempty"`
+
 	// Metrics is the meter's final token/caching tally, folded in on retire — the
 	// "reserved metrics room" made real (drvctl-031). Nil until an attempt retires
 	// with a metered session, so it renders only once there is something to record.
@@ -237,6 +245,11 @@ func metaFrontmatter(m Meta) string {
 	// metrics below — not a hand-editable hint, so no commented placeholder).
 	if strings.TrimSpace(m.ProtocolVersion) != "" {
 		b.WriteString(metaLine("protocol_version", m.ProtocolVersion))
+	}
+	// AdapterVersion renders only when recorded (machine-written on retire, like
+	// protocol_version above — not a hand-editable hint, so no commented placeholder).
+	if strings.TrimSpace(m.AdapterVersion) != "" {
+		b.WriteString(metaLine("adapter_version", m.AdapterVersion))
 	}
 	// Metrics renders as a nested block only when the meter has been folded in on
 	// retire — machine-written, not a hand-editable hint, so unlike the optional
