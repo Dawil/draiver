@@ -21,6 +21,76 @@ func writeSpec(t *testing.T, root store.Root, ticket, content string) {
 	}
 }
 
+func TestWantsClosure(t *testing.T) {
+	// CAP wants SRC and INFRA; SRC wants DEEP (a grand-child). MID is unrelated.
+	edges := map[string]Edges{
+		"CAP": {Wants: []string{"SRC", "INFRA"}},
+		"SRC": {Wants: []string{"DEEP"}},
+		"MID": {Wants: []string{"OTHER"}},
+	}
+	got := WantsClosure(map[string]bool{"CAP": true}, edges)
+	want := map[string]bool{"SRC": true, "INFRA": true, "DEEP": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("WantsClosure = %v want %v", got, want)
+	}
+	// A source that also appears as a wanted child is not re-emitted as wanted.
+	got = WantsClosure(map[string]bool{"CAP": true, "SRC": true}, edges)
+	want = map[string]bool{"INFRA": true, "DEEP": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("WantsClosure with SRC as source = %v want %v", got, want)
+	}
+	// A cyclic hand-edited graph must not spin (authoring refuses cycles, but the
+	// guard is defence in depth).
+	cyclic := map[string]Edges{"A": {Wants: []string{"B"}}, "B": {Wants: []string{"A"}}}
+	got = WantsClosure(map[string]bool{"A": true}, cyclic)
+	if !reflect.DeepEqual(got, map[string]bool{"B": true}) {
+		t.Errorf("cyclic WantsClosure = %v want {B}", got)
+	}
+}
+
+func TestDeriveDesired(t *testing.T) {
+	att := func(ticket, id string, state State, enabled bool) Attempt {
+		return Attempt{Ticket: ticket, ID: id, State: state, Enabled: enabled}
+	}
+	// CAP is directly enabled and wants SRC, INFRA, and GATED. SRC's latest attempt
+	// is Running (admissible via parent); INFRA's latest is a Review claim (left
+	// alone — parent desiredness never force-admits a non-Running child); GATED has
+	// no attempt yet (the daemon would mint one — nothing to project). DIRECT is
+	// enabled on its own. OFF is enabled but Done, so it is not a source. LONELY is
+	// wanted by nobody enabled.
+	all := []Attempt{
+		att("CAP", "0001", Running, true),
+		att("DIRECT", "0001", Running, true),
+		att("INFRA", "0001", Review, false),
+		att("LONELY", "0001", Running, false),
+		att("OFF", "0001", Done, true),
+		att("SRC", "0001", Done, false),    // an older, spent attempt
+		att("SRC", "0002", Running, false), // the latest — admissible via CAP
+	}
+	edges := map[string]Edges{
+		"CAP": {Wants: []string{"SRC", "INFRA", "GATED"}},
+	}
+	got := DeriveDesired(all, edges)
+	want := map[Ref]bool{
+		{"CAP", "0001"}:    true, // directly enabled + Running
+		{"DIRECT", "0001"}: true, // directly enabled + Running
+		{"SRC", "0002"}:    true, // enabled-via-parent: latest Running attempt targeted
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DeriveDesired = %v\nwant %v", got, want)
+	}
+	// The enabled-via-parent child, once folded through Control with no live agent,
+	// is Pending — acceptance #1.
+	if s := Control(Running, got[Ref{"SRC", "0002"}], false); s != Pending {
+		t.Errorf("via-parent child Control = %q want Pending", s)
+	}
+	// A disabled parent sources nothing: SRC drops out of the desired set.
+	if d := DeriveDesired([]Attempt{att("CAP", "0001", Running, false), att("SRC", "0002", Running, false)},
+		edges); len(d) != 0 {
+		t.Errorf("disabled parent should desire nothing, got %v", d)
+	}
+}
+
 func TestLoadEdgesInlineAndBlock(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	writeSpec(t, root, "A", "---\nid: A\nwants: [B, C]\nafter: [D]\n---\n\nbody\n")

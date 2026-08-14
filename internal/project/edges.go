@@ -109,6 +109,89 @@ func reverseWants(all map[string]Edges) map[string][]string {
 	return out
 }
 
+// WantsClosure returns the set of tickets transitively reachable down `wants:`
+// edges from any source ticket, excluding the sources themselves. Sources are
+// seeded into the frontier so their edges are traversed (reaching grand-children)
+// even though they are already desired; only *non*-source reachable tickets are
+// returned as wanted. The `seen` guard tolerates a hand-edited cyclic spec — the
+// authoring seam refuses cycles (drvctl-037) but this must not spin regardless.
+//
+// It is the shared graph walk behind both reconcile's admission propagation
+// (drvctl-038) and the project-tier desired/Pending projection (DeriveDesired,
+// drvctl-039), so the two agree on who a set of enabled parents pulls in.
+func WantsClosure(sources map[string]bool, edges map[string]Edges) map[string]bool {
+	seen := make(map[string]bool, len(sources))
+	frontier := make([]string, 0, len(sources))
+	for t := range sources {
+		seen[t] = true
+		frontier = append(frontier, t)
+	}
+	wanted := map[string]bool{}
+	for len(frontier) > 0 {
+		t := frontier[0]
+		frontier = frontier[1:]
+		for _, child := range edges[t].Wants {
+			if seen[child] {
+				continue
+			}
+			seen[child] = true
+			frontier = append(frontier, child)
+			if !sources[child] {
+				wanted[child] = true
+			}
+		}
+	}
+	return wanted
+}
+
+// Ref identifies one attempt (ticket + attempt id) — a lightweight key for the
+// desired set, so the project tier need not import worktree.Key.
+type Ref struct {
+	Ticket  string
+	Attempt string
+}
+
+// DeriveDesired computes the declaratively-desired attempt set — the supervised
+// fleet the daemon would keep a live session for — from the durable log + spec
+// `wants:` edges alone. It is the read-side twin of reconcile.desired's declarative
+// half (drvctl-038): an attempt is desired if it is directly enabled and Running,
+// or it is the latest-Running attempt of a ticket transitively `wants:`-reachable
+// from such a directly-enabled ticket. This is what the Pending projection means by
+// "desired", so an enabled-via-parent child that has not been admitted yet still
+// derives Pending.
+//
+// It deliberately omits the two daemon-only pieces of reconcile.desired: the
+// transient imperative `ctl start` markers (they need a live controller nonce, so a
+// read-only `status` cannot honour them) and minting an absent child (a write). A
+// wanted child with no attempt yet therefore contributes nothing here — there is no
+// attempt to project a state onto until the daemon mints one.
+//
+// Pure given `all` (as LoadAll returns it: sorted by ticket then attempt id, so a
+// ticket's last entry is its latest attempt) and the edge map.
+func DeriveDesired(all []Attempt, edges map[string]Edges) map[Ref]bool {
+	desired := map[Ref]bool{}
+	byTicket := map[string][]Attempt{}
+	sources := map[string]bool{}
+	for _, a := range all {
+		byTicket[a.Ticket] = append(byTicket[a.Ticket], a)
+		if a.Enabled && a.State == Running {
+			desired[Ref{a.Ticket, a.ID}] = true
+			sources[a.Ticket] = true
+		}
+	}
+	for child := range WantsClosure(sources, edges) {
+		atts := byTicket[child]
+		if len(atts) == 0 {
+			continue // no attempt yet; the daemon would mint one — nothing to project
+		}
+		latest := atts[len(atts)-1]
+		if latest.State == Running {
+			desired[Ref{latest.Ticket, latest.ID}] = true
+		}
+	}
+	return desired
+}
+
 // CheckCycle reports the first dependency cycle reachable in the union graph, as
 // the offending path (e.g. ["A", "B", "C", "A"]), or nil if the edges form a
 // DAG. A self-edge surfaces here too, as the length-2 path ["A", "A"]. The three
