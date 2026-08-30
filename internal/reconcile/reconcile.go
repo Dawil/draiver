@@ -127,6 +127,15 @@ type Options struct {
 	// "agent:claude-code". Required.
 	Actor string
 
+	// DefaultSupervision is the fleet's default coordinator supervision mode
+	// (drvctl-042), the fallback for a coordinator with no per-ticket `supervision`
+	// override. It gates reverse-`wants:` activation: only a coordinator whose
+	// effective mode is pre-digest is woken by a wanted child's escalation; under
+	// passthrough the escalation routes straight to Needs-me and no coordinator
+	// session is spawned. Zero value is normalized to passthrough (the floor) in New,
+	// so an unconfigured daemon never auto-wakes a coordinator.
+	DefaultSupervision project.Supervision
+
 	// PermPolicy governs the permission gate (allow vs escalate per tool). Zero
 	// value defaults to gate.ReadOnly().
 	PermPolicy gate.Policy
@@ -244,6 +253,11 @@ func New(opt Options) (*Reconciler, error) {
 	if opt.Logf == nil {
 		opt.Logf = func(string, ...any) {}
 	}
+	// Normalize the supervision default to a concrete mode (drvctl-042): an unset or
+	// unrecognized value floors to passthrough, so the wake gate never has to reason
+	// about SupervisionDefault at tick time. project.Effective("", opt) yields the
+	// floor for an empty/unknown default.
+	opt.DefaultSupervision = project.Effective(project.SupervisionDefault, opt.DefaultSupervision)
 	return &Reconciler{
 		opt:     opt,
 		runs:    map[worktree.Key]*run{},

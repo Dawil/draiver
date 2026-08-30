@@ -134,6 +134,32 @@ func TestLoad_PrimaryRemote(t *testing.T) {
 	}
 }
 
+func TestLoad_DefaultSupervision(t *testing.T) {
+	// Omitted → the built-in floor, passthrough (drvctl-042): opting a fleet into
+	// pre-digest is a deliberate config choice, mirroring how enable is opt-in.
+	c, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DefaultSupervision != DefaultSupervision {
+		t.Errorf("default DefaultSupervision = %q, want %q (the floor)", c.DefaultSupervision, DefaultSupervision)
+	}
+	if DefaultSupervision != "passthrough" {
+		t.Errorf("built-in DefaultSupervision = %q, want passthrough", DefaultSupervision)
+	}
+
+	// Set → used verbatim (validated into a project.Supervision at the reconciler
+	// edge, not here — this package stays dependency-free).
+	path := writeConfig(t, `{"default_supervision": "pre-digest"}`)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DefaultSupervision != "pre-digest" {
+		t.Errorf("DefaultSupervision = %q, want %q (from file)", c.DefaultSupervision, "pre-digest")
+	}
+}
+
 func TestLoad_PromptCacheSurface(t *testing.T) {
 	// Omitted → the byte-identical-no-op default: toggle off, no append file.
 	c, err := Load(filepath.Join(t.TempDir(), "nope.json"))

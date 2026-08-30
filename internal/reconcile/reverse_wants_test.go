@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
@@ -38,6 +40,17 @@ func escalate(t *testing.T, root store.Root, ticket, att string) {
 	}
 }
 
+// setSupervision records a coordinator's per-ticket supervision mode (drvctl-042) —
+// the dial that gates whether a wanted child's escalation actually wakes it. The
+// mode rides on the event's Outcome, exactly as the `ctl supervision` verb writes
+// it. A pre-digest coordinator is woken; a passthrough one stays a Pending shell.
+func setSupervision(t *testing.T, root store.Root, ticket, att string, mode project.Supervision) {
+	t.Helper()
+	if _, err := ticketlog.Append(root, ticket, att, event.Event{Type: "supervision", Actor: "human:x", Outcome: string(mode), Body: "set supervision"}); err != nil {
+		t.Fatalf("supervision %s/%s: %v", ticket, att, err)
+	}
+}
+
 // --- tests ------------------------------------------------------------------
 
 // TestReverseWantsWakesPendingCoordinator is the headline acceptance path
@@ -56,7 +69,11 @@ func TestReverseWantsWakesPendingCoordinator(t *testing.T) {
 
 	capAtt := w.newTicket(t, "CAP-A") // enabled + Running, but gated Pending by after:[BLOCK]
 	writeSpecWantsAfter(t, w.root, "CAP-A", []string{"E2E-1"}, []string{"BLOCK"})
-	w.newTicket(t, "BLOCK")           // enabled + Running; never reaches Review ⇒ gate stays shut
+	// The dial must be pre-digest for a child escalation to wake the coordinator
+	// (drvctl-042); passthrough — the floor the reconciler defaults to — would route
+	// the escalation straight to Needs-me and leave CAP-A a dormant Pending shell.
+	setSupervision(t, w.root, "CAP-A", capAtt, project.SupervisionPreDigest)
+	w.newTicket(t, "BLOCK")                   // enabled + Running; never reaches Review ⇒ gate stays shut
 	e2eAtt := w.newDisabledTicket(t, "E2E-1") // the wanted child that will escalate
 
 	f := &factory{}
@@ -157,6 +174,169 @@ func TestReverseWantsRespectsDisable(t *testing.T) {
 	}
 	if broughtUp(t, w.root, "DIS", disAtt) {
 		t.Fatal("a disabled coordinator was woken by a child escalation — reverse activation must respect a human disable")
+	}
+}
+
+// --- supervision dial (drvctl-042) ------------------------------------------
+
+// supervisedReconciler wires a Reconciler whose fleet default supervision mode is
+// def — the config-fed default the wake gate folds each coordinator's per-ticket
+// override over.
+func (w world) supervisedReconciler(t *testing.T, f *factory, p *fakeProc, def project.Supervision) *reconcile.Reconciler {
+	t.Helper()
+	r, err := reconcile.New(reconcile.Options{
+		Root:               w.root,
+		Adapters:           f.adapters,
+		Actor:              "agent:claude-code",
+		DefaultSupervision: def,
+		Proc:               p,
+	})
+	if err != nil {
+		t.Fatalf("reconcile.New: %v", err)
+	}
+	return r
+}
+
+// TestSupervisionPassthroughDoesNotWake is drvctl-042 acceptance #1: a Capability in
+// passthrough sends child escalations straight to Needs-me and no coordinator
+// session is spawned. It is the same fixture as the pre-digest wake test, only with
+// the dial on the floor (here via the fleet default, which the coordinator inherits
+// with no per-ticket override) — so the difference in outcome isolates the dial.
+func TestSupervisionPassthroughDoesNotWake(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+
+	capAtt := w.newTicket(t, "CAP-A") // enabled + Running, gated Pending by after:[BLOCK]
+	writeSpecWantsAfter(t, w.root, "CAP-A", []string{"E2E-1"}, []string{"BLOCK"})
+	w.newTicket(t, "BLOCK")                   // keeps CAP-A's forward gate shut
+	e2eAtt := w.newDisabledTicket(t, "E2E-1") // the wanted child that will escalate
+
+	f := &factory{}
+	// Fleet default is passthrough; CAP-A records no override, so it inherits it.
+	r := w.supervisedReconciler(t, f, newProc(), project.SupervisionPassthrough)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	waitFor(t, "BLOCK + E2E-1 admitted, CAP-A held", func() bool { return f.count() == 2 })
+
+	escalate(t, w.root, "E2E-1", e2eAtt)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	// In passthrough the escalation does not wake CAP-A: the spawn count stays at the
+	// two children, and CAP-A is never brought up — it remains a Pending shell.
+	if n := f.count(); n != 2 {
+		t.Fatalf("passthrough coordinator was woken: %d spawns, want 2 (BLOCK + E2E-1 only)", n)
+	}
+	if broughtUp(t, w.root, "CAP-A", capAtt) {
+		t.Fatal("a passthrough coordinator was woken by a child escalation — it should route straight to Needs-me with no coordinator session")
+	}
+}
+
+// TestSupervisionPerTicketOverridesDefault is drvctl-042 acceptance #3: the mode is
+// read from the fleet default and is overridable per ticket. The fleet default here
+// is passthrough (no wake), but CAP-A records a per-ticket pre-digest override — so
+// the override, not the default, decides, and the coordinator wakes. The inverse
+// (a pre-digest default overridden to passthrough) is covered by the sibling test.
+func TestSupervisionPerTicketOverridesDefault(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+
+	capAtt := w.newTicket(t, "CAP-A")
+	writeSpecWantsAfter(t, w.root, "CAP-A", []string{"E2E-1"}, []string{"BLOCK"})
+	setSupervision(t, w.root, "CAP-A", capAtt, project.SupervisionPreDigest) // override the passthrough default
+	w.newTicket(t, "BLOCK")
+	e2eAtt := w.newDisabledTicket(t, "E2E-1")
+
+	f := &factory{}
+	r := w.supervisedReconciler(t, f, newProc(), project.SupervisionPassthrough) // fleet default = floor
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	waitFor(t, "BLOCK + E2E-1 admitted, CAP-A held", func() bool { return f.count() == 2 })
+	if broughtUp(t, w.root, "CAP-A", capAtt) {
+		t.Fatal("CAP-A was admitted before any escalation — its forward gate should hold it Pending")
+	}
+
+	escalate(t, w.root, "E2E-1", e2eAtt)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	// The per-ticket pre-digest override beats the passthrough fleet default: CAP-A wakes.
+	waitFor(t, "CAP-A woken by its per-ticket pre-digest override", func() bool { return broughtUp(t, w.root, "CAP-A", capAtt) })
+}
+
+// TestSupervisionPerTicketPassthroughSilencesPreDigestDefault is the inverse
+// override (drvctl-042 acceptance #3, other direction): the fleet default is
+// pre-digest (which would wake), but CAP-A records a per-ticket passthrough
+// override, so it stays a Pending shell — the last `supervision` event wins over the
+// config default, both ways.
+func TestSupervisionPerTicketPassthroughSilencesPreDigestDefault(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+
+	capAtt := w.newTicket(t, "CAP-A")
+	writeSpecWantsAfter(t, w.root, "CAP-A", []string{"E2E-1"}, []string{"BLOCK"})
+	setSupervision(t, w.root, "CAP-A", capAtt, project.SupervisionPassthrough) // override the pre-digest default
+	w.newTicket(t, "BLOCK")
+	e2eAtt := w.newDisabledTicket(t, "E2E-1")
+
+	f := &factory{}
+	r := w.supervisedReconciler(t, f, newProc(), project.SupervisionPreDigest) // fleet default = wake
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	waitFor(t, "BLOCK + E2E-1 admitted, CAP-A held", func() bool { return f.count() == 2 })
+
+	escalate(t, w.root, "E2E-1", e2eAtt)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if broughtUp(t, w.root, "CAP-A", capAtt) {
+		t.Fatal("a per-ticket passthrough override did not silence the pre-digest fleet default — the last supervision event must win")
+	}
+}
+
+// TestSupervisionLatestEventWins guards the mutable, last-wins semantics at the
+// reconcile layer: a coordinator flipped pre-digest → passthrough across two events
+// reads as passthrough (no wake), mirroring how a disable after an enable parks an
+// attempt.
+func TestSupervisionLatestEventWins(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+
+	capAtt := w.newTicket(t, "CAP-A")
+	writeSpecWantsAfter(t, w.root, "CAP-A", []string{"E2E-1"}, []string{"BLOCK"})
+	setSupervision(t, w.root, "CAP-A", capAtt, project.SupervisionPreDigest)
+	setSupervision(t, w.root, "CAP-A", capAtt, project.SupervisionPassthrough) // latest wins ⇒ passthrough
+	w.newTicket(t, "BLOCK")
+	e2eAtt := w.newDisabledTicket(t, "E2E-1")
+
+	f := &factory{}
+	r := w.supervisedReconciler(t, f, newProc(), project.SupervisionPassthrough)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	waitFor(t, "children admitted", func() bool { return f.count() == 2 })
+
+	escalate(t, w.root, "E2E-1", e2eAtt)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if broughtUp(t, w.root, "CAP-A", capAtt) {
+		t.Fatal("CAP-A woken though its latest supervision event was passthrough — last event must win")
 	}
 }
 

@@ -83,12 +83,22 @@ func (r *Reconciler) activateReverseWants(all []project.Attempt, out map[worktre
 // Running. A W with no attempt (nothing to wake), a disabled W (respect the
 // human's park), or a W whose latest is a Review claim / Needs-me block / closed
 // Done (not dormant, and never force-admitted) is left untouched.
+//
+// The wake is further gated by W's supervision dial (drvctl-042): only a coordinator
+// whose effective mode is pre-digest is woken to assess. Under passthrough (the
+// floor) the child's escalation routes straight to Needs-me and W stays a dormant
+// Pending shell — no session spawned — until its own final review. The effective
+// mode folds W's per-ticket `supervision` override over the fleet default, so the
+// mode is read from config and overridable per ticket.
 func (r *Reconciler) wakeWanter(ticket string, attempts []project.Attempt, out map[worktree.Key]project.Attempt) {
 	if len(attempts) == 0 {
 		return
 	}
 	latest := attempts[len(attempts)-1]
 	if !latest.Enabled || latest.State != project.Running {
+		return
+	}
+	if project.Effective(latest.Supervision, r.opt.DefaultSupervision) != project.SupervisionPreDigest {
 		return
 	}
 	out[worktree.Key{Ticket: latest.Ticket, Attempt: latest.ID}] = latest
