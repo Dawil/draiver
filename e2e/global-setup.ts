@@ -33,19 +33,33 @@ export default async function globalSetup() {
     }
   };
 
+  // Attempt creation requires a real git working tree to cut worktrees from
+  // (drvctl-021); the fixture points every ticket at this repo. The board is read
+  // from the log, so no session is ever cut against it.
+  const repo = repoRoot;
+
   // PROJ-101 attempt 0001 -> Needs me (open escalation), with claude-code.
-  draiver("new", "PROJ-101", "--title", "Payment webhook", "--assignee", "dave", "--tool", "claude-code");
+  draiver("new", "PROJ-101", "--title", "Payment webhook", "--assignee", "dave", "--tool", "claude-code", "--repo", repo);
   draiver("log", "PROJ-101", "Stripe test keys only work in test mode.", "--type", "gotcha");
   draiver("escalate", "PROJ-101", "Which currency rounding rule for JPY?");
   // PROJ-101 attempt 0002 -> Running: a second journey with a different tool, so
   // the same ticket shows twice on the board.
-  draiver("attempt", "new", "PROJ-101", "--tool", "aider");
+  draiver("attempt", "new", "PROJ-101", "--tool", "aider", "--repo", repo);
 
   // PROJ-102 -> Review (agent claims done)
-  draiver("new", "PROJ-102", "--title", "Search index", "--assignee", "dave");
+  draiver("new", "PROJ-102", "--title", "Search index", "--assignee", "dave", "--repo", repo);
   draiver("log", "PROJ-102", "Chose server-side pagination over client-side.", "--type", "decision");
   draiver("review", "PROJ-102", "PR #142 open; tests green.");
 
   // PROJ-103 -> Running (freshly created)
-  draiver("new", "PROJ-103", "--title", "Nightly report job");
+  draiver("new", "PROJ-103", "--title", "Nightly report job", "--repo", repo);
+
+  // PROJ-104 -> Pending: enabled + Running with no live agent, and admitted only
+  // after PROJ-103 reaches Review (which it has not), so the forward gate holds it
+  // out and the board shows the quiet "waiting on PROJ-103" reason. Enabled but
+  // never brought up here (no `ctl up`), so no session.json exists and the liveness
+  // probe reads dead — exactly the self-resolving wait Pending names (drvweb-015).
+  draiver("new", "PROJ-104", "--title", "End-to-end suite", "--repo", repo);
+  draiver("depends", "PROJ-104", "--after", "PROJ-103");
+  draiver("ctl", "enable", "PROJ-104");
 }

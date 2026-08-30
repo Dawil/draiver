@@ -55,4 +55,23 @@ test.describe("board control states (per attempt)", () => {
     const link = page.getByTestId("col-running").getByTestId("attempt-link-PROJ-103-0001");
     await expect(link).toHaveAttribute("href", "/ticket/PROJ-103/0001");
   });
+
+  // drvweb-015: the Pending tier — a desired, log-Running attempt with no live
+  // agent, held out of admission by its after: gate. It renders as a quiet count
+  // nested under Running (decision #2), with the "waiting on X" reason on the card,
+  // and does not inflate the Running count.
+  test("a Pending attempt shows in the Pending tier with its waiting reason", async ({ page }) => {
+    await page.goto("/");
+
+    const pending = page.getByTestId("col-pending");
+    await expect(page.getByTestId("count-pending")).toHaveText("1");
+    await expect(pending.getByTestId("attempt-link-PROJ-104-0001")).toBeVisible();
+    await expect(pending.getByTestId("waiting-PROJ-104-0001")).toHaveText("waiting on PROJ-103");
+
+    // The Pending tier lives inside the Running column's vertical (decision #2)...
+    await expect(page.getByTestId("col-running").getByTestId("col-pending")).toBeVisible();
+    // ...but the Pending attempt is not counted as Running (still PROJ-101/0002 +
+    // PROJ-103/0001), so the tier stays a genuinely separate, quieter count.
+    await expect(page.getByTestId("count-running")).toHaveText("2");
+  });
 });

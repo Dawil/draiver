@@ -91,6 +91,57 @@ func TestDeriveDesired(t *testing.T) {
 	}
 }
 
+func TestWaitingReason(t *testing.T) {
+	att := func(ticket, id string, state State) Attempt {
+		return Attempt{Ticket: ticket, ID: id, State: state}
+	}
+	// E2E is admitted after SRC reaches Review and requires INFRA reach Done. SRC is
+	// only Running and INFRA only Review, so both gates are shut. GATED has no
+	// predecessors. DONE-DEP is a satisfied requires: predecessor.
+	all := []Attempt{
+		att("SRC", "0001", Running),
+		att("INFRA", "0001", Review),
+		att("SHIPPED", "0001", Done),
+	}
+	edges := map[string]Edges{
+		"E2E":   {After: []string{"SRC"}, Requires: []string{"INFRA"}},
+		"GATED": {},
+		"OKDEP": {After: []string{"SRC"}, Requires: []string{"SHIPPED"}},
+		"BOTH":  {After: []string{"SRC"}, Requires: []string{"SRC"}},
+	}
+
+	// after:SRC unmet (SRC only Running, not Review) and requires:INFRA unmet (INFRA
+	// only Review, not Done) — both named, after: before requires:.
+	if got := WaitingReason("E2E", all, edges); got != "waiting on SRC, INFRA" {
+		t.Errorf("E2E reason = %q want %q", got, "waiting on SRC, INFRA")
+	}
+	// after:SRC unmet but requires:SHIPPED satisfied (Done) — only SRC named.
+	if got := WaitingReason("OKDEP", all, edges); got != "waiting on SRC" {
+		t.Errorf("OKDEP reason = %q want %q", got, "waiting on SRC")
+	}
+	// SRC appears in both after: and requires:; it is named once.
+	if got := WaitingReason("BOTH", all, edges); got != "waiting on SRC" {
+		t.Errorf("BOTH reason = %q want %q (de-duplicated)", got, "waiting on SRC")
+	}
+	// No ordering predecessors: Pending for want of admission, not an edge.
+	if got := WaitingReason("GATED", all, edges); got != "waiting to start" {
+		t.Errorf("GATED reason = %q want %q", got, "waiting to start")
+	}
+	// A ticket with no edges entry at all also falls back to the generic reason.
+	if got := WaitingReason("UNKNOWN", all, edges); got != "waiting to start" {
+		t.Errorf("UNKNOWN reason = %q want %q", got, "waiting to start")
+	}
+
+	// Once SRC reaches Review and INFRA reaches Done, E2E's gate opens — no reason.
+	opened := []Attempt{
+		att("SRC", "0001", Review),
+		att("INFRA", "0001", Done),
+	}
+	if got := WaitingReason("E2E", opened, edges); got != "waiting to start" {
+		t.Errorf("E2E reason after gate opens = %q want %q", got, "waiting to start")
+	}
+}
+
 func TestLoadEdgesInlineAndBlock(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	writeSpec(t, root, "A", "---\nid: A\nwants: [B, C]\nafter: [D]\n---\n\nbody\n")

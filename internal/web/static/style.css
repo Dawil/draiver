@@ -47,6 +47,13 @@ body {
 .col-stuck { border-color: var(--alert); }
 .col-stuck h2 { color: var(--alert); }
 
+/* Pending is the quiet zero-attention tier nested under Running (decision #2):
+   a hairline-separated sub-section, its h3 smaller than a column h2 so it reads
+   as subordinate. The "waiting on X" line sits under a card's meta-row, muted. */
+.col-pending { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.col-pending h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.card .waiting { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
+
 /* The card tile and its optional external "Review changes" action are siblings
    inside .card-wrap (an <a> cannot nest in the tile's <a>); the action is
    positioned over the tile's top-right corner and sits above it (z-index) so its

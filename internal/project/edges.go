@@ -192,6 +192,79 @@ func DeriveDesired(all []Attempt, edges map[string]Edges) map[Ref]bool {
 	return desired
 }
 
+// reachedThreshold captures how far a ticket's work has progressed for the
+// forward gate's two admission thresholds: `review` is set once any attempt is at
+// Review-or-Done, `done` once any attempt is Done. It is the read-side twin of
+// reconcile.reachedState — the project tier cannot import the daemon's reconcile
+// package (that would be a cycle), so, exactly as DeriveDesired twins
+// reconcile.desired, the threshold read is mirrored here for the board's
+// "waiting on X" reason.
+type reachedThreshold struct {
+	review bool // an attempt is at Review or Done
+	done   bool // an attempt is at Done
+}
+
+// bestReached folds every attempt's derived control state into a per-ticket
+// threshold, taking the best (most-succeeded) state across a ticket's attempts —
+// success is monotonic, so a later re-run never retracts a threshold an earlier
+// attempt crossed. Mirrors reconcile.bestReached.
+func bestReached(all []Attempt) map[string]reachedThreshold {
+	out := map[string]reachedThreshold{}
+	for _, a := range all {
+		rs := out[a.Ticket]
+		switch a.State {
+		case Done:
+			rs.done = true
+			rs.review = true // Done is past Review, so it satisfies `after:` too
+		case Review:
+			rs.review = true
+		}
+		out[a.Ticket] = rs
+	}
+	return out
+}
+
+// WaitingReason is the human-facing line a board card shows for a Pending
+// attempt: the "waiting on X" peek the design (§The Pending state) carves out as
+// the one part of the Pending projection that reads a *sibling* ticket's state.
+// It names the ordering predecessors still holding the forward gate (drvctl-040)
+// shut — each `after:` predecessor not yet at Review, each `requires:` predecessor
+// not yet at Done — reusing the same thresholds as a read-side twin, so the reason
+// names exactly what the gate is waiting on. Predecessors are reported in
+// authored order (after: before requires:), de-duplicated when a ticket appears in
+// both.
+//
+// With every predecessor satisfied — or none authored — the attempt is Pending
+// for want of admission (desired but no live agent yet: queued for the supervisor,
+// or waiting on a wants:-parent activation), not an edge, so the reason is the
+// generic "waiting to start". `all` is LoadAll's output; `edges` is LoadAllEdges'.
+func WaitingReason(ticket string, all []Attempt, edges map[string]Edges) string {
+	e := edges[ticket]
+	reached := bestReached(all)
+	var unmet []string
+	seen := map[string]bool{}
+	add := func(x string) {
+		if !seen[x] {
+			seen[x] = true
+			unmet = append(unmet, x)
+		}
+	}
+	for _, x := range e.After {
+		if !reached[x].review {
+			add(x)
+		}
+	}
+	for _, x := range e.Requires {
+		if !reached[x].done {
+			add(x)
+		}
+	}
+	if len(unmet) == 0 {
+		return "waiting to start"
+	}
+	return "waiting on " + strings.Join(unmet, ", ")
+}
+
 // CheckCycle reports the first dependency cycle reachable in the union graph, as
 // the offending path (e.g. ["A", "B", "C", "A"]), or nil if the edges form a
 // DAG. A self-edge surfaces here too, as the length-2 path ["A", "A"]. The three

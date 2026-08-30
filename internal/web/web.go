@@ -551,6 +551,7 @@ func (s *Server) Serve(addr string) error {
 
 type boardVM struct {
 	Running []project.Attempt
+	Pending []project.Attempt
 	NeedsMe []project.Attempt
 	Review  []project.Attempt
 	Done    []project.Attempt
@@ -832,6 +833,18 @@ func (s *Server) board() (boardVM, error) {
 	if err != nil {
 		return boardVM{}, err
 	}
+	// Pending is a read-time projection folded over the log state (drvctl-039): a
+	// desired attempt with no live agent is not being worked, it is a self-resolving
+	// wait. Desiredness is fleet-wide (a via-parent child may be pulled in by a
+	// parent under another ticket down wants:), so it and the edges are computed once
+	// over every attempt, not per-card. Switching on a.Control() (not a.State) is the
+	// same overlay cmd/status.printBoard applies; every non-Pending state passes
+	// through unchanged.
+	edges, err := project.LoadAllEdges(s.root)
+	if err != nil {
+		return boardVM{}, err
+	}
+	desired := project.DeriveDesired(attempts, edges)
 	var vm boardVM
 	for _, a := range attempts {
 		// An archived attempt lands in no column — that is the whole board effect of
@@ -839,9 +852,16 @@ func (s *Server) board() (boardVM, error) {
 		if a.Archived {
 			continue
 		}
-		switch a.State {
+		a.Desired = desired[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
+		a.Live = s.attemptLive(a)
+		switch a.Control() {
 		case project.Running:
 			vm.Running = append(vm.Running, a)
+		case project.Pending:
+			// The "waiting on X" reason peeks at sibling tickets' states, so it is
+			// filled only for the cards that show it (drvweb-015).
+			a.WaitingReason = project.WaitingReason(a.Ticket, attempts, edges)
+			vm.Pending = append(vm.Pending, a)
 		case project.NeedsMe:
 			vm.NeedsMe = append(vm.NeedsMe, a)
 		case project.Review:
@@ -851,6 +871,17 @@ func (s *Server) board() (boardVM, error) {
 		}
 	}
 	return vm, nil
+}
+
+// attemptLive reports whether an attempt has a live agent process right now — the
+// Live bit the Pending projection folds over the log state. It reads session.json
+// and probes the recorded pid through the injectable s.alive, the same path the
+// session dot's "running" check uses (see sessionDot), so the board's Pending
+// tier and the green liveness dot can never disagree about whether an agent is up.
+// It is the web twin of session.Alive, going through s.alive so tests stub it.
+func (s *Server) attemptLive(a project.Attempt) bool {
+	id, ok := s.readSessionIdentity(a.Ticket, a.ID)
+	return ok && id.PID != 0 && s.alive(id.PID)
 }
 
 func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {

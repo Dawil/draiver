@@ -1,8 +1,18 @@
 {{define "board.html"}}
 <div class="columns">
+  {{/* Running and Pending share one vertical (decision #2): Pending is a quiet
+       sub-section nested under Running, not a fifth column — it conserves
+       horizontal space and reads as the lower-attention tier. The Running
+       placeholder still shows when Running is empty, so Pending sits readily
+       visible right under it. */}}
   <section class="col col-running" data-testid="col-running">
     <h2>Running <span class="count" data-testid="count-running">{{len .Running}}</span></h2>
     {{range .Running}}{{template "card" .}}{{else}}<p class="muted">Idle.</p>{{end}}
+
+    <section class="col-pending" data-testid="col-pending">
+      <h3>Pending <span class="count" data-testid="count-pending">{{len .Pending}}</span></h3>
+      {{range .Pending}}{{template "card" .}}{{else}}<p class="muted">Nothing waiting.</p>{{end}}
+    </section>
   </section>
 
   <section class="col col-stuck" data-testid="col-stuck">
@@ -41,6 +51,9 @@
       {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
       {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
     </span>
+    {{/* WaitingReason is set only for a Pending card (board()), so this quiet
+         "waiting on X" line renders on the Pending tier alone. */}}
+    {{if .WaitingReason}}<span class="waiting" data-testid="waiting-{{.Ticket}}-{{.ID}}">{{.WaitingReason}}</span>{{end}}
   </a>
   <div class="card-actions">
     {{if canEnable .}}
