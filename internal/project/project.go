@@ -66,6 +66,12 @@ type Attempt struct {
 	Desired bool
 	Live    bool
 
+	// WaitingReason is the human-facing "waiting on X" line a board card shows for a
+	// Pending attempt (drvweb-015), filled by the presentation caller from
+	// WaitingReason(). Empty on a log-only load and for every non-Pending attempt, so
+	// the card renders it only where it means something.
+	WaitingReason string
+
 	// Metrics is the attempt's final prompt-caching tally, folded into attempt.md
 	// on retire (drvctl-031). Nil until an attempt retires with a metered session,
 	// so a card renders the cache panel only once there is something to show.
