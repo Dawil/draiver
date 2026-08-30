@@ -46,8 +46,8 @@ import (
 
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -70,6 +70,10 @@ type Server struct {
 	// a board enable. The board has no CLI actor context, so it is configured at
 	// construction (see WithActor); it defaults to human:webui.
 	actor string
+	// gw is the in-process data-access gateway (drv-008): the webui's writes go
+	// through the same library functions the CLI verbs call, not a subprocess. It is
+	// bound to the server's root and actor once both are resolved (see New).
+	gw *repo.Repo
 }
 
 // Option configures a Server at construction. It keeps New's zero-config form
@@ -124,31 +128,20 @@ func draiverExe() (string, error) {
 	return exe, nil
 }
 
-// runDraiverLog appends a web-composed event by invoking the draiver CLI rather
-// than reimplementing the append in the web layer: note/gotcha/decision go
-// through `draiver log --type T`, and the terminal action through `draiver done`
-// — the same verbs a human runs at a terminal, so there is a single write path.
-// It passes the server's resolved data root, actor, and target attempt as
-// explicit flags (env-independent), and ends with "--" so a body beginning with
-// "-" is never parsed as a flag. On failure it surfaces the CLI's combined
-// output for a legible error.
-func (s *Server) runDraiverLog(typ, id, att, body string) error {
-	exe, err := draiverExe()
-	if err != nil {
+// appendComposed appends a web-composed event through the in-process data-access
+// gateway (drv-008) rather than reimplementing the append or shelling the CLI:
+// note/gotcha/decision go through AppendTyped (the generic `log`) and the terminal
+// action through Done — the same library functions `draiver log`/`draiver done`
+// call, so the board and a terminal share one write path. The gateway stamps the
+// server's actor and runs the same attempt-existence and link checks every append
+// goes through.
+func (s *Server) appendComposed(typ, id, att, body string) error {
+	if typ == "done" {
+		_, err := s.gw.Done(id, att, body)
 		return err
 	}
-	var args []string
-	if typ == "done" {
-		args = []string{"done"}
-	} else {
-		args = []string{"log", "--type", typ}
-	}
-	args = append(args, "--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id, body)
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := s.gw.AppendTyped(id, att, event.Event{Type: typ, Body: body})
+	return err
 }
 
 // runDraiverAttemptSet writes an attempt's provenance (repo/base) by invoking
@@ -205,27 +198,6 @@ func (s *Server) runDraiverEdges(id string, e project.Edges) error {
 	cmd := exec.Command(exe, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// runDraiverResolve answers an escalation by invoking `draiver resolve` rather
-// than reimplementing the resolution append in the web layer — the same verb a
-// human runs at a terminal, so the board and the CLI share one write path (see
-// runDraiverLog). The escalation seq and the answer go as positional args after
-// "--" so an answer beginning with "-" is never parsed as a flag; the server's
-// data root, actor, and target attempt go as explicit flags. On failure it
-// surfaces the CLI's combined output for a legible error.
-func (s *Server) runDraiverResolve(id, att string, seq int, answer string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	args := []string{"resolve", "--data", s.root.Dir, "--actor", s.actor, "--attempt", att,
-		"--", id, strconv.Itoa(seq), answer}
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver resolve: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -476,6 +448,10 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Bind the data-access gateway once the actor is resolved (an Option may have
+	// overridden the human:webui default): every web write goes through it, so the
+	// board and a terminal share one in-process write path per event.
+	s.gw = repo.New(s.root, s.actor)
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
 			"stateLabel":    stateLabel,
@@ -1180,7 +1156,7 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.runDraiverLog(typ, id, att, body); err != nil {
+	if err := s.appendComposed(typ, id, att, body); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1236,7 +1212,7 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// Only the disabled→enabled transition writes; canEnable is the same gate the
 	// button renders behind, so a POST for a card that shows no button is a no-op.
 	if canEnable(a) {
-		if err := s.runDraiverEnable(id, att); err != nil {
+		if _, err := s.gw.Enable(id, att); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -1248,28 +1224,6 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// Re-render just this card; htmx swaps it in place (outerHTML on .card-wrap),
 	// dropping the button and recomputing the session-dot off the fresh state.
 	s.render(w, "card", a)
-}
-
-// runDraiverEnable opts an attempt into supervision by invoking the draiver CLI
-// rather than reimplementing the append in the web layer: `draiver ctl enable`
-// records the durable `enable` log event (setEnabled, cmd/ctl_enable.go), the
-// exact write a human's terminal performs, so there is a single enable code path.
-// It passes the server's resolved data root, actor, and target attempt as
-// explicit flags (env-independent), and ends with "--" so a ticket id beginning
-// with "-" is never parsed as a flag. Bare enable only (no --now): no control
-// socket is dragged into the web process. On failure it surfaces the CLI's
-// combined output for a legible error.
-func (s *Server) runDraiverEnable(id, att string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(exe, "ctl", "enable",
-		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver ctl enable: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // handleArchive takes an attempt off the board (POST
@@ -1307,16 +1261,12 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only an on-board attempt writes; canArchive is the same gate the button renders
 	// behind, so a POST for an already-archived card (a double-submit) is a no-op that
-	// just re-renders the board. The sentiment is server-derived from State, never the
-	// posted form, via the same helper the card renders with.
+	// just re-renders the board. The sentiment is server-derived from State inside the
+	// gateway (outcome ""), never the posted form — the same single implementation of
+	// "what an archive is" the CLI verb calls. The library also owns the idempotency
+	// no-op, so canArchive here is just the render/effect-agreement gate.
 	if canArchive(a) {
-		act := archiveAction(a)
-		if _, err := ticketlog.Append(s.root, id, att, event.Event{
-			Type:    "archive",
-			Actor:   s.actor,
-			Outcome: act.Outcome,
-			Body:    archiveBody(act.Outcome),
-		}); err != nil {
+		if _, err := s.gw.Archive(id, att, ""); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -1331,16 +1281,6 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	}
 	emitFaviconTrigger(w, vm)
 	s.render(w, "board.html", vm)
-}
-
-// archiveBody is the human-readable body stamped on an archive event, keyed off the
-// server-derived sentiment. The machine-readable truth is the event's Outcome
-// field; this is the prose a human reads on the timeline.
-func archiveBody(outcome string) string {
-	if outcome == "accepted" {
-		return "Accepted and archived from the board."
-	}
-	return "Closed and archived from the board."
 }
 
 // handleMergeRemote closes a Review attempt whose change landed via a PR merged
@@ -1565,7 +1505,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "draiver: "+msg, status)
 		return
 	}
-	if err := s.runDraiverResolve(id, att, seq, answer); err != nil {
+	if _, err := s.gw.Resolve(id, att, seq, answer); err != nil {
 		s.fail(w, err)
 		return
 	}

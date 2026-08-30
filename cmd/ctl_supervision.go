@@ -6,9 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
-	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 // supervision sets a Capability's per-ticket coordinator supervision mode
@@ -58,12 +57,7 @@ func setSupervision(cmd *cobra.Command, arg, modeArg string) error {
 	if err != nil {
 		return err
 	}
-	e, err := ticketlog.Append(root, ticket, att, event.Event{
-		Type:    "supervision",
-		Actor:   resolveActor(),
-		Outcome: string(mode),
-		Body:    fmt.Sprintf("Coordinator supervision set to %s for %s/%s.", mode, ticket, att),
-	})
+	e, err := repo.New(root, resolveActor()).Supervision(ticket, att, mode)
 	if err != nil {
 		return err
 	}

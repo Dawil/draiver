@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/event"
-	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 // enable/disable are the supervision gate the daemon (`ctl up`) honours: only an
@@ -83,17 +83,19 @@ func setEnabled(cmd *cobra.Command, arg string, enable bool) error {
 	if err != nil {
 		return err
 	}
+	g := repo.New(root, resolveActor())
+	var e event.Event
+	if enable {
+		e, err = g.Enable(ticket, att)
+	} else {
+		e, err = g.Disable(ticket, att)
+	}
+	if err != nil {
+		return err
+	}
 	typ, verb := "disable", "disabled"
 	if enable {
 		typ, verb = "enable", "enabled"
-	}
-	e, err := ticketlog.Append(root, ticket, att, event.Event{
-		Type:  typ,
-		Actor: resolveActor(),
-		Body:  fmt.Sprintf("Supervision %s for %s/%s.", verb, ticket, att),
-	})
-	if err != nil {
-		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s %s/%s (%s #%d)\n", verb, ticket, att, typ, e.Seq)
 	return nil

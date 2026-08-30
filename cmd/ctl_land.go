@@ -30,9 +30,9 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/reconcile"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -219,9 +219,7 @@ func (lc *landContext) merge(cmd *cobra.Command) error {
 	if landed.AlreadyUpToDate {
 		body = fmt.Sprintf("`ctl merge`: %s was already contained in %s (nothing to land); recording done.", landed.Branch, landed.Base)
 	}
-	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "done", Actor: resolveActor(), Body: body,
-	})
+	e, err := repo.New(lc.root, resolveActor()).Done(lc.ticket, lc.attempt, body)
 	if err != nil {
 		return err
 	}
@@ -260,9 +258,7 @@ func (lc *landContext) mergeRemote(cmd *cobra.Command) error {
 	// the remote this time. Record `done` so control state follows reality.
 	body := fmt.Sprintf("`ctl merge --remote=%s`: %s is contained in %s (tip %s) — the change landed via an external PR merge; recording done.",
 		remote, rm.Branch, rm.Ref, shortSHA(rm.RemoteTip))
-	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "done", Actor: resolveActor(), Body: body,
-	})
+	e, err := repo.New(lc.root, resolveActor()).Done(lc.ticket, lc.attempt, body)
 	if err != nil {
 		return err
 	}
@@ -351,8 +347,8 @@ func (lc *landContext) sync(cmd *cobra.Command) error {
 	// A back-merge is a real, durable change to the branch; note it so a resumed
 	// agent sees the tip moved and why.
 	body := fmt.Sprintf("Synced %s into %s (merge commit, tip %s) via `ctl sync`; the branch is now ff-landable.", synced.Base, synced.Branch, shortSHA(synced.Tip))
-	if _, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "note", Actor: resolveActor(), Body: body,
+	if _, err := repo.New(lc.root, resolveActor()).AppendTyped(lc.ticket, lc.attempt, event.Event{
+		Type: "note", Body: body,
 	}); err != nil {
 		return err
 	}
@@ -394,8 +390,8 @@ func (lc *landContext) fail(cmd *cobra.Command, op string, cause error) error {
 	}
 	// Append to the *resolved* attempt (lc.attempt), not via appendEvent's
 	// latest/env fallback, so an explicit `@attempt` target escalates on itself.
-	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "escalation", Actor: resolveActor(), Body: msg,
+	e, err := repo.New(lc.root, resolveActor()).AppendTyped(lc.ticket, lc.attempt, event.Event{
+		Type: "escalation", Body: msg,
 	})
 	if err != nil {
 		return err

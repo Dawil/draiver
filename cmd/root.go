@@ -10,10 +10,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/attempt"
-	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 const (
@@ -157,30 +156,10 @@ func appendEvent(id string, e event.Event) (event.Event, string, error) {
 // core of appendEvent, split out for verbs (archive/unarchive) that resolve a
 // `ticket[@attempt]` target and load its derived state before writing, yet still
 // want the same attempt-existence check, review-link validation, and actor
-// stamping every append goes through.
+// stamping every append goes through. Those write semantics now live once in
+// internal/repo (drv-008); this is the CLI's thin adapter over that gateway,
+// stamping the actor resolved from the CLI's --actor/env/$USER context.
 func appendEventAt(root store.Root, id, att string, e event.Event) (event.Event, string, error) {
-	if !root.AttemptExists(id, att) {
-		return event.Event{}, "", fmt.Errorf("attempt %s/%s not found", id, att)
-	}
-	// Validate any review links against the append-time safety floor (hardcoded
-	// {http, https} scheme allowlist) and the optional per-deployment host
-	// allowlist, before the single write below — a rejected link fails the command
-	// and writes nothing, matching new's reject-writes-nothing posture. Config is
-	// loaded only when links are present so link-less appends pay nothing.
-	if len(e.Links) > 0 {
-		cfg, err := config.Load("")
-		if err != nil {
-			return event.Event{}, "", err
-		}
-		for _, l := range e.Links {
-			if err := event.ValidateLink(l, cfg.ReviewLinkHosts); err != nil {
-				return event.Event{}, "", fmt.Errorf("invalid --link %s=%s: %w", l.Rel, l.Href, err)
-			}
-		}
-	}
-	if e.Actor == "" {
-		e.Actor = resolveActor()
-	}
-	ev, err := ticketlog.Append(root, id, att, e)
+	ev, err := repo.New(root, resolveActor()).AppendAt(id, att, e)
 	return ev, att, err
 }
