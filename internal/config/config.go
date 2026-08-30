@@ -25,6 +25,12 @@ import (
 const (
 	DefaultContextWindow = 200_000
 	DefaultContextLimit  = 150_000
+
+	// DefaultSupervision is the built-in coordinator supervision mode (drvctl-042)
+	// when config sets none: "passthrough", the floor — a sub-ticket escalation
+	// routes straight to Needs-me and no coordinator wakes. Opting a fleet into
+	// pre-digest is a deliberate config choice, mirroring how enable is opt-in.
+	DefaultSupervision = "passthrough"
 )
 
 // Config is the operator's resolved supervisor tunables. Every field carries a
@@ -78,6 +84,16 @@ type Config struct {
 	// construction if it does not (paired with the drvctl-033 version pin).
 	ExcludeDynamicSystemPromptSections bool `json:"exclude_dynamic_system_prompt_sections"`
 
+	// DefaultSupervision is the global/project default coordinator supervision mode
+	// (drvctl-042): "passthrough" (the floor — a sub-ticket escalation goes straight
+	// to Needs-me, no coordinator wakes) or "pre-digest" (reverse-`wants:` wakes the
+	// coordinator to assess and post one consolidated recommendation). A per-ticket
+	// `supervision` log event overrides it, exactly as `enable` overrides a global
+	// "disabled by default". Default "passthrough". Kept a plain string here so this
+	// package stays dependency-free; it is validated into a project.Supervision where
+	// the reconciler is built, failing daemon start loudly on a bad value.
+	DefaultSupervision string `json:"default_supervision"`
+
 	// AppendSystemPromptFile is a path to a file whose contents the daemon passes
 	// as the coding-agent's --append-system-prompt, carrying draiver's invariant
 	// protocol *above* the excluded per-machine wall so it stays part of the shared,
@@ -91,8 +107,9 @@ type Config struct {
 // the fill-in for any field a file omits.
 func Default() Config {
 	return Config{
-		ContextWindow: DefaultContextWindow,
-		ContextLimit:  DefaultContextLimit,
+		ContextWindow:      DefaultContextWindow,
+		ContextLimit:       DefaultContextLimit,
+		DefaultSupervision: DefaultSupervision,
 	}
 }
 
@@ -109,6 +126,7 @@ type file struct {
 	PrimaryRemote                      *string           `json:"primary_remote"`
 	ExcludeDynamicSystemPromptSections *bool             `json:"exclude_dynamic_system_prompt_sections"`
 	AppendSystemPromptFile             *string           `json:"append_system_prompt_file"`
+	DefaultSupervision                 *string           `json:"default_supervision"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -177,6 +195,9 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.AppendSystemPromptFile != nil {
 		c.AppendSystemPromptFile = *f.AppendSystemPromptFile
+	}
+	if f.DefaultSupervision != nil {
+		c.DefaultSupervision = *f.DefaultSupervision
 	}
 	return c, nil
 }

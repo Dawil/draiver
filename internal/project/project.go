@@ -57,6 +57,14 @@ type Attempt struct {
 	Events          []event.Event
 	OpenEscalations []event.Event // escalations with no later resolution
 
+	// Supervision is the attempt's per-ticket coordinator-supervision override
+	// (drvctl-042), SupervisionDefault when none is set — the last `supervision`
+	// log event wins (see DeriveSupervision). It is the dial on reverse-`wants:`
+	// activation: on a child escalation, only a coordinator whose effective mode
+	// (this override folded over the config default, see Effective) is pre-digest
+	// is woken. A durable, log-derived bit like Enabled.
+	Supervision Supervision
+
 	// Desired and Live are runtime bits a presentation caller fills to derive the
 	// Pending control state (see Control); both default false on a log-only load, so
 	// the log tier (reconciler, brief) is unaffected. Desired is effective
@@ -235,7 +243,8 @@ func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
 		Ticket: ticket, ID: id, Title: title, Assignee: spec.Assignee,
 		Tool: am.Tool, Model: am.Model, Repo: am.Repo, Base: am.Base,
 		State: state, Enabled: DeriveEnabled(events), Archived: DeriveArchived(events),
-		Events: events, OpenEscalations: open,
+		Supervision: DeriveSupervision(events),
+		Events:      events, OpenEscalations: open,
 		Metrics: am.Metrics,
 	}, nil
 }

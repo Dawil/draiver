@@ -42,7 +42,7 @@ var (
 	ctlContextLimit  int // -1 sentinel: resolve from config
 	ctlLogsFollow    bool
 	ctlLogsJSON      bool
-	ctlLogsTail      int // -f backlog window: last N stream records before following
+	ctlLogsTail      int               // -f backlog window: last N stream records before following
 	ctlStatusAll     bool              // include terminal Done attempts in the list view
 	ctlPermRules     map[string]string // --permission tool=rule, layered over config
 
@@ -1091,14 +1091,22 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "draiverctld: adapter version probe failed, provenance will omit it: %v\n", err)
 	}
+	// Resolve the fleet's default coordinator supervision mode (drvctl-042). A bad
+	// config value fails daemon start loudly — same posture as the permission policy
+	// above — rather than silently degrading the dial to a wrong default.
+	defaultSupervision, err := project.ParseSupervision(cfg.DefaultSupervision)
+	if err != nil {
+		return nil, fmt.Errorf("config default_supervision: %w", err)
+	}
 	return reconcile.New(reconcile.Options{
-		Root:           root,
-		DefaultRepo:    ctlRepo,
-		Adapters:       claudeAdapters,
-		AdapterVersion: adapterVersion,
-		Actor:          resolveActor(),
-		ContextLimit:   contextLimit,
-		PermPolicy:     permPolicy,
+		Root:               root,
+		DefaultRepo:        ctlRepo,
+		Adapters:           claudeAdapters,
+		AdapterVersion:     adapterVersion,
+		Actor:              resolveActor(),
+		ContextLimit:       contextLimit,
+		DefaultSupervision: defaultSupervision,
+		PermPolicy:         permPolicy,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
