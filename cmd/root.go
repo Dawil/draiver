@@ -135,8 +135,9 @@ func resolveAttempt(root store.Root, id string) (string, error) {
 	return latest, nil
 }
 
-// appendEvent resolves root + target attempt, stamps the actor, and appends the
-// event, returning the persisted event and the attempt it landed on.
+// appendEvent resolves root + target attempt (--attempt / $DRAIVER_ATTEMPT /
+// latest), stamps the actor, and appends the event, returning the persisted event
+// and the attempt it landed on.
 func appendEvent(id string, e event.Event) (event.Event, string, error) {
 	root, err := resolveRoot()
 	if err != nil {
@@ -149,6 +150,15 @@ func appendEvent(id string, e event.Event) (event.Event, string, error) {
 	if err != nil {
 		return event.Event{}, "", err
 	}
+	return appendEventAt(root, id, att, e)
+}
+
+// appendEventAt appends e to an already-resolved (ticket, attempt) — the shared
+// core of appendEvent, split out for verbs (archive/unarchive) that resolve a
+// `ticket[@attempt]` target and load its derived state before writing, yet still
+// want the same attempt-existence check, review-link validation, and actor
+// stamping every append goes through.
+func appendEventAt(root store.Root, id, att string, e event.Event) (event.Event, string, error) {
 	if !root.AttemptExists(id, att) {
 		return event.Event{}, "", fmt.Errorf("attempt %s/%s not found", id, att)
 	}
