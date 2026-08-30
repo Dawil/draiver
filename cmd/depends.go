@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 
 	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 var (
@@ -80,7 +80,7 @@ var dependsCmd = &cobra.Command{
 		pick := func(name string, existingVals, flagVals []string) []string {
 			if dependsSet {
 				if cmd.Flags().Changed(name) {
-					return cleanIDs(flagVals)
+					return repo.CleanIDs(flagVals)
 				}
 				return existingVals
 			}
@@ -113,13 +113,13 @@ var dependsCmd = &cobra.Command{
 			return fmt.Errorf("read spec: %w", err)
 		}
 		if touched("wants", dependsWants) {
-			data = injectListField(data, "wants", merged.Wants)
+			data = repo.InjectListField(data, "wants", merged.Wants)
 		}
 		if touched("after", dependsAfter) {
-			data = injectListField(data, "after", merged.After)
+			data = repo.InjectListField(data, "after", merged.After)
 		}
 		if touched("requires", dependsRequires) {
-			data = injectListField(data, "requires", merged.Requires)
+			data = repo.InjectListField(data, "requires", merged.Requires)
 		}
 		if err := os.WriteFile(specPath, data, 0o644); err != nil {
 			return fmt.Errorf("write spec: %w", err)
@@ -150,102 +150,11 @@ func unionIDs(existing, add []string) []string {
 	return out
 }
 
-// cleanIDs trims whitespace and drops blanks and duplicates from a single group,
-// preserving first-seen order — the replace-mode counterpart to unionIDs (which
-// is cleanIDs over two groups). An all-blank input yields an empty slice, the
-// "clear this relation" signal.
-func cleanIDs(vals []string) []string {
-	return unionIDs(nil, vals)
-}
-
 func fmtList(v []string) string {
 	if len(v) == 0 {
 		return "[]"
 	}
 	return "[" + strings.Join(v, ",") + "]"
-}
-
-// injectListField sets key to a flow-style YAML list (`key: [a, b, c]`) in data's
-// frontmatter, replacing any existing entry for key — inline or block form — and
-// leaving every other line, comment, and the body untouched. It mirrors
-// injectTitle's line surgery (rather than a full re-marshal) so the scaffold's
-// commented hint lines survive. An empty values slice removes the key.
-func injectListField(data []byte, key string, values []string) []byte {
-	s := string(data)
-	line := yamlListLine(key, values)
-
-	if !strings.HasPrefix(s, "---\n") {
-		if len(values) == 0 {
-			return data
-		}
-		return []byte("---\n" + line + "\n---\n\n" + s)
-	}
-	rest := s[len("---\n"):]
-	end := strings.Index(rest, "\n---")
-	if end < 0 {
-		// Opening fence with no close: treat as bodyless and prepend a block.
-		if len(values) == 0 {
-			return data
-		}
-		return []byte("---\n" + line + "\n---\n\n" + s)
-	}
-	lines := strings.Split(rest[:end], "\n")
-
-	// Find the key's line and the extent of its value: the key line plus any
-	// following block-sequence item lines (trimmed `- …`) that belong to it. This
-	// spans both `key: [a]` (no continuation) and the multi-line block form at any
-	// indentation, since we already hold the merged values and only need to replace.
-	start, stop := -1, -1
-	for i, ln := range lines {
-		if strings.HasPrefix(strings.TrimSpace(ln), key+":") {
-			start = i
-			stop = i + 1
-			for stop < len(lines) {
-				t := strings.TrimSpace(lines[stop])
-				if strings.HasPrefix(t, "-") {
-					stop++
-					continue
-				}
-				break
-			}
-			break
-		}
-	}
-
-	var out []string
-	switch {
-	case start >= 0 && len(values) == 0:
-		out = append(out, lines[:start]...)
-		out = append(out, lines[stop:]...)
-	case start >= 0:
-		out = append(out, lines[:start]...)
-		out = append(out, line)
-		out = append(out, lines[stop:]...)
-	case len(values) == 0:
-		return data
-	default:
-		out = append(lines, line)
-	}
-	return []byte("---\n" + strings.Join(out, "\n") + rest[end:])
-}
-
-// yamlListLine renders `key: [a, b, c]` — a single flow-style frontmatter line —
-// marshalling via yaml.v3 so any id needing quoting is encoded safely, matching
-// yamlLine's guarantee for scalars.
-func yamlListLine(key string, values []string) string {
-	seq := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
-	for _, v := range values {
-		seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: v})
-	}
-	m := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
-		{Kind: yaml.ScalarNode, Value: key}, seq,
-	}}
-	out, err := yaml.Marshal(m)
-	if err != nil {
-		// Marshalling a string sequence does not fail; guard defensively.
-		return key + ": [" + strings.Join(values, ", ") + "]"
-	}
-	return strings.TrimRight(string(out), "\n")
 }
 
 func init() {

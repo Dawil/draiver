@@ -144,64 +144,6 @@ func (s *Server) appendComposed(typ, id, att, body string) error {
 	return err
 }
 
-// runDraiverAttemptSet writes an attempt's provenance (repo/base) by invoking
-// `draiver attempt set` rather than reimplementing the attempt.md write in the
-// web layer — the same verb a human runs at a terminal, so the board and the CLI
-// share one write path (see runDraiverLog). Only a non-empty field is passed as a
-// flag: a blank input omits the flag so `attempt set` leaves that field untouched
-// (drvweb-009 maps a blank input to "no change", never to "clear"; the caller has
-// already rejected the both-blank case). The data root goes as an explicit flag
-// and the ticket@attempt target after "--" so an id beginning with "-" is never
-// parsed as a flag. No --actor: `attempt set` appends no hash-chained event, so
-// the write carries no actor to attribute. On failure it surfaces the CLI's
-// combined output for a legible error.
-func (s *Server) runDraiverAttemptSet(id, att, repo, base string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	args := []string{"attempt", "set", "--data", s.root.Dir}
-	if repo != "" {
-		args = append(args, "--repo", repo)
-	}
-	if base != "" {
-		args = append(args, "--base", base)
-	}
-	args = append(args, "--", id+"@"+att)
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver attempt set: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// runDraiverEdges rewrites a ticket's dependency edges by invoking `draiver
-// depends --set` rather than writing spec.md from the web layer — the same
-// frontmatter-merge verb a human runs at a terminal (drvctl-037), so the board
-// and the CLI share one write path (see runDraiverAttemptSet). --set makes each
-// relation a whole-set replace: the panel is a WYSIWYG editor, so all three
-// relations are always passed (a blank one clears that relation). The verb owns
-// the self-edge and cycle refusal and writes nothing when it refuses; on a
-// nonzero exit this returns the CLI's combined output so the caller can surface
-// the refusal inline. No --actor: `depends` appends no hash-chained event (edges
-// are metadata outside the audited log), so there is nothing to attribute.
-func (s *Server) runDraiverEdges(id string, e project.Edges) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	args := []string{"depends", "--set", "--data", s.root.Dir,
-		"--wants", strings.Join(e.Wants, ","),
-		"--after", strings.Join(e.After, ","),
-		"--requires", strings.Join(e.Requires, ","),
-		"--", id}
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // stateLabels overrides how a control state is shown in the human-facing web UI.
 // The domain vocabulary (project.State, surfaced by the CLI, state.md, and brief)
 // is unchanged; only the board column and the detail badge read differently.
@@ -1390,13 +1332,24 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 	// the human actually filled. An all-blank submit changes nothing — reject it as
 	// a bad request here rather than let the verb's "nothing to set" surface as a
 	// 500.
-	repo := strings.TrimSpace(r.FormValue("repo"))
-	base := strings.TrimSpace(r.FormValue("base"))
-	if repo == "" && base == "" {
+	repoVal := strings.TrimSpace(r.FormValue("repo"))
+	baseVal := strings.TrimSpace(r.FormValue("base"))
+	if repoVal == "" && baseVal == "" {
 		http.Error(w, "draiver: set a repo or a base to save", http.StatusBadRequest)
 		return
 	}
-	if err := s.runDraiverAttemptSet(id, att, repo, base); err != nil {
+	// A blank field maps to "no change" (a nil Provenance pointer); the panel has
+	// already rejected the all-blank submit. Base is passed as typed — the webui
+	// never triggers the empty-base→current-branch defaulting the CLI's `attempt
+	// set` does (that path is git-side and only fires on an omitted flag).
+	var p repo.Provenance
+	if repoVal != "" {
+		p.Repo = &repoVal
+	}
+	if baseVal != "" {
+		p.Base = &baseVal
+	}
+	if _, err := s.gw.SetProvenance(id, att, p); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1433,7 +1386,7 @@ func (s *Server) handleEdges(w http.ResponseWriter, r *http.Request) {
 		After:    parseEdgeField(r.FormValue("after")),
 		Requires: parseEdgeField(r.FormValue("requires")),
 	}
-	if err := s.runDraiverEdges(id, want); err != nil {
+	if err := s.gw.SetEdges(id, want); err != nil {
 		// A refusal (self-edge/cycle) is user-facing, not a server fault: re-render
 		// the panel in place with the values the human tried and the reason, so the
 		// edit is not lost and the refusal reads inline. The verb wrote nothing.
