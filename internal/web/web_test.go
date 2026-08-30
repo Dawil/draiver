@@ -875,6 +875,27 @@ func TestArchivePostRemovesCardAndAppendsEvent(t *testing.T) {
 	}
 }
 
+// TestArchiveActorConfigurable pins the shell-out's actor plumbing, the archive
+// peer of TestEnableActorConfigurable: the archive route drives `draiver archive`
+// (the real built binary via draiverBinOverride), passing the server's configured
+// actor as --actor, so the on-disk event is attributed to that identity rather than
+// the human:webui default. Proves the write goes through the CLI, not a direct
+// append.
+func TestArchiveActorConfigurable(t *testing.T) {
+	root := seedColumns(t)
+	s, err := New(root, WithActor("human:dave"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := post(t, s.Handler(), "/ticket/RUN-1/0001/archive"); rr.Code != 200 {
+		t.Fatalf("POST archive = %d, want 200", rr.Code)
+	}
+	got := archiveEvents(t, root, "RUN-1", "0001")
+	if len(got) != 1 || got[0].Type != "archive" || got[0].Actor != "human:dave" || got[0].Outcome != "abandoned" {
+		t.Errorf("archive events = %+v, want one abandoned archive attributed to human:dave", got)
+	}
+}
+
 // TestArchivedAttemptOmittedFromBoard pins the board effect: an archived attempt
 // lands in no column, so its card is not emitted anywhere on the board.
 func TestArchivedAttemptOmittedFromBoard(t *testing.T) {
