@@ -481,6 +481,15 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	if err := r.applyForwardGate(all, out); err != nil {
 		return nil, err
 	}
+
+	// Reverse-`wants:` activation (drvctl-041): a wanted child's escalation wakes the
+	// dormant (Pending) coordinator that wants it — the `OnFailure=` analog. Runs
+	// last, *after* the forward gate, so the wake overrides a coordinator's own shut
+	// `after:`/`requires:` gate; a child crying for help is exactly when the
+	// coordinator should assess (see reverse_wants.go).
+	if err := r.activateReverseWants(all, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
