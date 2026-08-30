@@ -50,6 +50,7 @@ func run(t *testing.T, args ...string) (string, int) {
 	canaryMinPrefix, canaryReadFloor = 0, 0
 	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
 	mergeRemote = ""
+	archiveAccepted, archiveAbandoned = false, false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 	resetFlagsChanged(rootCmd)
 
