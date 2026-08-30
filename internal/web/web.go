@@ -70,6 +70,13 @@ type Server struct {
 	// a board enable. The board has no CLI actor context, so it is configured at
 	// construction (see WithActor); it defaults to human:webui.
 	actor string
+	// supDefault is the global/project default coordinator supervision mode
+	// (drvctl-042) the capability panel folds a per-ticket override over to show the
+	// *effective* mode (project.Effective). The web package stays config-free — the
+	// value is threaded in from cmd/webui.go (see WithSupervisionDefault); it
+	// defaults to the passthrough floor so a zero-config New still resolves a
+	// concrete mode.
+	supDefault project.Supervision
 }
 
 // Option configures a Server at construction. It keeps New's zero-config form
@@ -84,6 +91,20 @@ func WithActor(actor string) Option {
 	return func(s *Server) {
 		if actor != "" {
 			s.actor = actor
+		}
+	}
+}
+
+// WithSupervisionDefault sets the global/project default supervision mode the
+// capability panel folds a per-ticket override over (drvctl-042). It takes the raw
+// config string so the web package need not import config; an unparseable or empty
+// value is ignored, leaving the passthrough floor. This is the only place the
+// board learns the config default, so a capability with no per-ticket override
+// still shows the operator's true effective mode.
+func WithSupervisionDefault(mode string) Option {
+	return func(s *Server) {
+		if m, err := project.ParseSupervision(mode); err == nil {
+			s.supDefault = m
 		}
 	}
 }
@@ -472,7 +493,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	md := goldmark.New(goldmark.WithParserOptions(
 		parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
 	))
-	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui"}
+	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui", supDefault: project.SupervisionPassthrough}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -509,13 +530,14 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum, Waratah))
 }
 
-// Handler returns the route mux. Every route is a GET but six writes: POST
+// Handler returns the route mux. Every route is a GET but seven writes: POST
 // .../log appends a composed log event, POST .../resolve answers an open
 // escalation, POST .../enable opts an attempt into daemon supervision, POST
 // .../archive takes an attempt off the board (an `archive` event, accepted or
 // abandoned), POST .../merge-remote closes a Review attempt landed by an external
-// PR and pulls its base (via `ctl merge --remote`), and POST .../provenance sets
-// the repo/base that gate merge/sync (via `attempt set`).
+// PR and pulls its base (via `ctl merge --remote`), POST .../provenance sets the
+// repo/base that gate merge/sync (via `attempt set`), and POST .../supervision
+// sets a Capability's coordinator supervision mode (via `ctl supervision`).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -533,6 +555,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/merge-remote", s.handleMergeRemote)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
 }
@@ -642,6 +665,140 @@ type detailVM struct {
 	// FaviconHref is the current board variant, server-rendered into the detail
 	// page's <link rel="icon"> so the tab icon reflects live board state on load.
 	FaviconHref string
+	// Capability drives the capability panel (drvweb-017): the `wants:` sub-fleet
+	// glance plus the supervision dial. It is non-nil only when the attempt's ticket
+	// is a Capability (carries `wants:` edges), so the panel renders on a coordinator
+	// and is absent on an ordinary ticket. Built by s.capability.
+	Capability *capabilityVM
+}
+
+// capabilityVM drives the "capability-panel" partial (drvweb-017): a Capability's
+// `wants:` sub-fleet at a glance plus the supervision dial. It is built only for a
+// Capability attempt (its ticket carries `wants:` edges); an ordinary attempt gets
+// a nil Capability and no panel. Attempt supplies the POST target (Ticket/ID);
+// Children are the sub-fleet rows; the dial fields (Mode/Default/Overridden/Modes)
+// project the per-ticket supervision override folded over the config default. Saved
+// is true only in the successful-POST response so the panel can confirm the write
+// after an htmx swap (the full-page render leaves it false).
+type capabilityVM struct {
+	Attempt  project.Attempt
+	Children []capChildVM
+	// Mode is the *effective* mode shown selected — the per-ticket override folded
+	// over the config default (project.Effective), always a concrete mode.
+	Mode project.Supervision
+	// Default is the config default the override falls back to; Overridden is true
+	// when a per-ticket `supervision` event set the mode (so the panel can say it is
+	// inheriting the default when it is not).
+	Default    project.Supervision
+	Overridden bool
+	Modes      []capModeVM
+	Saved      bool
+}
+
+// capChildVM is one row of a Capability's sub-fleet: a `wants:` child with its
+// latest attempt's control state and, when that state is Pending, the gate reason
+// holding it (WaitingReason). HasAttempt is false for a wanted ticket with no
+// attempt yet (the daemon would mint one) — the row shows a quiet placeholder
+// rather than a state badge.
+type capChildVM struct {
+	Ticket        string
+	Href          string
+	HasAttempt    bool
+	AttemptID     string
+	State         project.State
+	StateLabel    string
+	WaitingReason string // only when Pending; the "waiting on X" gate reason
+}
+
+// capModeVM is one option of the supervision dial: a concrete mode with its
+// human-facing label and one-line description, and whether it is the current
+// (effective) selection.
+type capModeVM struct {
+	Value    project.Supervision
+	Label    string
+	Desc     string
+	Selected bool
+}
+
+// supervisionModeVMs projects the two shipped supervision modes into dial options,
+// marking the one matching the effective mode selected. The order is floor→forward
+// (passthrough then pre-digest), matching the design's dial; the deferred
+// auto-execute is intentionally absent (project.ParseSupervision rejects it).
+func supervisionModeVMs(selected project.Supervision) []capModeVM {
+	defs := []struct {
+		v           project.Supervision
+		label, desc string
+	}{
+		{project.SupervisionPassthrough, "Passthrough",
+			"A sub-ticket escalation goes straight to Needs-me; no coordinator wakes."},
+		{project.SupervisionPreDigest, "Pre-digest",
+			"A sub-ticket escalation wakes the coordinator to assess across children and post one consolidated recommendation."},
+	}
+	out := make([]capModeVM, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, capModeVM{Value: d.v, Label: d.label, Desc: d.desc, Selected: d.v == selected})
+	}
+	return out
+}
+
+// capability builds the capability panel view model for an attempt, or nil when
+// the attempt's ticket is not a Capability (no `wants:` edges) — the same gate the
+// panel renders behind and handleSupervision writes behind, so the affordance and
+// the effect agree (mirroring canEnable/canArchive). For a Capability it lists each
+// `wants:` child with its latest attempt's control state (Pending folded in via
+// DeriveDesired + the live probe, exactly as board() does) and, when Pending, the
+// gate reason (WaitingReason); and it resolves the supervision dial's selection to
+// the effective mode (the attempt's per-ticket override folded over the config
+// default). It loads the whole fleet + edge set once, like board().
+func (s *Server) capability(a project.Attempt) (*capabilityVM, error) {
+	edges, err := project.LoadEdges(s.root, a.Ticket)
+	if err != nil {
+		return nil, err
+	}
+	if len(edges.Wants) == 0 {
+		return nil, nil // not a Capability — no panel
+	}
+	all, err := project.LoadAll(s.root)
+	if err != nil {
+		return nil, err
+	}
+	allEdges, err := project.LoadAllEdges(s.root)
+	if err != nil {
+		return nil, err
+	}
+	desired := project.DeriveDesired(all, allEdges)
+	// Latest attempt per ticket: LoadAll is sorted by ticket then attempt id, so the
+	// last entry seen for a ticket is its latest attempt (the one transitive enable /
+	// a satisfied gate would target — docs §Attempt admission).
+	latest := map[string]project.Attempt{}
+	for _, at := range all {
+		latest[at.Ticket] = at
+	}
+
+	vm := &capabilityVM{Attempt: a}
+	for _, child := range edges.Wants {
+		row := capChildVM{Ticket: child, Href: "/ticket/" + child}
+		if ca, ok := latest[child]; ok {
+			ca.Desired = desired[project.Ref{Ticket: ca.Ticket, Attempt: ca.ID}]
+			ca.Live = s.attemptLive(ca)
+			st := ca.Control()
+			row.HasAttempt = true
+			row.AttemptID = ca.ID
+			row.State = st
+			row.StateLabel = stateLabel(st)
+			if st == project.Pending {
+				row.WaitingReason = project.WaitingReason(child, all, allEdges)
+			}
+		}
+		vm.Children = append(vm.Children, row)
+	}
+
+	override := a.Supervision
+	vm.Overridden = override == project.SupervisionPassthrough || override == project.SupervisionPreDigest
+	vm.Default = s.supDefault
+	vm.Mode = project.Effective(override, s.supDefault)
+	vm.Modes = supervisionModeVMs(vm.Mode)
+	return vm, nil
 }
 
 // provenanceVM drives the "provenance-panel" partial: the repo/base editor on the
@@ -1012,6 +1169,11 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 		}
 		vm.Events = append(vm.Events, ev)
 	}
+	cap, err := s.capability(a)
+	if err != nil {
+		return detailVM{}, err
+	}
+	vm.Capability = cap
 	return vm, nil
 }
 
@@ -1466,6 +1628,86 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "provenance-panel", provenanceVM{Attempt: a, Saved: true})
+}
+
+// handleSupervision sets a Capability's coordinator supervision mode from the
+// capability panel's dial (POST /ticket/{id}/{attempt}/supervision) — the write
+// half of drvweb-017. It shells `draiver ctl supervision` (runDraiverSupervision —
+// the write path a human runs at a terminal, drvctl-042), which owns the
+// `supervision` log-event append and mode validation; the web layer never appends
+// the event itself (the package's write invariant, matching handleEnable). The
+// write is gated on the ticket being a Capability (it carries `wants:` edges) — the
+// same gate the panel renders behind, so the affordance and the effect agree; a
+// POST to a non-Capability is a 400 before any write. The mode is re-validated here
+// so a bad value is a 400 rather than a 500 from the verb. On success it re-renders
+// the panel in place (htmx outerHTML swap on #capability) with the persisted mode
+// selected and a confirmation, so the change is reflected without a reload.
+func (s *Server) handleSupervision(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	// Gate on capability-ness before writing: the dial only renders for a Capability,
+	// so a POST for one that carries no `wants:` is a bad request, not a 500 later.
+	edges, err := project.LoadEdges(s.root, id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if len(edges.Wants) == 0 {
+		http.Error(w, "draiver: "+id+" is not a Capability (no wants:)", http.StatusBadRequest)
+		return
+	}
+	// Validate the mode at the edge so a typo/forged value is a 400 here rather than
+	// surfacing as a 500 from the shelled verb.
+	mode, err := project.ParseSupervision(r.FormValue("mode"))
+	if err != nil {
+		http.Error(w, "draiver: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.runDraiverSupervision(id, att, string(mode)); err != nil {
+		s.fail(w, err)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm, err := s.capability(a)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm.Saved = true
+	s.render(w, "capability-panel", vm)
+}
+
+// runDraiverSupervision records a Capability's supervision mode by invoking
+// `draiver ctl supervision` rather than reimplementing the append in the web layer
+// — the same verb a human runs at a terminal (setSupervision, cmd/ctl_supervision.go),
+// so the board and the CLI share one write path (see runDraiverEnable). It passes
+// the server's resolved data root, actor, and target attempt as explicit flags
+// (env-independent), and ends with "--" so a ticket id beginning with "-" is never
+// parsed as a flag; the mode is the last positional arg. On failure it surfaces the
+// CLI's combined output for a legible error.
+func (s *Server) runDraiverSupervision(id, att, mode string) error {
+	exe, err := draiverExe()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, "ctl", "supervision",
+		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id, mode)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver ctl supervision: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // handleEdges rewrites a ticket's dependency edges from the attempts-index page's

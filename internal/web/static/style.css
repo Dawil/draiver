@@ -152,6 +152,10 @@ body {
 .state-Review { background: color-mix(in srgb, var(--review) 22%, transparent); color: var(--review); }
 .state-Done { background: color-mix(in srgb, var(--done) 22%, transparent); color: var(--done); }
 .state-Needs\ me { background: var(--alert-bg); color: var(--alert); }
+/* Pending reads as a quiet, zero-attention state (below Needs-me on the scale), so
+   its badge is muted rather than coloured — the same intent as the board's quiet
+   Pending count. Used by the capability panel's child rows (drvweb-017). */
+.state-Pending { background: var(--panel-2); color: var(--muted); }
 
 .spec .prose { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px; }
 /* Spec cap: clip a long spec with a fade until "more" is pressed (drvweb-011).
@@ -234,6 +238,33 @@ body {
    ticket's dependency edges on a page that has no spec context. */
 .edges { margin: 4px 0 24px; }
 .edges-heading { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 8px; }
+
+/* Capability panel (drvweb-017): a Capability's `wants:` sub-fleet + the
+   supervision dial, above the provenance table. It reuses the panel frame idiom
+   (panel bg, quiet border) and the provenance (i) bubble for the dial's tooltip. */
+.capability { margin: 0 0 20px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.capability-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 10px; }
+.capability-sub { font-weight: 400; text-transform: none; letter-spacing: 0; }
+/* Sub-fleet: one row per `wants:` child — id, control-state badge, and (for a
+   Pending child) the muted "waiting on X" gate reason, matching the board's line. */
+.capability-children { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.capability-child { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.capability-child-id { color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 600; }
+.capability-child-id:hover { text-decoration: underline; }
+.capability-gate { color: var(--muted); font-size: 12px; }
+.capability-child-none { color: var(--muted); font-size: 12px; font-style: italic; }
+/* Supervision dial: a radio group posting on change (no Save button). The selected
+   mode gets an accented frame; each mode carries a one-line description. */
+.capability-dial { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.capability-dial-label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.capability-mode { display: grid; grid-template-columns: max-content 1fr; align-items: baseline; gap: 2px 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.capability-mode:hover { border-color: var(--accent); }
+.capability-mode-on { border-color: var(--accent); background: var(--accent-bg); }
+.capability-mode input { grid-row: span 2; align-self: center; accent-color: var(--accent); }
+.capability-mode-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.capability-mode-desc { font-size: 12px; color: var(--muted); }
+.capability-inherit { font-size: 12px; color: var(--muted); font-style: italic; }
+.capability-saved { font-size: 12px; color: var(--done); animation: provenance-fade 2.6s ease forwards; }
 
 /* Prompt-cache panel: per-attempt caching telemetry (drvweb-012). Sits between the
    provenance table and the spec. The caching_active status is the headline; when

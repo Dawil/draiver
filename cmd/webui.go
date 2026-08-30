@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/web"
 )
 
@@ -29,7 +30,15 @@ var webuiCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		srv, err := web.New(root, web.WithActor(webuiActor()))
+		// The default supervision mode lives in operator config (drvctl-042); the
+		// capability panel folds a per-ticket override over it to show the effective
+		// mode. A missing config is not an error (config.Load yields the passthrough
+		// floor), so the board runs zero-config.
+		cfg, err := config.Load("")
+		if err != nil {
+			return err
+		}
+		srv, err := web.New(root, web.WithActor(webuiActor()), web.WithSupervisionDefault(cfg.DefaultSupervision))
 		if err != nil {
 			return err
 		}
