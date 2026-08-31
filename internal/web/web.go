@@ -45,6 +45,7 @@ import (
 	"github.com/yuin/goldmark/util"
 
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/land"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
@@ -1227,16 +1228,16 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 
 // handleMergeRemote closes a Review attempt whose change landed via a PR merged
 // on the forge and refreshes the local base in one click (POST
-// /ticket/{id}/{attempt}/merge-remote). It shells `draiver ctl merge --remote`
-// (runDraiverMergeRemote — the write path a human runs at a terminal, drvctl-029),
-// which owns the fetch + containment check + `done` and the best-effort local
-// fast-forward; the web layer never touches git itself (the package's write
-// invariant). Unlike the other writes it surfaces the verb's combined output on
-// success too: the CLI records `done` and only *best-effort* pulls, so a
-// zero-exit-with-warning ("could not fast-forward … pull manually") is a success
+// /ticket/{id}/{attempt}/merge-remote). It calls the shared internal/land
+// orchestration in-process (land.MergeRemote — the same operation `draiver ctl
+// merge --remote` runs), which owns the fetch + containment check + `done` and the
+// best-effort local fast-forward; the web layer never touches git itself (the
+// package's write invariant). Unlike the other writes it surfaces the operation's
+// report on success too: it records `done` and only *best-effort* pulls, so a
+// success-with-warning ("left local main unchanged … pull manually") is a success
 // to report, not an error — the message rides back on an OOB banner beside the
-// re-rendered (now Done) log region. A nonzero exit (containment/fetch failure) is
-// a real error, surfaced via s.fail like the other writes.
+// re-rendered (now Done) log region. A failed containment/fetch is a real error,
+// surfaced via s.fail like the other writes.
 func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -1248,11 +1249,15 @@ func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	msg, err := s.runDraiverMergeRemote(id, att)
+	// Bare remote (""): the button offers no NAME field, so land picks the sole
+	// remote or the config's primary_remote. No config path — the default is used,
+	// exactly as the subprocess shell-out relied on before.
+	res, err := land.MergeRemote(r.Context(), s.gw, id, att, "", "")
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	msg := strings.Join(land.FormatRemoteReport(id, att, res), "\n")
 	vm, err := s.detail(id, att)
 	if err != nil {
 		s.fail(w, err)
@@ -1275,31 +1280,6 @@ func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(buf.Bytes())
-}
-
-// runDraiverMergeRemote closes an externally-landed Review attempt by invoking
-// `draiver ctl merge --remote` rather than reimplementing the fetch/ff in the web
-// layer — the same verb a human runs at a terminal, so the board and the CLI share
-// one write path (see runDraiverEnable). Bare `--remote` picks the primary remote
-// (no NAME field in the UI for v1); the server's data root, actor, and target
-// attempt go as explicit flags, and the ticket id after "--" so an id beginning
-// with "-" is never parsed as a flag. Unlike the other shell-outs it returns the
-// trimmed combined output on success too: the verb prints the close plus the
-// best-effort pull result (or warning) there, and the handler reports it. On a
-// nonzero exit it wraps that same output as a legible error.
-func (s *Server) runDraiverMergeRemote(id, att string) (string, error) {
-	exe, err := draiverExe()
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(exe, "ctl", "merge", "--remote",
-		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
-	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
-	if err != nil {
-		return "", fmt.Errorf("draiver ctl merge --remote: %w: %s", err, text)
-	}
-	return text, nil
 }
 
 // handleProvenance sets an attempt's repo/base from the detail page's provenance
