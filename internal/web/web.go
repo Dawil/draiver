@@ -14,16 +14,18 @@
 // human can unblock a base-less Review attempt from the UI; and the board card's
 // archive affordance (POST /ticket/{id}/{attempt}/archive) takes an attempt off the
 // board — a green tick to accept a Done card, a grey cross to abandon an active one.
-// Most writes shell the same verb a human runs at a terminal (draiver log / draiver
-// done / draiver resolve / draiver ctl merge --remote / draiver ctl enable / draiver
-// attempt set — see runDraiverLog, runDraiverResolve, runDraiverMergeRemote,
-// runDraiverEnable, runDraiverAttemptSet), so there is a single code path per write;
-// archive is the exception — it has no CLI verb, so handleArchive appends the
-// `archive` event via ticketlog.Append directly (the primitive those verbs share).
+// Every write reaches the data folder through the same in-process gateway the CLI
+// verbs use (drv-008), not a subprocess: log/done/resolve/enable/archive and the
+// provenance/edges writes go through internal/repo, and `merge --remote` through
+// internal/land (which records its `done` through repo too). So there is exactly
+// one code path per write — a function shared by the board and the terminal, not a
+// shelled binary — and the same live-session render (`ctl logs -f`) streams here
+// via internal/streamlog. The handlers own only transport concerns
+// (same-origin/CSRF, idempotency, HTML shaping); the write semantics live once in
+// the libraries.
 package web
 
 import (
-	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -31,8 +33,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +49,7 @@ import (
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/streamlog"
 )
 
 //go:embed templates/*.html
@@ -105,28 +106,6 @@ var composeTypes = map[string]bool{
 	"gotcha":   true,
 	"decision": true,
 	"done":     true,
-}
-
-// draiverBinOverride points the web writes' shell-outs (runDraiverLog and
-// runDraiverEnable) at a specific draiver binary. It is empty in production,
-// where those resolve the running executable via os.Executable() (under
-// `draiver webui`, that is draiver itself). Tests set it to a freshly built
-// binary, since under `go test` os.Executable() is the test binary, not draiver.
-var draiverBinOverride string
-
-// draiverExe resolves the draiver binary the write shell-outs invoke:
-// draiverBinOverride when set (tests, where os.Executable() is the test binary,
-// not draiver), else the running executable — under `draiver webui` that is
-// draiver itself.
-func draiverExe() (string, error) {
-	if draiverBinOverride != "" {
-		return draiverBinOverride, nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("locate draiver binary: %w", err)
-	}
-	return exe, nil
 }
 
 // appendComposed appends a web-composed event through the in-process data-access
@@ -578,7 +557,7 @@ type provenanceVM struct {
 // ticket-level, not per-attempt — edges live in spec.md, shared across attempts.
 // Each relation prefills as a comma-joined id list the human edits in place; the
 // three fields are always posted together (a whole-set replace, see
-// runDraiverEdges). Saved is true only on a successful-save response so the panel
+// handleEdges → s.gw.SetEdges). Saved is true only on a successful-save response so the panel
 // can confirm the write after an htmx swap. Error carries a self-edge or cycle
 // refusal to render inline — the verb wrote nothing, so the panel re-shows the
 // values the human tried and the reason they were rejected.
@@ -993,17 +972,17 @@ func (s *Server) executeLive(vm detailVM) ([]byte, error) {
 
 // handleAgentLogs streams an attempt's live session logs as Server-Sent Events
 // (GET /ticket/{id}/{attempt}/agent-logs) — the first stream in the web layer,
-// which is otherwise all htmx polling. It shells out to `draiver ctl logs -f`
-// (the same verb a human runs at a terminal, and the same write-path-reuse
-// discipline as the log/resolve/enable POSTs) and relays each rendered stdout
-// line as one SSE `data:` event. Over a pipe the CLI's renderer is non-TTY, so it
-// emits plain, uncoloured text (newStreamRenderer gates styling on
-// term.IsTerminal) — exactly what this read-only panel wants, with the prefix
-// column, markdown-as-literal, and ctl.jsonl health interleave reused verbatim.
+// which is otherwise all htmx polling. It renders the stream in-process via the
+// shared internal/streamlog.TailStream (the same follow `draiver ctl logs -f`
+// runs, drv-008) and relays each rendered line as one SSE `data:` event. Writing
+// to an http.ResponseWriter (not a *os.File) the renderer is non-TTY, so it emits
+// plain, uncoloured text — exactly what this read-only panel wants, with the
+// prefix column, markdown-as-literal, and ctl.jsonl health interleave reused
+// verbatim. tail=50 matches the CLI's default backlog window.
 //
-// The child is bound to r.Context() via exec.CommandContext: when the client
-// closes the SSE — the <details> panel collapses, the page is left — the process
-// is killed and the follow ends. Each line is relayed as text and set client-side
+// The follow is bound to r.Context(): when the client closes the SSE — the
+// <details> panel collapses, the page is left — the context cancels and TailStream
+// returns at its next idle poll. Each line is relayed as text and set client-side
 // via textContent; it is never routed through the markdown→HTML path, so the
 // untrusted session content (arbitrary tool output + model prose) cannot inject
 // markup. A hand-run attempt with no session yet simply streams nothing; the
@@ -1020,23 +999,6 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, fmt.Errorf("streaming unsupported"))
 		return
 	}
-	exe, err := draiverExe()
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-
-	cmd := exec.CommandContext(r.Context(), exe, "ctl", "logs", "-f",
-		"--data", s.root.Dir, id+"@"+att)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		s.fail(w, err)
-		return
-	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1044,22 +1006,43 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 	// Disable proxy buffering so the stream reaches the panel line-by-line.
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Relay stdout one line per SSE record. bufio.Scanner strips the trailing
-	// newline, so each scanned line carries no embedded newline to break the
-	// `data:` framing; a stray CR is trimmed for the same reason. Flush after
-	// every line so the panel updates live rather than in buffer-sized bursts.
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimRight(scanner.Text(), "\r")
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", line); err != nil {
-			break // client went away; CommandContext kills the child
+	// TailStream writes newline-terminated rendered lines; sseLineWriter reframes
+	// each complete line as one `data:` record and flushes, so the panel updates
+	// live rather than in buffer-sized bursts. A follow never ends on its own — it
+	// unblocks when r.Context() cancels on client disconnect.
+	sse := &sseLineWriter{w: w, flusher: flusher}
+	_ = streamlog.TailStream(r.Context(), sse,
+		s.root.SessionStreamPath(id, att), s.root.SessionCtlLogPath(id, att),
+		true /*follow*/, true /*render*/, 50 /*tail backlog*/)
+}
+
+// sseLineWriter adapts streamlog's line-oriented io.Writer output to Server-Sent
+// Events: it buffers bytes until a newline, then emits everything up to it as one
+// `data: <line>\n\n` record and flushes. A stray CR is trimmed so it cannot break
+// the `data:` framing, mirroring the bufio.Scanner the subprocess relay used. A
+// write that fails (the client went away) is swallowed — the follow ends when the
+// request context cancels, so a broken pipe here need not propagate.
+type sseLineWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	buf     []byte
+}
+
+func (s *sseLineWriter) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+	for {
+		i := bytes.IndexByte(s.buf, '\n')
+		if i < 0 {
+			break
 		}
-		flusher.Flush()
+		line := strings.TrimRight(string(s.buf[:i]), "\r")
+		s.buf = s.buf[i+1:]
+		if _, err := fmt.Fprintf(s.w, "data: %s\n\n", line); err != nil {
+			return len(p), nil // client went away; the context cancel ends the follow
+		}
+		s.flusher.Flush()
 	}
-	// Reap the child. Context cancellation already signals it on client close;
-	// Wait releases its resources whether it exited on its own or was killed.
-	_ = cmd.Wait()
+	return len(p), nil
 }
 
 // handleLogAppend appends a human-composed typed event to an attempt (POST
@@ -1121,10 +1104,10 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEnable is the board's enable write (POST /ticket/{id}/{attempt}/enable): it
-// opts a Running, disabled attempt into daemon supervision by shelling
-// `draiver ctl enable` (runDraiverEnable) — the same verb a human runs at a
-// terminal, so the enable is not reimplemented in the web layer — then re-renders
-// the card so htmx swaps the play button away and the grey session-dot flips. The
+// opts a Running, disabled attempt into daemon supervision through the in-process
+// gateway (s.gw.Enable, drv-008) — the same operation `draiver ctl enable` runs, so
+// the enable is not reimplemented in the web layer — then re-renders the card so
+// htmx swaps the play button away and the grey session-dot flips. The
 // bare enable is purely declarative: no control socket, no reconciler; a running
 // `ctl up` brings the attempt up on its next tick, and with no daemon the enable
 // simply waits, matching the grey-dot semantics the button sits on.
@@ -1132,8 +1115,8 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 // It is idempotent: an already-enabled (or non-Running) attempt — e.g. a
 // double-click racing the 3s board poll — is a no-op that just re-renders the
 // current card, so the chain gains exactly one enable per enable. The gate is
-// canEnable, checked here before the shell-out (the CLI's `enable` would append
-// unconditionally), so the button and the effect can never disagree. The
+// canEnable, checked here before the gateway write (the gateway's `Enable` would
+// append unconditionally), so the button and the effect can never disagree. The
 // state-changing POST carries a same-origin guard so a cross-site page in a
 // browser cannot drive it, proportionate to a localhost dev tool.
 func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
@@ -1171,13 +1154,14 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 
 // handleArchive takes an attempt off the board (POST
 // /ticket/{id}/{attempt}/archive): the card's tick (Done → accepted) or cross
-// (active → abandoned) both post here, and the server derives the sentiment from
-// the attempt's current State so the client never chooses the outcome. Unlike the
-// other web writes it appends the `archive` event via ticketlog.Append directly —
-// the same primitive setEnabled uses, and the server already holds store.Root —
-// because there is no `draiver archive` CLI verb to shell (see decision #7). The
-// event carries the resolved board actor and an Outcome of accepted|abandoned, so
-// metrics can tell an accepted close from an abandoned one.
+// (active → abandoned) both post here, and the sentiment is derived from the
+// attempt's current State so the client never chooses the outcome. Like every
+// other web write it goes through the in-process gateway (s.gw.Archive, drv-008) —
+// the single implementation of "what an archive is" the `draiver archive` CLI verb
+// also calls (drvctl-043) — which folds in the board actor, derives the
+// accepted|abandoned Outcome from State (outcome ""), and owns the idempotency
+// no-op. So the event is byte-identical whether authored from the board or a
+// terminal, and metrics can tell an accepted close from an abandoned one.
 //
 // It is idempotent like handleEnable: canArchive (!Archived) is the same gate the
 // button renders behind, so a re-POST racing the 3s board poll is a no-op that
@@ -1285,10 +1269,10 @@ func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 // handleProvenance sets an attempt's repo/base from the detail page's provenance
 // panel (POST /ticket/{id}/{attempt}/provenance) — the one UI affordance for the
 // merge/sync-gating fields, so a human can unblock an attempt wedged for want of a
-// base without leaving the board. It shells `draiver attempt set`
-// (runDraiverAttemptSet — the write path a human runs at a terminal, drvctl-028),
-// which owns the attempt.md write and the field validation; the web layer never
-// touches attempt.md itself (the package's write invariant). The panel prefills
+// base without leaving the board. It calls the in-process gateway
+// (s.gw.SetProvenance, drv-008 — the same write the CLI's `draiver attempt set`
+// runs, drvctl-028), which owns the attempt.md write and the field validation; the
+// web layer never touches attempt.md itself (the package's write invariant). The panel prefills
 // the current values, so a blank input means "leave unchanged": a blank field is
 // omitted from the shell-out, and an all-blank submit is a 400 here rather than a
 // 500 from the verb's "nothing to set". Only repo and base are read from the form
@@ -1307,10 +1291,10 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Only repo/base are accepted; a blank field maps to "no change" (the verb
-	// leaves an omitted flag untouched), so the shell-out receives only the fields
+	// Only repo/base are accepted; a blank field maps to "no change" (an omitted
+	// Provenance field is left untouched), so the gateway receives only the fields
 	// the human actually filled. An all-blank submit changes nothing — reject it as
-	// a bad request here rather than let the verb's "nothing to set" surface as a
+	// a bad request here rather than let the gateway's "nothing to set" surface as a
 	// 500.
 	repoVal := strings.TrimSpace(r.FormValue("repo"))
 	baseVal := strings.TrimSpace(r.FormValue("base"))
@@ -1343,9 +1327,10 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 
 // handleEdges rewrites a ticket's dependency edges from the attempts-index page's
 // edge editor (POST /ticket/{id}/edges) — the ticket-level surface, since edges
-// live in spec.md and are shared across attempts (drvweb-016). It shells `draiver
-// depends --set` (runDraiverEdges), which owns the spec.md frontmatter write and
-// the self-edge/cycle refusal; the web layer never writes spec.md itself. The
+// live in spec.md and are shared across attempts (drvweb-016). It calls the
+// in-process gateway (s.gw.SetEdges, drv-008), which owns the spec.md frontmatter
+// write and the self-edge/cycle refusal; the web layer never writes spec.md
+// itself. The
 // editor is WYSIWYG: all three relations are posted every save, each free-text
 // field parsed into an id set, so an emptied field clears that relation. A cycle
 // or self-edge is surfaced inline — the panel re-renders (200) with the attempted
@@ -1401,8 +1386,9 @@ func refusalMessage(err error) string {
 // /ticket/{id}/{attempt}/resolve) and returns the re-rendered live fragment, so
 // the escalation flips to "resolved by #N", the state badge leaves Stuck, and the
 // count bump all land from one swap. It is the board affordance for `draiver
-// resolve`: the write goes through the CLI (runDraiverResolve), not a re-appended
-// event here, so the board and a terminal share one resolution path.
+// resolve`: the write goes through the in-process gateway (s.gw.Resolve, drv-008),
+// not a re-appended event here, so the board and a terminal share one resolution
+// path.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)

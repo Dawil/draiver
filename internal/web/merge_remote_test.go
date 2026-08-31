@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -88,12 +90,25 @@ func gitInWeb(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// draiverCLI runs the freshly built test binary (draiverBinOverride) for setup
-// steps the web layer itself never performs (`new`, `review`).
-func draiverCLI(t *testing.T, args ...string) {
+// seedReviewTicket seeds a Review attempt on disk without the CLI: it writes the
+// ticket spec, an attempt.md recording repo+base, and the created→review events —
+// the in-process equivalent of `draiver new --repo … && draiver review …`, the
+// setup the web layer itself never performs (drv-008: the web tests no longer
+// build or spawn a binary).
+func seedReviewTicket(t *testing.T, root store.Root, id, att, repo, base string) {
 	t.Helper()
-	if out, err := exec.Command(draiverBinOverride, args...).CombinedOutput(); err != nil {
-		t.Fatalf("draiver %v: %v\n%s", args, err, out)
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: T\n---\n\n# T\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAttemptMeta(t, root, id, att, repo, base)
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "human:test", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, id, att, event.Event{Type: "review", Actor: "human:test", Body: "ready"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -136,7 +151,8 @@ func remoteReviewAttempt(t *testing.T, merged bool) (root store.Root, repo, chec
 
 	data := t.TempDir()
 	root = store.Root{Dir: data}
-	draiverCLI(t, "--data", data, "--actor", "human:test", "new", "PROJ-1", "--title", "T", "--repo", repo)
+	// Seed a Review attempt recording repo+base=main, in-process (no CLI binary).
+	seedReviewTicket(t, root, "PROJ-1", "0001", repo, "main")
 
 	// Materialize the branch + worktree the daemon would cut and put a commit on it.
 	m, err := worktree.NewManager(repo)
@@ -153,8 +169,6 @@ func remoteReviewAttempt(t *testing.T, merged bool) (root store.Root, repo, chec
 	}
 	gitInWeb(t, checkout, "add", "feat.txt")
 	gitInWeb(t, checkout, "commit", "-q", "-m", "feat")
-
-	draiverCLI(t, "--data", data, "--actor", "human:test", "review", "PROJ-1", "ready")
 
 	bare := t.TempDir()
 	gitInWeb(t, bare, "init", "-q", "--bare", "-b", "main")
