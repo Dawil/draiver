@@ -14,12 +14,12 @@
 // human can unblock a base-less Review attempt from the UI; and the board card's
 // archive affordance (POST /ticket/{id}/{attempt}/archive) takes an attempt off the
 // board — a green tick to accept a Done card, a grey cross to abandon an active one.
-// Most writes shell the same verb a human runs at a terminal (draiver log / draiver
+// Every write shells the same verb a human runs at a terminal (draiver log / draiver
 // done / draiver resolve / draiver ctl merge --remote / draiver ctl enable / draiver
-// attempt set — see runDraiverLog, runDraiverResolve, runDraiverMergeRemote,
-// runDraiverEnable, runDraiverAttemptSet), so there is a single code path per write;
-// archive is the exception — it has no CLI verb, so handleArchive appends the
-// `archive` event via ticketlog.Append directly (the primitive those verbs share).
+// attempt set / draiver archive — see runDraiverLog, runDraiverResolve,
+// runDraiverMergeRemote, runDraiverEnable, runDraiverAttemptSet, runDraiverArchive),
+// so there is a single code path per write and the CLI verb is the sole author of
+// each event type — the web layer never appends an event itself.
 package web
 
 import (
@@ -47,7 +47,6 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
 //go:embed templates/*.html
@@ -1434,23 +1433,53 @@ func (s *Server) runDraiverEnable(id, att string) error {
 	return nil
 }
 
+// runDraiverArchive takes an attempt off the board by invoking `draiver archive`
+// rather than reimplementing the append in the web layer — the same verb a human
+// runs at a terminal, so the board and the CLI share one write path (drvctl-043)
+// and there is a single author of the `archive` event. The sentiment the handler
+// already derived from State (archiveAction) is passed as the explicit
+// --accepted/--abandoned flag, never left to the verb's own State-derived default,
+// so the board's rendered glyph and the written Outcome cannot diverge. It passes
+// the server's resolved data root, actor, and target attempt as explicit flags
+// (env-independent), and ends with "--" so a ticket id beginning with "-" is never
+// parsed as a flag. On failure it surfaces the CLI's combined output for a legible
+// error.
+func (s *Server) runDraiverArchive(id, att, outcome string) error {
+	exe, err := draiverExe()
+	if err != nil {
+		return err
+	}
+	flag := "--abandoned"
+	if outcome == "accepted" {
+		flag = "--accepted"
+	}
+	cmd := exec.Command(exe, "archive", flag,
+		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("draiver archive: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // handleArchive takes an attempt off the board (POST
 // /ticket/{id}/{attempt}/archive): the card's tick (Done → accepted) or cross
 // (active → abandoned) both post here, and the server derives the sentiment from
-// the attempt's current State so the client never chooses the outcome. Unlike the
-// other web writes it appends the `archive` event via ticketlog.Append directly —
-// the same primitive setEnabled uses, and the server already holds store.Root —
-// because there is no `draiver archive` CLI verb to shell (see decision #7). The
-// event carries the resolved board actor and an Outcome of accepted|abandoned, so
-// metrics can tell an accepted close from an abandoned one.
+// the attempt's current State so the client never chooses the outcome. Like every
+// other web write it shells the CLI — `draiver archive` (runDraiverArchive,
+// drvctl-043) — so the board and a human at a terminal share one write path and the
+// verb is the sole author of the `archive` event. The server-derived sentiment is
+// passed to the verb as the explicit --accepted/--abandoned flag (never the verb's
+// own State-derived default), so the board's rendered glyph and the written Outcome
+// cannot diverge; the event carries the resolved board actor.
 //
 // It is idempotent like handleEnable: canArchive (!Archived) is the same gate the
 // button renders behind, so a re-POST racing the 3s board poll is a no-op that
-// still re-renders the board. Archive is orthogonal to lifecycle state — it does
-// not close or reopen the attempt, only removes it from board(); an `unarchive`
-// event (DeriveArchived, last-wins) brings it back. The response is the re-rendered
-// board region (board.html) so htmx swaps the card away in place and the column
-// counts update in the same swap; the same-origin guard matches the other writes.
+// still re-renders the board — the shell-out only fires on an on-board attempt.
+// Archive is orthogonal to lifecycle state — it does not close or reopen the
+// attempt, only removes it from board(); an `unarchive` event (DeriveArchived,
+// last-wins) brings it back. The response is the re-rendered board region
+// (board.html) so htmx swaps the card away in place and the column counts update in
+// the same swap; the same-origin guard matches the other writes.
 func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -1470,15 +1499,10 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	// Only an on-board attempt writes; canArchive is the same gate the button renders
 	// behind, so a POST for an already-archived card (a double-submit) is a no-op that
 	// just re-renders the board. The sentiment is server-derived from State, never the
-	// posted form, via the same helper the card renders with.
+	// posted form, via the same helper the card renders with, and handed to the verb
+	// as the explicit flag.
 	if canArchive(a) {
-		act := archiveAction(a)
-		if _, err := ticketlog.Append(s.root, id, att, event.Event{
-			Type:    "archive",
-			Actor:   s.actor,
-			Outcome: act.Outcome,
-			Body:    archiveBody(act.Outcome),
-		}); err != nil {
+		if err := s.runDraiverArchive(id, att, archiveAction(a).Outcome); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -1493,16 +1517,6 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	}
 	emitFaviconTrigger(w, vm)
 	s.render(w, "board.html", vm)
-}
-
-// archiveBody is the human-readable body stamped on an archive event, keyed off the
-// server-derived sentiment. The machine-readable truth is the event's Outcome
-// field; this is the prose a human reads on the timeline.
-func archiveBody(outcome string) string {
-	if outcome == "accepted" {
-		return "Accepted and archived from the board."
-	}
-	return "Closed and archived from the board."
 }
 
 // handleMergeRemote closes a Review attempt whose change landed via a PR merged
