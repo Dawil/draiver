@@ -34,6 +34,14 @@
   </header>
 
   <main class="detail" data-testid="ticket-detail">
+    {{/* Capability panel (drvweb-017): rendered only when this ticket is a
+         Capability (carries `wants:` edges) — the `wants:` sub-fleet at a glance
+         (each child's control state + the gate reason holding a Pending one) plus
+         the supervision dial. Changing the dial posts to `ctl supervision` and
+         swaps this panel in place (outerHTML on #capability) with the persisted
+         mode selected. Absent on an ordinary ticket (Capability is nil). */}}
+    {{if .Capability}}{{template "capability-panel" .Capability}}{{end}}
+
     {{/* Provenance: the repo/base a merge/sync gate on, as a quiet key/value table
          above the spec. Always shown but visually light — the values read as plain
          text until clicked, when each becomes an inline input; blurring (a native
@@ -301,6 +309,51 @@
   </script>
 </body>
 </html>{{end}}
+
+{{/* capability-panel: a Capability's `wants:` sub-fleet + the supervision dial
+     (drvweb-017), rendered on the detail page and again as the POST response
+     (outerHTML on #capability). The sub-fleet lists each child with its latest
+     attempt's control state; a Pending child also shows the "waiting on X" gate
+     reason, and a wanted ticket with no attempt yet shows a quiet placeholder. The
+     dial is a radio group posting on change (no Save button) to `ctl supervision`;
+     the effective mode (per-ticket override folded over the config default) is
+     pre-checked, and when no override is set the panel notes it is inheriting the
+     default. Saved is set only on the successful-save response, confirming the write
+     after the swap. */}}
+{{define "capability-panel"}}<section class="capability" id="capability" data-testid="capability">
+  <h2 class="capability-title">Capability <span class="capability-sub">sub-fleet</span></h2>
+  <ul class="capability-children" data-testid="capability-children">
+    {{range .Children}}
+    <li class="capability-child" data-testid="capability-child" data-child="{{.Ticket}}">
+      <a class="capability-child-id" href="{{.Href}}">{{.Ticket}}</a>
+      {{if .HasAttempt}}
+        <span class="state state-{{.State}}" data-testid="capability-child-state">{{.StateLabel}}</span>
+        {{if .WaitingReason}}<span class="capability-gate" data-testid="capability-child-gate">{{.WaitingReason}}</span>{{end}}
+      {{else}}
+        <span class="capability-child-none" data-testid="capability-child-none">no attempt yet</span>
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+
+  {{/* One radio group, no submit button: selecting a mode change posts it and the
+       handler shells `ctl supervision`, then this panel re-renders with the new
+       mode checked. */}}
+  <form class="capability-dial" data-testid="capability-dial"
+    hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/supervision"
+    hx-trigger="change" hx-target="#capability" hx-swap="outerHTML">
+    <span class="capability-dial-label">Supervision{{template "info-bubble" "How much the coordinator does before a human. Passthrough routes a child escalation straight to Needs-me; pre-digest wakes the coordinator to assess across children and post one consolidated recommendation."}}</span>
+    {{range .Modes}}
+    <label class="capability-mode{{if .Selected}} capability-mode-on{{end}}" data-testid="capability-mode-{{.Value}}">
+      <input type="radio" name="mode" value="{{.Value}}"{{if .Selected}} checked{{end}} aria-label="{{.Label}}">
+      <span class="capability-mode-label">{{.Label}}</span>
+      <span class="capability-mode-desc">{{.Desc}}</span>
+    </label>
+    {{end}}
+    {{if not .Overridden}}<span class="capability-inherit" data-testid="capability-inherit">inheriting default ({{.Default}})</span>{{end}}
+    {{if .Saved}}<span class="capability-saved" data-testid="capability-saved" role="status">saved ✓</span>{{end}}
+  </form>
+</section>{{end}}
 
 {{/* provenance-panel: the repo/base editor as a quiet key/value table, rendered on
      the detail page and again as the POST response (outerHTML on #provenance). Each
