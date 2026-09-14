@@ -100,11 +100,16 @@ func (f *factory) briefAdapter(ticket string) *fakeAdapter {
 // TestWantsPropagatesEnableToChildren is the headline acceptance path: enabling a
 // parent with `wants: [A, B]` pulls A and B into the fleet, even though neither is
 // directly enabled. Desired-ness flows down the edge.
+//
+// Since drvctl-044 the coordinator itself stays a dormant Pending shell — it is a
+// `wants:`-coordinator whose children are not all Done, so the dormancy gate holds
+// it out of admission while still sourcing its children. So the enable propagates
+// to A and B (they come up) but CAP spawns no session (it shows Pending).
 func TestWantsPropagatesEnableToChildren(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
 
-	capAtt := w.newTicket(t, "CAP") // enabled + Running
+	capAtt := w.newTicket(t, "CAP") // enabled + Running, held Pending as a coordinator
 	writeSpecWants(t, w.root, "CAP", "A", "B")
 	aAtt := w.newDisabledTicket(t, "A") // Running, NOT enabled
 	bAtt := w.newDisabledTicket(t, "B") // Running, NOT enabled
@@ -117,23 +122,32 @@ func TestWantsPropagatesEnableToChildren(t *testing.T) {
 		t.Fatalf("tick: %v", err)
 	}
 
-	waitFor(t, "parent + both children admitted", func() bool { return f.count() == 3 })
-	for _, c := range []struct{ ticket, att string }{{"CAP", capAtt}, {"A", aAtt}, {"B", bAtt}} {
+	// Only the two children are admitted; the coordinator is held dormant.
+	waitFor(t, "both children admitted", func() bool { return f.count() == 2 })
+	for _, c := range []struct{ ticket, att string }{{"A", aAtt}, {"B", bAtt}} {
 		if !broughtUp(t, w.root, c.ticket, c.att) {
 			t.Fatalf("%s/%s was not admitted via wants:", c.ticket, c.att)
 		}
+	}
+	if broughtUp(t, w.root, "CAP", capAtt) {
+		t.Fatal("CAP (a wants: coordinator) was admitted on enable — it should stay a dormant Pending shell (drvctl-044)")
 	}
 }
 
 // TestWantsTransitiveToGrandchild: enable flows through an intermediate the parent
 // wants (itself only parent-sourced, not directly enabled) down to a grand-child.
+//
+// CAP and MID are both `wants:`-coordinators, so the dormancy gate (drvctl-044)
+// holds both Pending; only the LEAF (which wants nothing) is admitted. What this
+// still proves is the transitive *reach* of propagation: desired-ness flows CAP →
+// MID → LEAF even though MID is itself only parent-sourced and held dormant.
 func TestWantsTransitiveToGrandchild(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
 
-	w.newTicket(t, "CAP") // enabled
+	capAtt := w.newTicket(t, "CAP") // enabled; coordinator, held Pending
 	writeSpecWants(t, w.root, "CAP", "MID")
-	midAtt := w.newDisabledTicket(t, "MID")
+	midAtt := w.newDisabledTicket(t, "MID") // coordinator, held Pending
 	writeSpecWants(t, w.root, "MID", "LEAF")
 	leafAtt := w.newDisabledTicket(t, "LEAF")
 
@@ -144,12 +158,16 @@ func TestWantsTransitiveToGrandchild(t *testing.T) {
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
-	waitFor(t, "grandchild chain admitted", func() bool { return f.count() == 3 })
-	if !broughtUp(t, w.root, "MID", midAtt) {
-		t.Fatal("MID (child) not admitted")
-	}
+	// Only LEAF is admitted; both coordinators are held dormant.
+	waitFor(t, "grand-child leaf admitted", func() bool { return f.count() == 1 })
 	if !broughtUp(t, w.root, "LEAF", leafAtt) {
-		t.Fatal("LEAF (grand-child) not admitted transitively")
+		t.Fatal("LEAF (grand-child) not admitted transitively through a dormant intermediate")
+	}
+	if broughtUp(t, w.root, "MID", midAtt) {
+		t.Fatal("MID (an intermediate wants: coordinator) was admitted — it should stay a dormant Pending shell (drvctl-044)")
+	}
+	if broughtUp(t, w.root, "CAP", capAtt) {
+		t.Fatal("CAP (a wants: coordinator) was admitted — it should stay a dormant Pending shell (drvctl-044)")
 	}
 }
 
@@ -160,7 +178,7 @@ func TestWantsWithdrawnOnDisableUnlessDirect(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
 
-	capAtt := w.newTicket(t, "CAP") // enabled
+	capAtt := w.newTicket(t, "CAP") // enabled; coordinator, held Pending (drvctl-044)
 	writeSpecWants(t, w.root, "CAP", "A", "B")
 	w.newDisabledTicket(t, "A") // parent-sourced only
 	w.newTicket(t, "B")         // ALSO directly enabled
@@ -172,7 +190,8 @@ func TestWantsWithdrawnOnDisableUnlessDirect(t *testing.T) {
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("admit tick: %v", err)
 	}
-	waitFor(t, "all three admitted", func() bool { return f.count() == 3 })
+	// CAP is a dormant coordinator; only its two children (A, B) are admitted.
+	waitFor(t, "both children admitted", func() bool { return f.count() == 2 })
 	// Wait for each child's brief to land (injected asynchronously after spawn) so
 	// the reap can be attributed to the right attempt.
 	var aAdapter, bAdapter *fakeAdapter

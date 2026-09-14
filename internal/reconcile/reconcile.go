@@ -496,6 +496,16 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 		return nil, err
 	}
 
+	// The coordinator dormancy gate (drvctl-044): hold Pending any `wants:`
+	// coordinator whose children are not all Done, so enabling a Capability sits it
+	// as a dormant shell rather than starting it working the whole epic. Applied
+	// after propagateWants (children are already pulled in from the desired parent)
+	// and before reverse-`wants:` activation, which may re-add a pre-digest
+	// coordinator to wake it for a child escalation (see coordinator_gate.go).
+	if err := r.applyCoordinatorGate(all, out); err != nil {
+		return nil, err
+	}
+
 	// Reverse-`wants:` activation (drvctl-041): a wanted child's escalation wakes the
 	// dormant (Pending) coordinator that wants it — the `OnFailure=` analog. Runs
 	// last, *after* the forward gate, so the wake overrides a coordinator's own shut
