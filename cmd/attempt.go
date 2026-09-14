@@ -9,6 +9,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 var (
@@ -155,37 +156,40 @@ var attemptSetCmd = &cobra.Command{
 		// A targeted setter: only an explicitly-passed flag overwrites its field, so
 		// setting one field can never blank another. --repo is required-if-given
 		// (mirrors attempt.Create's trim-and-require); --base with an empty value
-		// defaults to the repo's current branch, exactly like `attempt new`.
-		changed := false
+		// defaults to the repo's current branch, exactly like `attempt new`. The
+		// values are resolved here (base-branch defaulting is a git concern), then the
+		// attempt.md write itself goes through the shared gateway (drv-008), the same
+		// SetProvenance the webui's provenance panel calls.
+		var p repo.Provenance
 		if cmd.Flags().Changed("repo") {
-			repo := strings.TrimSpace(attemptSetRepo)
-			if repo == "" {
+			r := strings.TrimSpace(attemptSetRepo)
+			if r == "" {
 				return fmt.Errorf("--repo must be a non-empty local git working tree path")
 			}
-			meta.Repo = repo
-			changed = true
+			meta.Repo = r // so --base resolution below sees the new repo
+			p.Repo = &r
 		}
 		if cmd.Flags().Changed("base") {
 			base, err := resolveBase(cmd.Context(), meta.Repo, attemptSetBase)
 			if err != nil {
 				return err
 			}
-			meta.Base = base
-			changed = true
+			p.Base = &base
 		}
 		if cmd.Flags().Changed("tool") {
-			meta.Tool = strings.TrimSpace(attemptSetTool)
-			changed = true
+			t := strings.TrimSpace(attemptSetTool)
+			p.Tool = &t
 		}
 		if cmd.Flags().Changed("model") {
-			meta.Model = strings.TrimSpace(attemptSetModel)
-			changed = true
+			m := strings.TrimSpace(attemptSetModel)
+			p.Model = &m
+		}
+		changed, err := repo.New(root, resolveActor()).SetProvenance(ticket, att, p)
+		if err != nil {
+			return err
 		}
 		if !changed {
 			return fmt.Errorf("nothing to set: pass at least one of --repo, --base, --tool, --model")
-		}
-		if err := attempt.WriteMeta(root, meta); err != nil {
-			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "set %s/%s provenance in attempt.md\n", ticket, att)
 		return nil

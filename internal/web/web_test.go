@@ -3,13 +3,10 @@ package web
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,32 +19,6 @@ import (
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
-
-// TestMain builds the real draiver binary once and points draiverBinOverride at
-// it, so the web write tests drive the CLI end-to-end rather than a stub: the
-// log append/decision/done tests exercise a real `draiver log`/`draiver done`,
-// and the enable tests a real `ctl enable` appending to disk — genuine coverage
-// of "the write goes through the draiver CLI" (decision #7). Under `go test`,
-// os.Executable() is the test binary, not draiver, so the override is required.
-func TestMain(m *testing.M) {
-	os.Exit(func() int {
-		dir, err := os.MkdirTemp("", "draiver-web-bin")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "tempdir for test binary:", err)
-			return 1
-		}
-		defer os.RemoveAll(dir)
-		bin := filepath.Join(dir, "draiver")
-		build := exec.Command("go", "build", "-o", bin, "github.com/Dawil/draiver")
-		build.Stderr = os.Stderr
-		if err := build.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "build draiver for tests:", err)
-			return 1
-		}
-		draiverBinOverride = bin
-		return m.Run()
-	}())
-}
 
 func seedBoard(t *testing.T) store.Root {
 	t.Helper()
@@ -875,12 +846,12 @@ func TestArchivePostRemovesCardAndAppendsEvent(t *testing.T) {
 	}
 }
 
-// TestArchiveActorConfigurable pins the shell-out's actor plumbing, the archive
-// peer of TestEnableActorConfigurable: the archive route drives `draiver archive`
-// (the real built binary via draiverBinOverride), passing the server's configured
-// actor as --actor, so the on-disk event is attributed to that identity rather than
-// the human:webui default. Proves the write goes through the CLI, not a direct
-// append.
+// TestArchiveActorConfigurable pins the gateway's actor plumbing, the archive
+// peer of TestEnableActorConfigurable: the archive route drives the in-process
+// gateway (s.gw.Archive, drv-008) with the server's configured actor, so the
+// on-disk event is attributed to that identity rather than the human:webui default.
+// Proves the write folds in the configured actor, the same single archive
+// implementation the CLI verb calls.
 func TestArchiveActorConfigurable(t *testing.T) {
 	root := seedColumns(t)
 	s, err := New(root, WithActor("human:dave"))
@@ -1656,8 +1627,8 @@ func TestResolveCrossOriginRejected(t *testing.T) {
 // /ticket/{id}/{attempt}/agent-logs returns text/event-stream and relays the
 // attempt's session logs — the same content `ctl logs -f` prints — one rendered
 // line per `data:` event. It seeds a recorded assistant line and asserts it
-// arrives over the stream, exercising the real shell-out to the CLI end-to-end
-// (draiverBinOverride points at the freshly built binary, like the write tests).
+// arrives over the stream, exercising the in-process streamlog.TailStream render
+// end-to-end (drv-008 — no subprocess).
 func TestAgentLogsStreamsSessionAsSSE(t *testing.T) {
 	root := seedBoard(t)
 	if err := root.EnsureSessionDir("PROJ-3", "0001"); err != nil {

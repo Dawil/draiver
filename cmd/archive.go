@@ -5,8 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dawil/draiver/internal/event"
-	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 // archive/unarchive are board-membership verbs: they take an attempt off the board
@@ -46,36 +45,27 @@ var archiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		a, err := project.LoadAttempt(root, ticket, att)
-		if err != nil {
-			return err
-		}
-		// Idempotency: archiving an already-archived attempt reports the state and
-		// exits 0 without a second event, the CLI peer of the webui's canArchive
-		// double-submit guard.
-		if a.Archived {
-			fmt.Fprintf(cmd.OutOrStdout(), "already archived: %s/%s (no-op)\n", ticket, att)
-			return nil
-		}
 		// Default the sentiment from State like the board's archiveAction (Done →
-		// accepted, else abandoned); the flags override. Mutual exclusion is enforced
-		// by cobra before RunE, so at most one is set here.
-		outcome := archiveOutcome(a.State)
+		// accepted, else abandoned) — repo.Archive derives it from "" ; the flags
+		// override. Mutual exclusion is enforced by cobra before RunE, so at most one
+		// is set here. Idempotency (already-archived → reported no-op) and the write
+		// itself live once in the library, shared with the board's tick/cross.
+		outcome := ""
 		if archiveAccepted {
 			outcome = "accepted"
 		}
 		if archiveAbandoned {
 			outcome = "abandoned"
 		}
-		e, _, err := appendEventAt(root, ticket, att, event.Event{
-			Type:    "archive",
-			Outcome: outcome,
-			Body:    archiveBody(outcome),
-		})
+		res, err := repo.New(root, resolveActor()).Archive(ticket, att, outcome)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "archived %s/%s as %s (archive #%d)\n", ticket, att, outcome, e.Seq)
+		if res.NoOp {
+			fmt.Fprintf(cmd.OutOrStdout(), "already archived: %s/%s (no-op)\n", ticket, att)
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "archived %s/%s as %s (archive #%d)\n", ticket, att, res.Outcome, res.Event.Seq)
 		return nil
 	},
 }
@@ -97,48 +87,17 @@ var unarchiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		a, err := project.LoadAttempt(root, ticket, att)
+		res, err := repo.New(root, resolveActor()).Unarchive(ticket, att)
 		if err != nil {
 			return err
 		}
-		if !a.Archived {
+		if res.NoOp {
 			fmt.Fprintf(cmd.OutOrStdout(), "already on the board: %s/%s (no-op)\n", ticket, att)
 			return nil
 		}
-		e, _, err := appendEventAt(root, ticket, att, event.Event{
-			Type: "unarchive",
-			Body: "Unarchived and returned to the board.",
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "unarchived %s/%s (unarchive #%d)\n", ticket, att, e.Seq)
+		fmt.Fprintf(cmd.OutOrStdout(), "unarchived %s/%s (unarchive #%d)\n", ticket, att, res.Event.Seq)
 		return nil
 	},
-}
-
-// archiveOutcome derives the archive sentiment from lifecycle State, mirroring the
-// board's archiveAction (internal/web): a finished (Done) attempt is accepted, any
-// active one (Running/Pending/Needs me/Review) is abandoned. It maps to the exact
-// Outcome strings the board writes so CLI- and board-authored archives are
-// indistinguishable in the log and to metrics.
-func archiveOutcome(s project.State) string {
-	if s == project.Done {
-		return "accepted"
-	}
-	return "abandoned"
-}
-
-// archiveBody is the human-readable body stamped on an archive event, keyed off the
-// sentiment. It reuses verbatim the copy the webui's archiveBody writes
-// (internal/web/web.go) so log prose is identical regardless of origin; the
-// machine-readable truth is the event's Outcome field. drv-008 will fold this shared
-// copy into the extracted library.
-func archiveBody(outcome string) string {
-	if outcome == "accepted" {
-		return "Accepted and archived from the board."
-	}
-	return "Closed and archived from the board."
 }
 
 func init() {

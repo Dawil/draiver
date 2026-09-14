@@ -19,20 +19,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dawil/draiver/internal/attempt"
-	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/land"
 	"github.com/Dawil/draiver/internal/project"
-	"github.com/Dawil/draiver/internal/reconcile"
-	"github.com/Dawil/draiver/internal/session"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
-	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -146,28 +141,15 @@ func loadLandContext(ctx context.Context, arg string) (*landContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	a, err := project.LoadAttempt(root, ticket, att)
+	// land.Load is the single implementation of the base/repo/worktree resolution,
+	// shared with the merge --remote path (and the webui).
+	h, err := land.Load(root, ticket, att)
 	if err != nil {
 		return nil, err
-	}
-	meta, err := attempt.LoadMeta(root, ticket, att)
-	if err != nil {
-		return nil, err
-	}
-	base := strings.TrimSpace(meta.Base)
-	if base == "" {
-		return nil, fmt.Errorf("%s/%s records no base branch to land into; recreate the attempt with --base, or add a `base:` to its attempt.md", ticket, att)
-	}
-	if strings.TrimSpace(meta.Repo) == "" {
-		return nil, fmt.Errorf("%s/%s records no repo, so it has no worktree to land from", ticket, att)
-	}
-	wm, err := worktree.NewManager(meta.Repo)
-	if err != nil {
-		return nil, fmt.Errorf("%s/%s repo %q is missing or not a git working tree: %w", ticket, att, meta.Repo, err)
 	}
 	return &landContext{
-		root: root, ticket: ticket, attempt: att, att: a, base: base, wm: wm,
-		key: worktree.Key{Ticket: ticket, Attempt: att},
+		root: h.Root, ticket: h.Ticket, attempt: h.Attempt, att: h.Att, base: h.Base, wm: h.WM,
+		key: h.Key,
 	}, nil
 }
 
@@ -219,9 +201,7 @@ func (lc *landContext) merge(cmd *cobra.Command) error {
 	if landed.AlreadyUpToDate {
 		body = fmt.Sprintf("`ctl merge`: %s was already contained in %s (nothing to land); recording done.", landed.Branch, landed.Base)
 	}
-	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "done", Actor: resolveActor(), Body: body,
-	})
+	e, err := repo.New(lc.root, resolveActor()).Done(lc.ticket, lc.attempt, body)
 	if err != nil {
 		return err
 	}
@@ -230,110 +210,33 @@ func (lc *landContext) merge(cmd *cobra.Command) error {
 }
 
 // mergeRemote is the external twin of merge: it reconciles from the remote rather
-// than landing the local branch. It fetches the recorded base, verifies the branch
-// is contained upstream (the load-bearing gate for `done`), records `done`, then
-// best-effort fast-forwards the local base. The containment/fetch failure takes the
-// escalate/no-escalate disposition; the local pull's failure is only a warning.
+// than landing the local branch, via the shared internal/land orchestration (the
+// same operation the webui's "Merged elsewhere" button calls in-process). It
+// fetches the recorded base, verifies the branch is contained upstream (the
+// load-bearing gate for `done`), records `done`, then best-effort fast-forwards the
+// local base. A remote/config resolution problem is a plain error (land tags it
+// *PlainError); the containment/fetch/gate failure takes the escalate/no-escalate
+// disposition; the local pull's failure is only a warning.
 func (lc *landContext) mergeRemote(cmd *cobra.Command) error {
-	ctx := cmd.Context()
-	// Resolve which remote before anything else: a config/usage problem here is a
-	// plain error, not a land failure worth escalating.
-	remote, err := lc.resolveRemote(ctx)
-	if err != nil {
-		return err
+	// Translate the --remote flag to land's selector: the bare sentinel means "the
+	// default remote" (""), an explicit --remote=NAME passes NAME.
+	remote := ""
+	if mergeRemote != remoteBareSentinel {
+		remote = strings.TrimSpace(mergeRemote)
 	}
-	if err := lc.gateForRemoteLand(ctx); err != nil {
+	res, err := land.MergeRemote(cmd.Context(), repo.New(lc.root, resolveActor()), lc.ticket, lc.attempt, remote, ctlConfigPath)
+	if err != nil {
+		// A PlainError is a resolution/bookkeeping problem — surface it as-is (exit 1),
+		// never through the escalate disposition; a land failure takes the disposition.
+		var pe *land.PlainError
+		if errors.As(err, &pe) {
+			return err
+		}
 		return lc.fail(cmd, "merge --remote", err)
-	}
-
-	rm, err := lc.wm.MergeRemote(ctx, lc.key, remote, lc.base)
-	if errors.Is(err, worktree.ErrNotContainedUpstream) {
-		return lc.fail(cmd, "merge --remote", fmt.Errorf(
-			"%s is not contained in %s — the PR was not merged into %s (or not yet fetched); recording nothing",
-			rm.Branch, rm.Ref, lc.base))
-	}
-	if err != nil {
-		return lc.fail(cmd, "merge --remote", err)
-	}
-
-	// The branch is proven contained in the remote base — the code landed, just via
-	// the remote this time. Record `done` so control state follows reality.
-	body := fmt.Sprintf("`ctl merge --remote=%s`: %s is contained in %s (tip %s) — the change landed via an external PR merge; recording done.",
-		remote, rm.Branch, rm.Ref, shortSHA(rm.RemoteTip))
-	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "done", Actor: resolveActor(), Body: body,
-	})
-	if err != nil {
-		return err
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "closed %s/%s: %s is contained in %s and recorded done (seq %d)\n", lc.ticket, lc.attempt, rm.Branch, rm.Ref, e.Seq)
-
-	// Step 4 — best-effort local fast-forward. Never load-bearing: a skip or warning
-	// here must never un-close the ticket just recorded done above.
-	switch p := rm.Pull; {
-	case p.Moved:
-		fmt.Fprintf(out, "fast-forwarded local %s to %s (tip %s)\n", lc.base, rm.Ref, shortSHA(p.Tip))
-	case p.Already:
-		fmt.Fprintf(out, "local %s already up to date with %s\n", lc.base, rm.Ref)
-	case p.Skipped != "":
-		fmt.Fprintf(out, "warning: left local %s unchanged — %s\n", lc.base, p.Skipped)
-	}
-	return nil
-}
-
-// resolveRemote picks the git remote to reconcile from, mirroring review's rule:
-// an explicit --remote=NAME wins (verified against the repo's remotes); a bare
-// --remote uses the sole remote regardless, else the config's primary_remote, and
-// with several remotes and no primary it refuses rather than guess.
-func (lc *landContext) resolveRemote(ctx context.Context) (string, error) {
-	remotes, err := lc.wm.Remotes(ctx)
-	if err != nil {
-		return "", err
-	}
-	if len(remotes) == 0 {
-		return "", fmt.Errorf("%s/%s repo has no git remote configured; add one (git remote add) before `ctl merge --remote`", lc.ticket, lc.attempt)
-	}
-	// Explicit --remote=NAME: use it, but verify it names a real remote.
-	if mergeRemote != remoteBareSentinel && strings.TrimSpace(mergeRemote) != "" {
-		name := strings.TrimSpace(mergeRemote)
-		if !slices.Contains(remotes, name) {
-			return "", fmt.Errorf("no git remote named %q in %s/%s (configured: %s)", name, lc.ticket, lc.attempt, strings.Join(remotes, ", "))
-		}
-		return name, nil
-	}
-	// Bare --remote: exactly one remote → use it regardless of any config.
-	if len(remotes) == 1 {
-		return remotes[0], nil
-	}
-	cfg, err := config.Load(ctlConfigPath)
-	if err != nil {
-		return "", err
-	}
-	if pr := strings.TrimSpace(cfg.PrimaryRemote); pr != "" {
-		if !slices.Contains(remotes, pr) {
-			return "", fmt.Errorf("configured primary_remote %q is not a remote of %s/%s (configured: %s)", pr, lc.ticket, lc.attempt, strings.Join(remotes, ", "))
-		}
-		return pr, nil
-	}
-	return "", fmt.Errorf("%s/%s repo has several remotes (%s) and no primary_remote configured; pass --remote=NAME or set primary_remote in the config", lc.ticket, lc.attempt, strings.Join(remotes, ", "))
-}
-
-// gateForRemoteLand enforces the remote-land preconditions: the attempt must be in
-// Review (a remote land is still the Review → Done transition) and stopped (no live
-// session racing the close). Unlike gateForLand it does not require a clean base
-// checkout — step 4's local fast-forward is best-effort, so a dirty base skips the
-// pull with a warning rather than blocking the close.
-func (lc *landContext) gateForRemoteLand(ctx context.Context) error {
-	if lc.att.State != project.Review {
-		return fmt.Errorf("merge --remote records the Review → Done transition, but %s/%s is %s — claim `review` first, or use the plain `done` verb for a docs-only ticket", lc.ticket, lc.attempt, lc.att.State)
-	}
-	live, pid, err := attemptSessionLive(lc.root, lc.ticket, lc.attempt)
-	if err != nil {
-		return err
-	}
-	if live {
-		return fmt.Errorf("%s/%s has a live session (pid %d); stop it with `ctl stop` before landing", lc.ticket, lc.attempt, pid)
+	for _, line := range land.FormatRemoteReport(lc.ticket, lc.attempt, res) {
+		fmt.Fprintln(out, line)
 	}
 	return nil
 }
@@ -351,8 +254,8 @@ func (lc *landContext) sync(cmd *cobra.Command) error {
 	// A back-merge is a real, durable change to the branch; note it so a resumed
 	// agent sees the tip moved and why.
 	body := fmt.Sprintf("Synced %s into %s (merge commit, tip %s) via `ctl sync`; the branch is now ff-landable.", synced.Base, synced.Branch, shortSHA(synced.Tip))
-	if _, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "note", Actor: resolveActor(), Body: body,
+	if _, err := repo.New(lc.root, resolveActor()).AppendTyped(lc.ticket, lc.attempt, event.Event{
+		Type: "note", Body: body,
 	}); err != nil {
 		return err
 	}
@@ -394,8 +297,8 @@ func (lc *landContext) fail(cmd *cobra.Command, op string, cause error) error {
 	}
 	// Append to the *resolved* attempt (lc.attempt), not via appendEvent's
 	// latest/env fallback, so an explicit `@attempt` target escalates on itself.
-	e, err := ticketlog.Append(lc.root, lc.ticket, lc.attempt, event.Event{
-		Type: "escalation", Actor: resolveActor(), Body: msg,
+	e, err := repo.New(lc.root, resolveActor()).AppendTyped(lc.ticket, lc.attempt, event.Event{
+		Type: "escalation", Body: msg,
 	})
 	if err != nil {
 		return err
@@ -420,35 +323,15 @@ func (lc *landContext) escalateOnFailure() bool {
 }
 
 // attemptSessionLive reports whether the attempt has a live recorded session
-// process — the "stopped" half of the land gate. A missing session, or a recorded
-// pid that is no longer alive, counts as stopped.
+// process — the "stopped" half of the land gate. It delegates to land.SessionLive,
+// the shared implementation the remote-land gate also uses.
 func attemptSessionLive(root store.Root, ticket, att string) (bool, int, error) {
-	sess, err := session.Open(root, ticket, att)
-	if err != nil {
-		return false, 0, err
-	}
-	defer sess.Close()
-	id, err := sess.ReadIdentity()
-	if err != nil {
-		// A never-started (or reaped-and-cleared) attempt has no identity file; a
-		// wrapped fs.ErrNotExist means "no session", which counts as stopped.
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, 0, nil
-		}
-		return false, 0, err
-	}
-	if id.PID == 0 {
-		return false, 0, nil
-	}
-	return reconcile.OSProc{}.Alive(id.PID), id.PID, nil
+	return land.SessionLive(root, ticket, att)
 }
 
 // shortSHA trims a commit oid to a readable 12-char prefix for log bodies.
 func shortSHA(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
+	return land.ShortSHA(sha)
 }
 
 func init() {

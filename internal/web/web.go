@@ -14,16 +14,18 @@
 // human can unblock a base-less Review attempt from the UI; and the board card's
 // archive affordance (POST /ticket/{id}/{attempt}/archive) takes an attempt off the
 // board — a green tick to accept a Done card, a grey cross to abandon an active one.
-// Every write shells the same verb a human runs at a terminal (draiver log / draiver
-// done / draiver resolve / draiver ctl merge --remote / draiver ctl enable / draiver
-// attempt set / draiver archive — see runDraiverLog, runDraiverResolve,
-// runDraiverMergeRemote, runDraiverEnable, runDraiverAttemptSet, runDraiverArchive),
-// so there is a single code path per write and the CLI verb is the sole author of
-// each event type — the web layer never appends an event itself.
+// Every write reaches the data folder through the same in-process gateway the CLI
+// verbs use (drv-008), not a subprocess: log/done/resolve/enable/archive and the
+// provenance/edges writes go through internal/repo, and `merge --remote` through
+// internal/land (which records its `done` through repo too). So there is exactly
+// one code path per write — a function shared by the board and the terminal, not a
+// shelled binary — and the same live-session render (`ctl logs -f`) streams here
+// via internal/streamlog. The handlers own only transport concerns
+// (same-origin/CSRF, idempotency, HTML shaping); the write semantics live once in
+// the libraries.
 package web
 
 import (
-	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -31,8 +33,6 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -45,8 +45,11 @@ import (
 	"github.com/yuin/goldmark/util"
 
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/land"
 	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/streamlog"
 )
 
 //go:embed templates/*.html
@@ -69,6 +72,10 @@ type Server struct {
 	// a board enable. The board has no CLI actor context, so it is configured at
 	// construction (see WithActor); it defaults to human:webui.
 	actor string
+	// gw is the in-process data-access gateway (drv-008): the webui's writes go
+	// through the same library functions the CLI verbs call, not a subprocess. It is
+	// bound to the server's root and actor once both are resolved (see New).
+	gw *repo.Repo
 	// supDefault is the global/project default coordinator supervision mode
 	// (drvctl-042) the capability panel folds a per-ticket override over to show the
 	// *effective* mode (project.Effective). The web package stays config-free — the
@@ -122,132 +129,20 @@ var composeTypes = map[string]bool{
 	"done":     true,
 }
 
-// draiverBinOverride points the web writes' shell-outs (runDraiverLog and
-// runDraiverEnable) at a specific draiver binary. It is empty in production,
-// where those resolve the running executable via os.Executable() (under
-// `draiver webui`, that is draiver itself). Tests set it to a freshly built
-// binary, since under `go test` os.Executable() is the test binary, not draiver.
-var draiverBinOverride string
-
-// draiverExe resolves the draiver binary the write shell-outs invoke:
-// draiverBinOverride when set (tests, where os.Executable() is the test binary,
-// not draiver), else the running executable — under `draiver webui` that is
-// draiver itself.
-func draiverExe() (string, error) {
-	if draiverBinOverride != "" {
-		return draiverBinOverride, nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("locate draiver binary: %w", err)
-	}
-	return exe, nil
-}
-
-// runDraiverLog appends a web-composed event by invoking the draiver CLI rather
-// than reimplementing the append in the web layer: note/gotcha/decision go
-// through `draiver log --type T`, and the terminal action through `draiver done`
-// — the same verbs a human runs at a terminal, so there is a single write path.
-// It passes the server's resolved data root, actor, and target attempt as
-// explicit flags (env-independent), and ends with "--" so a body beginning with
-// "-" is never parsed as a flag. On failure it surfaces the CLI's combined
-// output for a legible error.
-func (s *Server) runDraiverLog(typ, id, att, body string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	var args []string
+// appendComposed appends a web-composed event through the in-process data-access
+// gateway (drv-008) rather than reimplementing the append or shelling the CLI:
+// note/gotcha/decision go through AppendTyped (the generic `log`) and the terminal
+// action through Done — the same library functions `draiver log`/`draiver done`
+// call, so the board and a terminal share one write path. The gateway stamps the
+// server's actor and runs the same attempt-existence and link checks every append
+// goes through.
+func (s *Server) appendComposed(typ, id, att, body string) error {
 	if typ == "done" {
-		args = []string{"done"}
-	} else {
-		args = []string{"log", "--type", typ}
-	}
-	args = append(args, "--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id, body)
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver %s: %w: %s", typ, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// runDraiverAttemptSet writes an attempt's provenance (repo/base) by invoking
-// `draiver attempt set` rather than reimplementing the attempt.md write in the
-// web layer — the same verb a human runs at a terminal, so the board and the CLI
-// share one write path (see runDraiverLog). Only a non-empty field is passed as a
-// flag: a blank input omits the flag so `attempt set` leaves that field untouched
-// (drvweb-009 maps a blank input to "no change", never to "clear"; the caller has
-// already rejected the both-blank case). The data root goes as an explicit flag
-// and the ticket@attempt target after "--" so an id beginning with "-" is never
-// parsed as a flag. No --actor: `attempt set` appends no hash-chained event, so
-// the write carries no actor to attribute. On failure it surfaces the CLI's
-// combined output for a legible error.
-func (s *Server) runDraiverAttemptSet(id, att, repo, base string) error {
-	exe, err := draiverExe()
-	if err != nil {
+		_, err := s.gw.Done(id, att, body)
 		return err
 	}
-	args := []string{"attempt", "set", "--data", s.root.Dir}
-	if repo != "" {
-		args = append(args, "--repo", repo)
-	}
-	if base != "" {
-		args = append(args, "--base", base)
-	}
-	args = append(args, "--", id+"@"+att)
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver attempt set: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// runDraiverEdges rewrites a ticket's dependency edges by invoking `draiver
-// depends --set` rather than writing spec.md from the web layer — the same
-// frontmatter-merge verb a human runs at a terminal (drvctl-037), so the board
-// and the CLI share one write path (see runDraiverAttemptSet). --set makes each
-// relation a whole-set replace: the panel is a WYSIWYG editor, so all three
-// relations are always passed (a blank one clears that relation). The verb owns
-// the self-edge and cycle refusal and writes nothing when it refuses; on a
-// nonzero exit this returns the CLI's combined output so the caller can surface
-// the refusal inline. No --actor: `depends` appends no hash-chained event (edges
-// are metadata outside the audited log), so there is nothing to attribute.
-func (s *Server) runDraiverEdges(id string, e project.Edges) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	args := []string{"depends", "--set", "--data", s.root.Dir,
-		"--wants", strings.Join(e.Wants, ","),
-		"--after", strings.Join(e.After, ","),
-		"--requires", strings.Join(e.Requires, ","),
-		"--", id}
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// runDraiverResolve answers an escalation by invoking `draiver resolve` rather
-// than reimplementing the resolution append in the web layer — the same verb a
-// human runs at a terminal, so the board and the CLI share one write path (see
-// runDraiverLog). The escalation seq and the answer go as positional args after
-// "--" so an answer beginning with "-" is never parsed as a flag; the server's
-// data root, actor, and target attempt go as explicit flags. On failure it
-// surfaces the CLI's combined output for a legible error.
-func (s *Server) runDraiverResolve(id, att string, seq int, answer string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	args := []string{"resolve", "--data", s.root.Dir, "--actor", s.actor, "--attempt", att,
-		"--", id, strconv.Itoa(seq), answer}
-	cmd := exec.Command(exe, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver resolve: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := s.gw.AppendTyped(id, att, event.Event{Type: typ, Body: body})
+	return err
 }
 
 // stateLabels overrides how a control state is shown in the human-facing web UI.
@@ -496,6 +391,10 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Bind the data-access gateway once the actor is resolved (an Option may have
+	// overridden the human:webui default): every web write goes through it, so the
+	// board and a terminal share one in-process write path per event.
+	s.gw = repo.New(s.root, s.actor)
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
 			"stateLabel":    stateLabel,
@@ -815,7 +714,7 @@ type provenanceVM struct {
 // ticket-level, not per-attempt — edges live in spec.md, shared across attempts.
 // Each relation prefills as a comma-joined id list the human edits in place; the
 // three fields are always posted together (a whole-set replace, see
-// runDraiverEdges). Saved is true only on a successful-save response so the panel
+// handleEdges → s.gw.SetEdges). Saved is true only on a successful-save response so the panel
 // can confirm the write after an htmx swap. Error carries a self-edge or cycle
 // refusal to render inline — the verb wrote nothing, so the panel re-shows the
 // values the human tried and the reason they were rejected.
@@ -1235,17 +1134,17 @@ func (s *Server) executeLive(vm detailVM) ([]byte, error) {
 
 // handleAgentLogs streams an attempt's live session logs as Server-Sent Events
 // (GET /ticket/{id}/{attempt}/agent-logs) — the first stream in the web layer,
-// which is otherwise all htmx polling. It shells out to `draiver ctl logs -f`
-// (the same verb a human runs at a terminal, and the same write-path-reuse
-// discipline as the log/resolve/enable POSTs) and relays each rendered stdout
-// line as one SSE `data:` event. Over a pipe the CLI's renderer is non-TTY, so it
-// emits plain, uncoloured text (newStreamRenderer gates styling on
-// term.IsTerminal) — exactly what this read-only panel wants, with the prefix
-// column, markdown-as-literal, and ctl.jsonl health interleave reused verbatim.
+// which is otherwise all htmx polling. It renders the stream in-process via the
+// shared internal/streamlog.TailStream (the same follow `draiver ctl logs -f`
+// runs, drv-008) and relays each rendered line as one SSE `data:` event. Writing
+// to an http.ResponseWriter (not a *os.File) the renderer is non-TTY, so it emits
+// plain, uncoloured text — exactly what this read-only panel wants, with the
+// prefix column, markdown-as-literal, and ctl.jsonl health interleave reused
+// verbatim. tail=50 matches the CLI's default backlog window.
 //
-// The child is bound to r.Context() via exec.CommandContext: when the client
-// closes the SSE — the <details> panel collapses, the page is left — the process
-// is killed and the follow ends. Each line is relayed as text and set client-side
+// The follow is bound to r.Context(): when the client closes the SSE — the
+// <details> panel collapses, the page is left — the context cancels and TailStream
+// returns at its next idle poll. Each line is relayed as text and set client-side
 // via textContent; it is never routed through the markdown→HTML path, so the
 // untrusted session content (arbitrary tool output + model prose) cannot inject
 // markup. A hand-run attempt with no session yet simply streams nothing; the
@@ -1262,23 +1161,6 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, fmt.Errorf("streaming unsupported"))
 		return
 	}
-	exe, err := draiverExe()
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-
-	cmd := exec.CommandContext(r.Context(), exe, "ctl", "logs", "-f",
-		"--data", s.root.Dir, id+"@"+att)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		s.fail(w, err)
-		return
-	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1286,22 +1168,43 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 	// Disable proxy buffering so the stream reaches the panel line-by-line.
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Relay stdout one line per SSE record. bufio.Scanner strips the trailing
-	// newline, so each scanned line carries no embedded newline to break the
-	// `data:` framing; a stray CR is trimmed for the same reason. Flush after
-	// every line so the panel updates live rather than in buffer-sized bursts.
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimRight(scanner.Text(), "\r")
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", line); err != nil {
-			break // client went away; CommandContext kills the child
+	// TailStream writes newline-terminated rendered lines; sseLineWriter reframes
+	// each complete line as one `data:` record and flushes, so the panel updates
+	// live rather than in buffer-sized bursts. A follow never ends on its own — it
+	// unblocks when r.Context() cancels on client disconnect.
+	sse := &sseLineWriter{w: w, flusher: flusher}
+	_ = streamlog.TailStream(r.Context(), sse,
+		s.root.SessionStreamPath(id, att), s.root.SessionCtlLogPath(id, att),
+		true /*follow*/, true /*render*/, 50 /*tail backlog*/)
+}
+
+// sseLineWriter adapts streamlog's line-oriented io.Writer output to Server-Sent
+// Events: it buffers bytes until a newline, then emits everything up to it as one
+// `data: <line>\n\n` record and flushes. A stray CR is trimmed so it cannot break
+// the `data:` framing, mirroring the bufio.Scanner the subprocess relay used. A
+// write that fails (the client went away) is swallowed — the follow ends when the
+// request context cancels, so a broken pipe here need not propagate.
+type sseLineWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	buf     []byte
+}
+
+func (s *sseLineWriter) Write(p []byte) (int, error) {
+	s.buf = append(s.buf, p...)
+	for {
+		i := bytes.IndexByte(s.buf, '\n')
+		if i < 0 {
+			break
 		}
-		flusher.Flush()
+		line := strings.TrimRight(string(s.buf[:i]), "\r")
+		s.buf = s.buf[i+1:]
+		if _, err := fmt.Fprintf(s.w, "data: %s\n\n", line); err != nil {
+			return len(p), nil // client went away; the context cancel ends the follow
+		}
+		s.flusher.Flush()
 	}
-	// Reap the child. Context cancellation already signals it on client close;
-	// Wait releases its resources whether it exited on its own or was killed.
-	_ = cmd.Wait()
+	return len(p), nil
 }
 
 // handleLogAppend appends a human-composed typed event to an attempt (POST
@@ -1341,7 +1244,7 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.runDraiverLog(typ, id, att, body); err != nil {
+	if err := s.appendComposed(typ, id, att, body); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1363,10 +1266,10 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEnable is the board's enable write (POST /ticket/{id}/{attempt}/enable): it
-// opts a Running, disabled attempt into daemon supervision by shelling
-// `draiver ctl enable` (runDraiverEnable) — the same verb a human runs at a
-// terminal, so the enable is not reimplemented in the web layer — then re-renders
-// the card so htmx swaps the play button away and the grey session-dot flips. The
+// opts a Running, disabled attempt into daemon supervision through the in-process
+// gateway (s.gw.Enable, drv-008) — the same operation `draiver ctl enable` runs, so
+// the enable is not reimplemented in the web layer — then re-renders the card so
+// htmx swaps the play button away and the grey session-dot flips. The
 // bare enable is purely declarative: no control socket, no reconciler; a running
 // `ctl up` brings the attempt up on its next tick, and with no daemon the enable
 // simply waits, matching the grey-dot semantics the button sits on.
@@ -1374,8 +1277,8 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 // It is idempotent: an already-enabled (or non-Running) attempt — e.g. a
 // double-click racing the 3s board poll — is a no-op that just re-renders the
 // current card, so the chain gains exactly one enable per enable. The gate is
-// canEnable, checked here before the shell-out (the CLI's `enable` would append
-// unconditionally), so the button and the effect can never disagree. The
+// canEnable, checked here before the gateway write (the gateway's `Enable` would
+// append unconditionally), so the button and the effect can never disagree. The
 // state-changing POST carries a same-origin guard so a cross-site page in a
 // browser cannot drive it, proportionate to a localhost dev tool.
 func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
@@ -1397,7 +1300,7 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	// Only the disabled→enabled transition writes; canEnable is the same gate the
 	// button renders behind, so a POST for a card that shows no button is a no-op.
 	if canEnable(a) {
-		if err := s.runDraiverEnable(id, att); err != nil {
+		if _, err := s.gw.Enable(id, att); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -1411,66 +1314,16 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "card", a)
 }
 
-// runDraiverEnable opts an attempt into supervision by invoking the draiver CLI
-// rather than reimplementing the append in the web layer: `draiver ctl enable`
-// records the durable `enable` log event (setEnabled, cmd/ctl_enable.go), the
-// exact write a human's terminal performs, so there is a single enable code path.
-// It passes the server's resolved data root, actor, and target attempt as
-// explicit flags (env-independent), and ends with "--" so a ticket id beginning
-// with "-" is never parsed as a flag. Bare enable only (no --now): no control
-// socket is dragged into the web process. On failure it surfaces the CLI's
-// combined output for a legible error.
-func (s *Server) runDraiverEnable(id, att string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(exe, "ctl", "enable",
-		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver ctl enable: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// runDraiverArchive takes an attempt off the board by invoking `draiver archive`
-// rather than reimplementing the append in the web layer — the same verb a human
-// runs at a terminal, so the board and the CLI share one write path (drvctl-043)
-// and there is a single author of the `archive` event. The sentiment the handler
-// already derived from State (archiveAction) is passed as the explicit
-// --accepted/--abandoned flag, never left to the verb's own State-derived default,
-// so the board's rendered glyph and the written Outcome cannot diverge. It passes
-// the server's resolved data root, actor, and target attempt as explicit flags
-// (env-independent), and ends with "--" so a ticket id beginning with "-" is never
-// parsed as a flag. On failure it surfaces the CLI's combined output for a legible
-// error.
-func (s *Server) runDraiverArchive(id, att, outcome string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	flag := "--abandoned"
-	if outcome == "accepted" {
-		flag = "--accepted"
-	}
-	cmd := exec.Command(exe, "archive", flag,
-		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver archive: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // handleArchive takes an attempt off the board (POST
 // /ticket/{id}/{attempt}/archive): the card's tick (Done → accepted) or cross
-// (active → abandoned) both post here, and the server derives the sentiment from
-// the attempt's current State so the client never chooses the outcome. Like every
-// other web write it shells the CLI — `draiver archive` (runDraiverArchive,
-// drvctl-043) — so the board and a human at a terminal share one write path and the
-// verb is the sole author of the `archive` event. The server-derived sentiment is
-// passed to the verb as the explicit --accepted/--abandoned flag (never the verb's
-// own State-derived default), so the board's rendered glyph and the written Outcome
-// cannot diverge; the event carries the resolved board actor.
+// (active → abandoned) both post here, and the sentiment is derived from the
+// attempt's current State so the client never chooses the outcome. Like every
+// other web write it goes through the in-process gateway (s.gw.Archive, drv-008) —
+// the single implementation of "what an archive is" the `draiver archive` CLI verb
+// also calls (drvctl-043) — which folds in the board actor, derives the
+// accepted|abandoned Outcome from State (outcome ""), and owns the idempotency
+// no-op. So the event is byte-identical whether authored from the board or a
+// terminal, and metrics can tell an accepted close from an abandoned one.
 //
 // It is idempotent like handleEnable: canArchive (!Archived) is the same gate the
 // button renders behind, so a re-POST racing the 3s board poll is a no-op that
@@ -1498,11 +1351,12 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only an on-board attempt writes; canArchive is the same gate the button renders
 	// behind, so a POST for an already-archived card (a double-submit) is a no-op that
-	// just re-renders the board. The sentiment is server-derived from State, never the
-	// posted form, via the same helper the card renders with, and handed to the verb
-	// as the explicit flag.
+	// just re-renders the board. The sentiment is server-derived from State inside the
+	// gateway (outcome ""), never the posted form — the same single implementation of
+	// "what an archive is" the CLI verb calls. The library also owns the idempotency
+	// no-op, so canArchive here is just the render/effect-agreement gate.
 	if canArchive(a) {
-		if err := s.runDraiverArchive(id, att, archiveAction(a).Outcome); err != nil {
+		if _, err := s.gw.Archive(id, att, ""); err != nil {
 			s.fail(w, err)
 			return
 		}
@@ -1521,16 +1375,16 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 
 // handleMergeRemote closes a Review attempt whose change landed via a PR merged
 // on the forge and refreshes the local base in one click (POST
-// /ticket/{id}/{attempt}/merge-remote). It shells `draiver ctl merge --remote`
-// (runDraiverMergeRemote — the write path a human runs at a terminal, drvctl-029),
-// which owns the fetch + containment check + `done` and the best-effort local
-// fast-forward; the web layer never touches git itself (the package's write
-// invariant). Unlike the other writes it surfaces the verb's combined output on
-// success too: the CLI records `done` and only *best-effort* pulls, so a
-// zero-exit-with-warning ("could not fast-forward … pull manually") is a success
+// /ticket/{id}/{attempt}/merge-remote). It calls the shared internal/land
+// orchestration in-process (land.MergeRemote — the same operation `draiver ctl
+// merge --remote` runs), which owns the fetch + containment check + `done` and the
+// best-effort local fast-forward; the web layer never touches git itself (the
+// package's write invariant). Unlike the other writes it surfaces the operation's
+// report on success too: it records `done` and only *best-effort* pulls, so a
+// success-with-warning ("left local main unchanged … pull manually") is a success
 // to report, not an error — the message rides back on an OOB banner beside the
-// re-rendered (now Done) log region. A nonzero exit (containment/fetch failure) is
-// a real error, surfaced via s.fail like the other writes.
+// re-rendered (now Done) log region. A failed containment/fetch is a real error,
+// surfaced via s.fail like the other writes.
 func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -1542,11 +1396,15 @@ func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	msg, err := s.runDraiverMergeRemote(id, att)
+	// Bare remote (""): the button offers no NAME field, so land picks the sole
+	// remote or the config's primary_remote. No config path — the default is used,
+	// exactly as the subprocess shell-out relied on before.
+	res, err := land.MergeRemote(r.Context(), s.gw, id, att, "", "")
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	msg := strings.Join(land.FormatRemoteReport(id, att, res), "\n")
 	vm, err := s.detail(id, att)
 	if err != nil {
 		s.fail(w, err)
@@ -1571,38 +1429,13 @@ func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 	w.Write(buf.Bytes())
 }
 
-// runDraiverMergeRemote closes an externally-landed Review attempt by invoking
-// `draiver ctl merge --remote` rather than reimplementing the fetch/ff in the web
-// layer — the same verb a human runs at a terminal, so the board and the CLI share
-// one write path (see runDraiverEnable). Bare `--remote` picks the primary remote
-// (no NAME field in the UI for v1); the server's data root, actor, and target
-// attempt go as explicit flags, and the ticket id after "--" so an id beginning
-// with "-" is never parsed as a flag. Unlike the other shell-outs it returns the
-// trimmed combined output on success too: the verb prints the close plus the
-// best-effort pull result (or warning) there, and the handler reports it. On a
-// nonzero exit it wraps that same output as a legible error.
-func (s *Server) runDraiverMergeRemote(id, att string) (string, error) {
-	exe, err := draiverExe()
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(exe, "ctl", "merge", "--remote",
-		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id)
-	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
-	if err != nil {
-		return "", fmt.Errorf("draiver ctl merge --remote: %w: %s", err, text)
-	}
-	return text, nil
-}
-
 // handleProvenance sets an attempt's repo/base from the detail page's provenance
 // panel (POST /ticket/{id}/{attempt}/provenance) — the one UI affordance for the
 // merge/sync-gating fields, so a human can unblock an attempt wedged for want of a
-// base without leaving the board. It shells `draiver attempt set`
-// (runDraiverAttemptSet — the write path a human runs at a terminal, drvctl-028),
-// which owns the attempt.md write and the field validation; the web layer never
-// touches attempt.md itself (the package's write invariant). The panel prefills
+// base without leaving the board. It calls the in-process gateway
+// (s.gw.SetProvenance, drv-008 — the same write the CLI's `draiver attempt set`
+// runs, drvctl-028), which owns the attempt.md write and the field validation; the
+// web layer never touches attempt.md itself (the package's write invariant). The panel prefills
 // the current values, so a blank input means "leave unchanged": a blank field is
 // omitted from the shell-out, and an all-blank submit is a 400 here rather than a
 // 500 from the verb's "nothing to set". Only repo and base are read from the form
@@ -1621,18 +1454,29 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Only repo/base are accepted; a blank field maps to "no change" (the verb
-	// leaves an omitted flag untouched), so the shell-out receives only the fields
+	// Only repo/base are accepted; a blank field maps to "no change" (an omitted
+	// Provenance field is left untouched), so the gateway receives only the fields
 	// the human actually filled. An all-blank submit changes nothing — reject it as
-	// a bad request here rather than let the verb's "nothing to set" surface as a
+	// a bad request here rather than let the gateway's "nothing to set" surface as a
 	// 500.
-	repo := strings.TrimSpace(r.FormValue("repo"))
-	base := strings.TrimSpace(r.FormValue("base"))
-	if repo == "" && base == "" {
+	repoVal := strings.TrimSpace(r.FormValue("repo"))
+	baseVal := strings.TrimSpace(r.FormValue("base"))
+	if repoVal == "" && baseVal == "" {
 		http.Error(w, "draiver: set a repo or a base to save", http.StatusBadRequest)
 		return
 	}
-	if err := s.runDraiverAttemptSet(id, att, repo, base); err != nil {
+	// A blank field maps to "no change" (a nil Provenance pointer); the panel has
+	// already rejected the all-blank submit. Base is passed as typed — the webui
+	// never triggers the empty-base→current-branch defaulting the CLI's `attempt
+	// set` does (that path is git-side and only fires on an omitted flag).
+	var p repo.Provenance
+	if repoVal != "" {
+		p.Repo = &repoVal
+	}
+	if baseVal != "" {
+		p.Base = &baseVal
+	}
+	if _, err := s.gw.SetProvenance(id, att, p); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1646,10 +1490,10 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 
 // handleSupervision sets a Capability's coordinator supervision mode from the
 // capability panel's dial (POST /ticket/{id}/{attempt}/supervision) — the write
-// half of drvweb-017. It shells `draiver ctl supervision` (runDraiverSupervision —
-// the write path a human runs at a terminal, drvctl-042), which owns the
-// `supervision` log-event append and mode validation; the web layer never appends
-// the event itself (the package's write invariant, matching handleEnable). The
+// half of drvweb-017. It writes through the in-process gateway (s.gw.Supervision,
+// drv-008) — the same library op the `draiver ctl supervision` verb calls
+// (drvctl-042) — which owns the `supervision` log-event append; the web layer never
+// appends the event itself (the package's write invariant, matching handleEnable). The
 // write is gated on the ticket being a Capability (it carries `wants:` edges) — the
 // same gate the panel renders behind, so the affordance and the effect agree; a
 // POST to a non-Capability is a 400 before any write. The mode is re-validated here
@@ -1685,7 +1529,7 @@ func (s *Server) handleSupervision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "draiver: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.runDraiverSupervision(id, att, string(mode)); err != nil {
+	if _, err := s.gw.Supervision(id, att, mode); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1703,32 +1547,12 @@ func (s *Server) handleSupervision(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "capability-panel", vm)
 }
 
-// runDraiverSupervision records a Capability's supervision mode by invoking
-// `draiver ctl supervision` rather than reimplementing the append in the web layer
-// — the same verb a human runs at a terminal (setSupervision, cmd/ctl_supervision.go),
-// so the board and the CLI share one write path (see runDraiverEnable). It passes
-// the server's resolved data root, actor, and target attempt as explicit flags
-// (env-independent), and ends with "--" so a ticket id beginning with "-" is never
-// parsed as a flag; the mode is the last positional arg. On failure it surfaces the
-// CLI's combined output for a legible error.
-func (s *Server) runDraiverSupervision(id, att, mode string) error {
-	exe, err := draiverExe()
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(exe, "ctl", "supervision",
-		"--data", s.root.Dir, "--actor", s.actor, "--attempt", att, "--", id, mode)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("draiver ctl supervision: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // handleEdges rewrites a ticket's dependency edges from the attempts-index page's
 // edge editor (POST /ticket/{id}/edges) — the ticket-level surface, since edges
-// live in spec.md and are shared across attempts (drvweb-016). It shells `draiver
-// depends --set` (runDraiverEdges), which owns the spec.md frontmatter write and
-// the self-edge/cycle refusal; the web layer never writes spec.md itself. The
+// live in spec.md and are shared across attempts (drvweb-016). It calls the
+// in-process gateway (s.gw.SetEdges, drv-008), which owns the spec.md frontmatter
+// write and the self-edge/cycle refusal; the web layer never writes spec.md
+// itself. The
 // editor is WYSIWYG: all three relations are posted every save, each free-text
 // field parsed into an id set, so an emptied field clears that relation. A cycle
 // or self-edge is surfaced inline — the panel re-renders (200) with the attempted
@@ -1749,7 +1573,7 @@ func (s *Server) handleEdges(w http.ResponseWriter, r *http.Request) {
 		After:    parseEdgeField(r.FormValue("after")),
 		Requires: parseEdgeField(r.FormValue("requires")),
 	}
-	if err := s.runDraiverEdges(id, want); err != nil {
+	if err := s.gw.SetEdges(id, want); err != nil {
 		// A refusal (self-edge/cycle) is user-facing, not a server fault: re-render
 		// the panel in place with the values the human tried and the reason, so the
 		// edit is not lost and the refusal reads inline. The verb wrote nothing.
@@ -1784,8 +1608,9 @@ func refusalMessage(err error) string {
 // /ticket/{id}/{attempt}/resolve) and returns the re-rendered live fragment, so
 // the escalation flips to "resolved by #N", the state badge leaves Stuck, and the
 // count bump all land from one swap. It is the board affordance for `draiver
-// resolve`: the write goes through the CLI (runDraiverResolve), not a re-appended
-// event here, so the board and a terminal share one resolution path.
+// resolve`: the write goes through the in-process gateway (s.gw.Resolve, drv-008),
+// not a re-appended event here, so the board and a terminal share one resolution
+// path.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -1821,7 +1646,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "draiver: "+msg, status)
 		return
 	}
-	if err := s.runDraiverResolve(id, att, seq, answer); err != nil {
+	if _, err := s.gw.Resolve(id, att, seq, answer); err != nil {
 		s.fail(w, err)
 		return
 	}
