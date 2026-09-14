@@ -206,6 +206,38 @@ func TestBaseArgs(t *testing.T) {
 	}
 }
 
+// TestBaseArgsModelResolution covers drvctl-045: draiver stores the short model
+// id (opus-4.8) that the claude CLI rejects, so baseArgs must resolve it to the
+// pinned long id. Unmapped values (the CLI's own aliases, full claude-… ids) pass
+// through unchanged, and an empty model emits no --model flag at all.
+func TestBaseArgsModelResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		model string
+		want  string // substring expected in the joined args
+	}{
+		{"short alias resolves to CLI id", "opus-4.8", "--model claude-opus-4-8"},
+		{"CLI bare alias passes through", "opus", "--model opus"},
+		{"full CLI id passes through", "claude-opus-4-8", "--model claude-opus-4-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			joined := strings.Join(baseArgs(agent.SessionSpec{Model: tc.model}, "--session-id", "abc"), " ")
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("baseArgs(Model=%q): want %q in: %s", tc.model, tc.want, joined)
+			}
+			// A short alias must never leak through verbatim — that is the bug.
+			if tc.model == "opus-4.8" && strings.Contains(joined, "--model opus-4.8") {
+				t.Errorf("baseArgs leaked the CLI-rejected short id: %s", joined)
+			}
+		})
+	}
+
+	// Empty model emits no --model flag (unchanged).
+	if joined := strings.Join(baseArgs(agent.SessionSpec{}, "--session-id", "abc"), " "); strings.Contains(joined, "--model") {
+		t.Errorf("empty model must emit no --model flag, got: %s", joined)
+	}
+}
+
 // The permission callback is how the gate is fed, so the activation flag must be
 // present unconditionally — even for a spec that sets no permission mode. A
 // regression here silently reverts to headless auto-deny (drvctl-013).
