@@ -25,6 +25,26 @@ import (
 // DefaultBin is the executable used when Adapter.Bin is empty.
 const DefaultBin = "claude"
 
+// modelAliases maps draiver's stored short model ids to the pinned long ids the
+// claude CLI's --model flag accepts. draiver stores the short form (opus-4.8) as
+// canonical (see pricing.go), but the CLI rejects it ("issue with the selected
+// model"); resolveModel translates it at this Claude-specific seam. Anything not
+// in the map passes through unchanged — full claude-… ids and the CLI's own bare
+// aliases (opus/sonnet/haiku) are already valid. A future non-Claude adapter maps
+// its own names.
+var modelAliases = map[string]string{
+	"opus-4.8": "claude-opus-4-8",
+}
+
+// resolveModel returns the CLI-valid model id for a stored model, or the input
+// unchanged when it is not a known short alias (including the empty string).
+func resolveModel(model string) string {
+	if long, ok := modelAliases[model]; ok {
+		return long
+	}
+	return model
+}
+
 // Adapter is a Claude Code session. The zero value is not usable; construct one
 // with New, then bring it online with Spawn or Resume exactly once.
 type Adapter struct {
@@ -340,7 +360,7 @@ func baseArgs(spec agent.SessionSpec, head ...string) []string {
 	}
 	args = append(args, head...)
 	if spec.Model != "" {
-		args = append(args, "--model", spec.Model)
+		args = append(args, "--model", resolveModel(spec.Model))
 	}
 	if spec.SystemPromptAppend != "" {
 		args = append(args, "--append-system-prompt", spec.SystemPromptAppend)
