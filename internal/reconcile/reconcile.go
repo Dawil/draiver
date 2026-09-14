@@ -698,6 +698,55 @@ func (r *Reconciler) escalateNoRepo(a project.Attempt) {
 	r.opt.Logf("reconcile: escalated %s/%s: no repo bound", a.Ticket, a.ID)
 }
 
+// strayCheckoutMarker is the stable phrase embedded in every stray-checkout
+// escalation body; like noRepoMarker it doubles as the de-dup key, so a second
+// Adopt (a later restart) never stacks a duplicate while one is already open. It
+// re-escalates only if a resolve closes the open one and the anomaly recurs.
+const strayCheckoutMarker = "an unexpected checkout was found inside draiver's managed worktree base"
+
+// strayCheckoutEscalationBody renders the human-facing escalation for a foreign or
+// detached checkout Reconcile found squatting on an attempt's managed path. It
+// names the path and the branch it had drifted to, and always contains
+// strayCheckoutMarker.
+func strayCheckoutEscalationBody(wt worktree.Worktree) string {
+	on := "a detached HEAD"
+	if wt.Branch != "" {
+		on = fmt.Sprintf("branch `%s`", wt.Branch)
+	}
+	return fmt.Sprintf("Crash-recovery reconcile found %s: `%s` was checked out on %s, not this attempt (`%s/%s`). "+
+		"That checkout was force-removed so daemon startup could finish, but a foreign checkout inside draiver's managed "+
+		"base is not something draiver creates — someone or something put it there. Confirm no local work was lost; on "+
+		"resolve the attempt resumes from its branch, and if the intrusion recurs it will re-escalate.",
+		strayCheckoutMarker, wt.Path, on, wt.Key.Ticket, wt.Key.Attempt)
+}
+
+// escalateStrayCheckout turns a stray checkout Reconcile swept from the managed
+// base into a durable escalation, flipping the affected attempt to Needs-me so the
+// anomaly lands on the board (drvctl-046 bug 2 — the promotion drvctl-027 left out
+// of scope). It mirrors escalateNoRepo: idempotent via strayCheckoutMarker so a
+// still-open escalation is never duplicated across restarts, and best-effort — a
+// write failure is logged, never failing the adopt.
+func (r *Reconciler) escalateStrayCheckout(wt worktree.Worktree) {
+	key := wt.Key
+	if att, err := project.LoadAttempt(r.opt.Root, key.Ticket, key.Attempt); err == nil {
+		for _, e := range att.OpenEscalations {
+			if strings.Contains(e.Body, strayCheckoutMarker) {
+				r.opt.Logf("reconcile: adopt %s/%s: stray checkout (escalation already open)", key.Ticket, key.Attempt)
+				return
+			}
+		}
+	}
+	if _, err := ticketlog.Append(r.opt.Root, key.Ticket, key.Attempt, event.Event{
+		Type:  "escalation",
+		Actor: r.opt.Actor,
+		Body:  strayCheckoutEscalationBody(wt),
+	}); err != nil {
+		r.opt.Logf("reconcile: record stray-checkout escalation %s/%s: %v", key.Ticket, key.Attempt, err)
+		return
+	}
+	r.opt.Logf("reconcile: escalated %s/%s: stray checkout %q in managed base", key.Ticket, key.Attempt, wt.Path)
+}
+
 // ingest is the Watch+Gate goroutine for one live session: it ranges the session
 // stream until it closes (the session exited) or ctx is cancelled (retire/drain),
 // dispatching each event. It never removes its own run from the table — only
@@ -1073,8 +1122,20 @@ func (r *Reconciler) Adopt(ctx context.Context) error {
 			r.opt.Logf("reconcile: adopt: worktree manager for %q: %v", repo, err)
 			continue
 		}
-		if _, err := wm.Reconcile(ctx, keep); err != nil {
+		_, stray, err := wm.Reconcile(ctx, keep)
+		if err != nil {
 			return fmt.Errorf("reconcile worktrees on adopt (repo %s): %w", repo, err)
+		}
+		// A stray checkout is a foreign/detached entry that was sitting inside the
+		// managed base — something draiver never creates. Reconcile already dropped
+		// it by path (so startup could finish); escalate the attempt it was standing
+		// in for so the anomaly reaches a human instead of vanishing silently.
+		for _, s := range stray {
+			if s.Key == (worktree.Key{}) {
+				r.opt.Logf("reconcile: adopt: swept an unattributable foreign checkout at %q (repo %s)", s.Path, repo)
+				continue
+			}
+			r.escalateStrayCheckout(s)
 		}
 	}
 

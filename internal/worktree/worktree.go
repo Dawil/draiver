@@ -199,6 +199,43 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (Worktree, error) {
 		return Worktree{}, err
 	}
 
+	// Variant A (drvctl-046): the branch is held by a worktree at some *other* path
+	// — typically the human's origin repo left checked out on this attempt's branch
+	// (the founding drvctl-027 incident). `find` above is branch-addressed but only
+	// scans the managed base, so it misses that foreign holder; the `add` below then
+	// collides on the still-occupied branch and git refuses. That path is not ours
+	// to reclaim — stealing a human's checkout is not safe to automate — so fail
+	// with an ErrCreate that *names* the offending worktree, giving a human enough
+	// to act instead of blindly re-running an add git will always refuse. It still
+	// classifies as worktree-clash; the improvement is a legible, actionable error.
+	if branchExists {
+		if other, ok, err := m.worktreeOnBranch(ctx, branch); err != nil {
+			return Worktree{}, err
+		} else if ok && other != path {
+			return Worktree{}, fmt.Errorf("worktree: create %s/%s: %w: branch %s is already checked out at %s",
+				spec.Ticket, spec.Attempt, ErrCreate, branch, other)
+		}
+	}
+
+	// Variant B (drvctl-046): pathFor(k) is occupied by a checkout that is *not* on
+	// k.branch() (someone ran `git checkout` inside it, or it went detached). `find`
+	// keys on the branch, so it reported "nothing there", yet the `add` collides on
+	// the still-occupied path. That path is ours by construction — it lives under
+	// the managed base — so reclaim it: force-remove the drift and prune before
+	// re-adding on the correct branch. This discards any uncommitted work on the
+	// branch it drifted to; the managed path is draiver's, so force-reclaim is the
+	// self-healing choice (resolved open question, this ticket).
+	if at, ok, err := m.branchAt(ctx, path); err != nil {
+		return Worktree{}, err
+	} else if ok && at != branch {
+		if err := m.removeAtPath(ctx, path, RemoveOptions{Force: true}); err != nil {
+			return Worktree{}, fmt.Errorf("worktree: reclaim drifted %s/%s: %w", spec.Ticket, spec.Attempt, err)
+		}
+		if err := m.prune(ctx); err != nil {
+			return Worktree{}, err
+		}
+	}
+
 	args := []string{"worktree", "add"}
 	if branchExists {
 		args = append(args, path, branch)
@@ -242,30 +279,35 @@ func (m *Manager) Remove(ctx context.Context, k Key, opts RemoveOptions) error {
 	if err := k.valid(); err != nil {
 		return err
 	}
-	path := m.pathFor(k)
+	if err := m.removeAtPath(ctx, m.pathFor(k), opts); err != nil {
+		return fmt.Errorf("worktree: remove %s/%s: %w", k.Ticket, k.Attempt, err)
+	}
+	if opts.DeleteBranch {
+		if err := m.deleteBranch(ctx, k.branch()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+// removeAtPath runs `git worktree remove` on an exact checkout path, falling back
+// to a prune when the checkout already vanished (a crash) so the result is the
+// same either way. It is the path-addressed core Remove builds on, and — crucially
+// — the only safe way to drop an entry whose branch key cannot be recovered: a
+// drifted or detached checkout under the base yields the zero Key, and passing that
+// to Remove would error on valid() and abort a whole reconcile (drvctl-046). Branch
+// deletion is not handled here; only Remove (which has a Key) can name the branch.
+func (m *Manager) removeAtPath(ctx context.Context, path string, opts RemoveOptions) error {
 	args := []string{"worktree", "remove"}
 	if opts.Force {
 		args = append(args, "--force")
 	}
 	args = append(args, path)
-
 	if _, err := m.git(ctx, args...); err != nil {
-		// If the checkout is already gone the remove fails; fall back to pruning
-		// the orphaned admin entry so the result is the same either way.
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-			if perr := m.prune(ctx); perr != nil {
-				return perr
-			}
-		} else {
-			return fmt.Errorf("worktree: remove %s/%s: %w", k.Ticket, k.Attempt, err)
+			return m.prune(ctx)
 		}
-	}
-
-	if opts.DeleteBranch {
-		if err := m.deleteBranch(ctx, k.branch()); err != nil {
-			return err
-		}
+		return err
 	}
 	return nil
 }
@@ -291,6 +333,17 @@ func (m *Manager) Dirty(ctx context.Context, k Key) (bool, error) {
 		}
 		return false, fmt.Errorf("worktree: stat %s/%s: %w", k.Ticket, k.Attempt, err)
 	}
+	// The path exists, but `git status` there is only trustworthy as k's state if
+	// the checkout is actually on k.branch(). A checkout that drifted to another
+	// branch (or went detached) would otherwise have *its* cleanliness misread as
+	// k's — letting the retire guard force-remove a path whose real state it never
+	// inspected (drvctl-046 bug 3). Treat any such drift as "not safe to reclaim":
+	// report dirty so the checkout is preserved for a human, not silently destroyed.
+	if at, ok, err := m.branchAt(ctx, path); err != nil {
+		return false, err
+	} else if !ok || at != k.branch() {
+		return true, nil
+	}
 	out, err := m.gitIn(ctx, path, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("worktree: status %s/%s: %w", k.Ticket, k.Attempt, err)
@@ -307,20 +360,39 @@ func (m *Manager) Dirty(ctx context.Context, k Key) (bool, error) {
 //   - every healthy managed worktree whose key is not in keep is force-removed
 //     (its session died and nothing wants it back).
 //
-// Branches are never deleted here. Reconcile returns the worktrees it removed,
-// for the caller to log.
-func (m *Manager) Reconcile(ctx context.Context, keep []Key) ([]Worktree, error) {
+// Branches are never deleted here. Reconcile returns the worktrees it removed for
+// the caller to log, and separately the *stray* entries it found — zero-key
+// checkouts occupying the managed base that git reports on a foreign branch or a
+// detached HEAD. A stray cannot be attributed by branch (keyFromBranch yields the
+// zero Key) and Remove(Key{}) would error on valid(), which historically aborted
+// the whole reconcile over one hand-checked-out directory (drvctl-046 bug 2). Each
+// stray is instead dropped by path so crash-recovery always completes, then
+// returned with the Key recovered from its path (zero if the path is not a
+// well-formed <base>/<ticket>/<attempt>), so the escalation-aware caller can flip
+// the affected attempt to Needs-me. The Manager itself stays ignorant of tickets
+// and escalations.
+func (m *Manager) Reconcile(ctx context.Context, keep []Key) (removed, stray []Worktree, err error) {
 	wts, err := m.List(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keepSet := make(map[Key]bool, len(keep))
 	for _, k := range keep {
 		keepSet[k] = true
 	}
 
-	var removed []Worktree
 	for _, wt := range wts {
+		if wt.Key == (Key{}) {
+			// Foreign/detached checkout under the base: drop it by path (an invalid
+			// Key must never reach Remove) so it cannot wedge the reconcile, and hand
+			// it — attributed by its path — to the caller to escalate.
+			if err := m.removeAtPath(ctx, wt.Path, RemoveOptions{Force: true}); err != nil {
+				return removed, stray, err
+			}
+			wt.Key = m.keyForPath(wt.Path)
+			stray = append(stray, wt)
+			continue
+		}
 		switch {
 		case wt.Prunable:
 			// Dead checkout: sweep regardless of keep so Admit recreates it fresh.
@@ -328,27 +400,27 @@ func (m *Manager) Reconcile(ctx context.Context, keep []Key) ([]Worktree, error)
 			continue
 		}
 		if err := m.Remove(ctx, wt.Key, RemoveOptions{Force: true}); err != nil {
-			return removed, err
+			return removed, stray, err
 		}
 		removed = append(removed, wt)
 	}
 	// Final sweep for any admin entries left stale by the removals above.
 	if err := m.prune(ctx); err != nil {
-		return removed, err
+		return removed, stray, err
 	}
-	return removed, nil
+	return removed, stray, nil
 }
 
 // List returns the managed worktrees git currently tracks — those whose checkout
 // lives under the managed base — sorted by path. Worktrees a developer created
 // elsewhere in the repo are ignored.
 func (m *Manager) List(ctx context.Context) ([]Worktree, error) {
-	out, err := m.git(ctx, "worktree", "list", "--porcelain")
+	recs, err := m.listRecords(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("worktree: list: %w", err)
+		return nil, err
 	}
 	var wts []Worktree
-	for _, rec := range parsePorcelain(out) {
+	for _, rec := range recs {
 		if !m.managed(rec.path) {
 			continue
 		}
@@ -357,6 +429,75 @@ func (m *Manager) List(ctx context.Context) ([]Worktree, error) {
 		wts = append(wts, wt)
 	}
 	return wts, nil
+}
+
+// listRecords returns every worktree git tracks for the repo — managed or not,
+// including the main working tree — as parsed porcelain records. List filters it to
+// the managed base; branchAt and worktreeOnBranch query it by path and by branch.
+func (m *Manager) listRecords(ctx context.Context) ([]porcelainRecord, error) {
+	out, err := m.git(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("worktree: list: %w", err)
+	}
+	return parsePorcelain(out), nil
+}
+
+// branchAt reports the short branch name checked out at exactly path, as `git
+// worktree list` sees it. ok is false when no worktree entry occupies path at all;
+// when an entry exists but is detached (or bare) the branch is "" and ok is true.
+// It is the shared "what is actually at pathFor(k)?" primitive behind Create's
+// Variant-B drift reclaim and Dirty's branch guard — one porcelain read, not two
+// near-identical shellouts (drvctl-046).
+func (m *Manager) branchAt(ctx context.Context, path string) (string, bool, error) {
+	recs, err := m.listRecords(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	target := filepath.Clean(path)
+	for _, rec := range recs {
+		if rec.path == target {
+			return rec.branch, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// worktreeOnBranch reports the path of the worktree that currently holds branch, if
+// any — including the main repo and worktrees outside the managed base, since the
+// clash it detects (Variant A) is precisely a branch checked out *elsewhere*
+// (drvctl-046). ok is false when no worktree holds the branch.
+func (m *Manager) worktreeOnBranch(ctx context.Context, branch string) (string, bool, error) {
+	recs, err := m.listRecords(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, rec := range recs {
+		if rec.branch == branch {
+			return rec.path, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// keyForPath recovers the attempt key a managed checkout path encodes —
+// <base>/<ticket>/<attempt> — for a stray entry whose branch can no longer name it.
+// It returns the zero Key when path is not exactly two safe components under the
+// base (a checkout at some other depth, or an unsafe segment), so the caller can
+// tell an attributable drift from a truly foreign path it cannot escalate.
+func (m *Manager) keyForPath(path string) Key {
+	rel, err := filepath.Rel(m.base, filepath.Clean(path))
+	if err != nil {
+		return Key{}
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 2 {
+		return Key{}
+	}
+	k := Key{Ticket: parts[0], Attempt: parts[1]}
+	if k.valid() != nil {
+		return Key{}
+	}
+	return k
 }
 
 // find returns the managed worktree for k, matched by its branch ref.

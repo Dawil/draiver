@@ -1420,6 +1420,88 @@ func TestNoRepoAttemptEscalatesAndParks(t *testing.T) {
 	}
 }
 
+// TestAdoptStrayCheckoutEscalatesAndDoesNotAbort is the drvctl-046 bug-2 headline:
+// a foreign/detached checkout squatting inside the managed base (someone ran `git
+// checkout` in it) yields the zero Key. It used to abort the whole crash-recovery
+// reconcile — one stray hand-checkout blocked startup for *every* attempt — because
+// Reconcile passed the invalid Key into Remove. Now Adopt completes: the stray is
+// swept by path, the healthy sibling is untouched, and the affected attempt raises
+// exactly one durable escalation (idempotent across restarts) that flips it to
+// Needs-me — the promotion drvctl-027 deferred.
+func TestAdoptStrayCheckoutEscalatesAndDoesNotAbort(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	okAtt := w.newTicketOnRepo(t, "PROJ-OK", w.repo)
+	strayAtt := w.newTicketOnRepo(t, "PROJ-STRAY", w.repo)
+
+	// Daemon A: admit both so each gets a real checkout + session.json under the base.
+	fa := &factory{}
+	a := w.reconciler(t, fa, newProc())
+	if err := a.Tick(ctx); err != nil {
+		t.Fatalf("A admit tick: %v", err)
+	}
+	waitFor(t, "both admitted", func() bool { return fa.count() == 2 })
+	okWt := attemptWorktree(t, w.root, "PROJ-OK", okAtt)
+	strayWt := attemptWorktree(t, w.root, "PROJ-STRAY", strayAtt)
+	a.Close()
+
+	// PROJ-STRAY's checkout drifts onto a foreign branch: git now reports it zero-key
+	// — exactly the entry that used to abort the whole reconcile.
+	gitCheckoutIn(t, strayWt, "-b", "hand-checkout")
+
+	// Daemon B: Adopt must complete (not abort over the stray) and escalate PROJ-STRAY.
+	fb := &factory{}
+	b := w.reconciler(t, fb, newProc())
+	t.Cleanup(b.Close)
+	if err := b.Adopt(ctx); err != nil {
+		t.Fatalf("a stray checkout must not abort Adopt: %v", err)
+	}
+
+	// Exactly one escalation, actionable (it names the stray path), flipping the
+	// attempt to Needs-me.
+	esc := escalationsIn(mustRead(t, w.root, "PROJ-STRAY", strayAtt))
+	if len(esc) != 1 {
+		t.Fatalf("want exactly 1 escalation on the stray attempt, got %d: %v", len(esc), logTypes(t, w.root, "PROJ-STRAY", strayAtt))
+	}
+	if !strings.Contains(esc[0].Body, strayWt) {
+		t.Errorf("escalation must name the stray checkout path %q; got %q", strayWt, esc[0].Body)
+	}
+	if a, err := project.LoadAttempt(w.root, "PROJ-STRAY", strayAtt); err != nil {
+		t.Fatal(err)
+	} else if a.State != project.NeedsMe {
+		t.Fatalf("stray attempt state = %v, want NeedsMe", a.State)
+	}
+
+	// The healthy sibling was untouched: no escalation, checkout intact on disk.
+	if esc := escalationsIn(mustRead(t, w.root, "PROJ-OK", okAtt)); len(esc) != 0 {
+		t.Fatalf("healthy sibling should not be escalated, got %d", len(esc))
+	}
+	if fi, err := os.Stat(okWt); err != nil || !fi.IsDir() {
+		t.Errorf("healthy sibling checkout disturbed: %v", err)
+	}
+
+	// Idempotent across restarts: re-introduce the intrusion and Adopt again — the
+	// still-open escalation must not be duplicated.
+	if out, err := exec.Command("git", "-C", w.repo, "worktree", "add", strayWt, "-b", "hand-checkout-2").CombinedOutput(); err != nil {
+		t.Fatalf("re-introduce stray: %v\n%s", err, out)
+	}
+	if err := b.Adopt(ctx); err != nil {
+		t.Fatalf("second Adopt: %v", err)
+	}
+	if esc := escalationsIn(mustRead(t, w.root, "PROJ-STRAY", strayAtt)); len(esc) != 1 {
+		t.Fatalf("a second Adopt duplicated the still-open escalation: now %d", len(esc))
+	}
+}
+
+// gitCheckoutIn runs `git checkout` inside a checkout dir, drifting a managed
+// worktree off its attempt branch (the drvctl-046 intrusion).
+func gitCheckoutIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if out, err := exec.Command("git", append([]string{"-C", dir, "checkout"}, args...)...).CombinedOutput(); err != nil {
+		t.Fatalf("git checkout %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
 // escalationsIn returns just the escalation events, for counting.
 func escalationsIn(events []event.Event) []event.Event {
 	var out []event.Event

@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,9 +206,12 @@ func TestReconcileRemovesUnwantedKeepsWanted(t *testing.T) {
 	keepWt := mustCreate(t, m, "PROJ-1", "0001")
 	dropWt := mustCreate(t, m, "PROJ-2", "0001")
 
-	removed, err := m.Reconcile(ctx, []Key{keepWt.Key})
+	removed, stray, err := m.Reconcile(ctx, []Key{keepWt.Key})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(stray) != 0 {
+		t.Fatalf("unexpected stray entries: %+v", stray)
 	}
 	if len(removed) != 1 || removed[0].Key != dropWt.Key {
 		t.Fatalf("removed = %+v, want just %v", removed, dropWt.Key)
@@ -232,9 +236,12 @@ func TestReconcileSweepsPrunableEvenIfKept(t *testing.T) {
 	}
 	// Even though the daemon still wants this attempt, the dead entry is swept so
 	// a fresh Admit can recreate it from the surviving branch.
-	removed, err := m.Reconcile(ctx, []Key{wt.Key})
+	removed, stray, err := m.Reconcile(ctx, []Key{wt.Key})
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(stray) != 0 {
+		t.Fatalf("unexpected stray entries: %+v", stray)
 	}
 	if len(removed) != 1 || removed[0].Key != wt.Key {
 		t.Fatalf("removed = %+v, want the prunable %v", removed, wt.Key)
@@ -267,7 +274,7 @@ func TestListIgnoresForeignWorktrees(t *testing.T) {
 		t.Fatalf("List leaked a foreign worktree: %+v", list)
 	}
 	// And Reconcile must never touch it.
-	if _, err := m.Reconcile(ctx, nil); err != nil {
+	if _, _, err := m.Reconcile(ctx, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if _, err := os.Stat(foreign); err != nil {
@@ -400,6 +407,170 @@ func TestDirtyAbsentCheckoutIsClean(t *testing.T) {
 	m := newManager(t)
 	if dirty, err := m.Dirty(context.Background(), Key{"PROJ-1", "0001"}); err != nil || dirty {
 		t.Fatalf("absent checkout: Dirty=%v err=%v, want clean, no error", dirty, err)
+	}
+}
+
+// checkoutIn runs `git checkout` inside a checkout dir, simulating a human (or an
+// errant script) drifting a managed worktree off its attempt branch (drvctl-046).
+func checkoutIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir, "checkout"}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git checkout %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+// TestCreateVariantAErrorsWhenBranchHeldElsewhere is the drvctl-046 Variant-A
+// regression: the attempt's branch is checked out at a *foreign* path (the human's
+// origin repo), so `git worktree add` can never succeed. Create must not blindly
+// retry it — it returns an ErrCreate that names the offending worktree so a human
+// can act, rather than the founding drvctl-027 forever-silent-retry.
+func TestCreateVariantAErrorsWhenBranchHeldElsewhere(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+
+	// Free the managed checkout but keep the branch, then check that branch out at a
+	// path *outside* the managed base — the origin-repo-on-the-branch scenario.
+	if err := m.Remove(ctx, k, RemoveOptions{Force: true}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	foreign := filepath.Join(t.TempDir(), "origin-on-branch")
+	if out, err := exec.Command("git", "-C", m.repo, "worktree", "add", foreign, wt.Branch).CombinedOutput(); err != nil {
+		t.Fatalf("add foreign worktree on branch: %v\n%s", err, out)
+	}
+
+	_, err := m.Create(ctx, Spec{Key: k})
+	if err == nil {
+		t.Fatal("Create succeeded, want an ErrCreate: the branch is checked out elsewhere")
+	}
+	if !errors.Is(err, ErrCreate) {
+		t.Errorf("error is not ErrCreate: %v", err)
+	}
+	if !strings.Contains(err.Error(), foreign) {
+		t.Errorf("error must name the offending worktree %q; got %v", foreign, err)
+	}
+	// It must not have created (or clobbered) anything: the foreign checkout stands.
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("foreign checkout disturbed: %v", err)
+	}
+}
+
+// TestCreateVariantBReclaimsDriftedPath is the drvctl-046 Variant-B regression: the
+// managed path drifted onto another branch (someone ran `git checkout` inside it).
+// find keys on the branch and misses it, so the old code collided on the occupied
+// path forever. Create must reclaim the path and succeed on the correct branch.
+func TestCreateVariantBReclaimsDriftedPath(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+
+	// Drift: check out a different branch inside the managed checkout.
+	checkoutIn(t, wt.Path, "-b", "drifted")
+	if at, ok, err := m.branchAt(ctx, wt.Path); err != nil || !ok || at != "drifted" {
+		t.Fatalf("precondition: branchAt=%q ok=%v err=%v, want drifted", at, ok, err)
+	}
+
+	got, err := m.Create(ctx, Spec{Key: k})
+	if err != nil {
+		t.Fatalf("Create must reclaim a drifted path, got: %v", err)
+	}
+	if got.Key != k || got.Branch != wt.Branch {
+		t.Fatalf("reclaimed worktree = %+v, want key %v on branch %q", got, k, wt.Branch)
+	}
+	// The checkout is back on the attempt branch, and there is exactly one managed
+	// worktree for the attempt.
+	if at, _, _ := m.branchAt(ctx, got.Path); at != wt.Branch {
+		t.Errorf("after reclaim the path is on %q, want %q", at, wt.Branch)
+	}
+	if list, _ := m.List(ctx); len(list) != 1 || list[0].Key != k {
+		t.Fatalf("List = %+v, want just %v", list, k)
+	}
+}
+
+// TestCreateVariantBReclaimsDetachedPath is Variant B's detached-HEAD sibling: a
+// managed checkout that went detached also yields the zero Key and collides on the
+// occupied path. Create must reclaim it just the same.
+func TestCreateVariantBReclaimsDetachedPath(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+
+	checkoutIn(t, wt.Path, "--detach", "HEAD")
+	if _, ok, _ := m.branchAt(ctx, wt.Path); !ok {
+		t.Fatal("precondition: expected a detached entry at the path")
+	}
+
+	got, err := m.Create(ctx, Spec{Key: k})
+	if err != nil {
+		t.Fatalf("Create must reclaim a detached path, got: %v", err)
+	}
+	if got.Branch != wt.Branch {
+		t.Fatalf("reclaimed onto %q, want the attempt branch %q", got.Branch, wt.Branch)
+	}
+}
+
+// TestReconcileToleratesAndReturnsStray is the drvctl-046 bug-2 mechanics: a stray
+// (drifted, zero-key) entry under the base must never abort the whole reconcile via
+// Remove(Key{}). It is dropped by path and returned — attributed to the attempt its
+// path encodes — while every other attempt reconciles normally.
+func TestReconcileToleratesAndReturnsStray(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	keepWt := mustCreate(t, m, "PROJ-1", "0001")
+	driftWt := mustCreate(t, m, "PROJ-2", "0001")
+
+	// PROJ-2's checkout drifts onto a foreign branch: List now reports it zero-key.
+	checkoutIn(t, driftWt.Path, "-b", "hand-checkout")
+
+	removed, stray, err := m.Reconcile(ctx, []Key{keepWt.Key})
+	if err != nil {
+		t.Fatalf("a stray entry must not abort Reconcile: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %+v, want none (PROJ-1 kept, PROJ-2 is a stray)", removed)
+	}
+	if len(stray) != 1 || stray[0].Key != driftWt.Key {
+		t.Fatalf("stray = %+v, want one attributed to %v", stray, driftWt.Key)
+	}
+	if stray[0].Path != driftWt.Path {
+		t.Errorf("stray path = %q, want %q", stray[0].Path, driftWt.Path)
+	}
+	// The kept attempt survived; the stray was swept from the base.
+	list, _ := m.List(ctx)
+	if len(list) != 1 || list[0].Key != keepWt.Key {
+		t.Fatalf("survivors = %+v, want just %v", list, keepWt.Key)
+	}
+}
+
+// TestDirtyReportsOnAttemptBranchNotDrift is the drvctl-046 bug-3 regression: Dirty
+// must judge k.branch()'s checkout, not whatever branch the path drifted to. A path
+// that drifted to a *clean* foreign branch must not be reported clean — that is the
+// bug that let the retire guard force-remove a checkout whose real state it never
+// read. Drift is reported dirty so the checkout is preserved.
+func TestDirtyReportsOnAttemptBranchNotDrift(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+
+	// Drift onto a brand-new, clean branch. `git status` there is clean, but it is
+	// not k.branch(), so Dirty must not trust it.
+	checkoutIn(t, wt.Path, "-b", "drifted-clean")
+	if out, err := m.gitIn(ctx, wt.Path, "status", "--porcelain"); err != nil || strings.TrimSpace(out) != "" {
+		t.Fatalf("precondition: drifted branch must be clean; status=%q err=%v", out, err)
+	}
+
+	dirty, err := m.Dirty(ctx, k)
+	if err != nil {
+		t.Fatalf("Dirty: %v", err)
+	}
+	if !dirty {
+		t.Fatal("Dirty reported a drifted checkout clean — the bug-3 misread; want dirty (preserve)")
 	}
 }
 
