@@ -147,3 +147,74 @@ levels:
 		})
 	}
 }
+
+// threeRung is a bottom-to-top ladder used by the fold tests; "e2e" is the target.
+var threeRung = &Pyramid{Levels: []Level{
+	{Name: "unit", Run: "x"},
+	{Name: "integration", Run: "x"},
+	{Name: "e2e", Run: "x"},
+}}
+
+func TestHighestAtHEAD(t *testing.T) {
+	const head = "cafef00d"
+	const old = "deadbeef"
+	cases := []struct {
+		name    string
+		results []Result
+		want    string // rung name, or "" when ok is false
+	}{
+		{
+			name: "no results at all",
+			want: "",
+		},
+		{
+			name:    "only a stale result — a later commit invalidated it",
+			results: []Result{{Rung: "e2e", Commit: old}},
+			want:    "",
+		},
+		{
+			name:    "single rung green at HEAD",
+			results: []Result{{Rung: "integration", Commit: head}},
+			want:    "integration",
+		},
+		{
+			name: "highest of several at HEAD wins regardless of log order",
+			results: []Result{
+				{Rung: "e2e", Commit: head},
+				{Rung: "unit", Commit: head},
+				{Rung: "integration", Commit: head},
+			},
+			want: "e2e",
+		},
+		{
+			name: "a stale top rung does not outrank a fresh lower rung",
+			results: []Result{
+				{Rung: "e2e", Commit: old},         // stale — the claim-invalidating case
+				{Rung: "integration", Commit: head}, // the real highest at HEAD
+			},
+			want: "integration",
+		},
+		{
+			name:    "a rung not in this pyramid is ignored",
+			results: []Result{{Rung: "smoke", Commit: head}},
+			want:    "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lv, ok := threeRung.HighestAtHEAD(tc.results, head)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("want no match, got rung %q", lv.Name)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("want rung %q, got no match", tc.want)
+			}
+			if lv.Name != tc.want {
+				t.Errorf("highest at HEAD = %q, want %q", lv.Name, tc.want)
+			}
+		})
+	}
+}
