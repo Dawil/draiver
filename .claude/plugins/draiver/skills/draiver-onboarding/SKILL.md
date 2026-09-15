@@ -143,7 +143,32 @@ answer and log what you did, closing the escalate → resolve → action arc:
 draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_URL from a fixture; opened PROJ-140 for the real secret."
 ```
 
-## 5. Claim review — push, then claim with a link
+## 5. Verify with the test pyramid before you claim
+
+If the repo ships a `.test-pyramid.yaml`, prove the work green before you hand it
+off — and the order matters:
+
+- **Iterate** with bare `draiver test`. It runs the pyramid from the base rung up,
+  stops at the first non-green rung, and reports — nothing more. It tolerates a
+  dirty tree, so it is your fast inner loop while you edit.
+
+  ```
+  draiver test           # climb to the top rung
+  draiver test unit      # only up to the `unit` rung
+  ```
+
+- **Commit**, then run `draiver test --log`. With `--log`, draiver refuses a dirty
+  tree, runs the pyramid, and **only on all-green** appends one durable
+  `test-result` event naming the rung and the exact commit — a verdict draiver
+  observed, not a self-report. A failing run records nothing, so the log holds
+  only passing results. The next agent's `brief` inherits "rung green @ sha" for
+  free.
+
+A repo with no `.test-pyramid.yaml` has nothing to run: `draiver test` says so and
+exits clean. Do this before §6 — a review backed by a logged green result is one a
+human can trust at a glance.
+
+## 6. Claim review — push, then claim with a link
 
 When you believe the work is complete, make a **claim** for a human to verify.
 Do not mark the ticket done; that decision is the human's. A claim the human
@@ -197,7 +222,8 @@ draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's thre
 Each session: `brief` once → work → `log` gotchas/decisions as you go → when
 blocked, `escalate` and stop (the human resolves from their board, on their own
 time) → when the ticket is worked again, a session `brief`s, reads the
-resolution, and continues → when the work is done, **push** to a remote and
+resolution, and continues → when the work is done, **verify** (iterate with
+`draiver test`, commit, then `draiver test --log`), **push** to a remote, and
 `review` with a link the human can click.
 
 Everything valuable lives in the log. Leave the ticket resumable — the next

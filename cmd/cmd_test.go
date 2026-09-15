@@ -51,6 +51,7 @@ func run(t *testing.T, args ...string) (string, int) {
 	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
 	mergeRemote = ""
 	archiveAccepted, archiveAbandoned = false, false
+	testLog = false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 	resetFlagsChanged(rootCmd)
 
