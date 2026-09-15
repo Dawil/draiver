@@ -43,8 +43,14 @@ type Event struct {
 	// one without a second event type. It is omitempty, so every event that does not
 	// set it (all but archive) hashes and serialises exactly as before.
 	Outcome string `yaml:"outcome,omitempty"`
-	Prev    string `yaml:"prev"`
-	Hash    string `yaml:"hash"`
+	// Rung and Commit carry a `test-result` event's machine-readable payload: the
+	// pyramid rung that passed and the HEAD commit it passed at (drvctl-048). Both
+	// omitempty, so every event that is not a test-result hashes and serialises
+	// exactly as before — the same forward-compatible discipline Outcome added.
+	Rung   string `yaml:"rung,omitempty"`
+	Commit string `yaml:"commit,omitempty"`
+	Prev   string `yaml:"prev"`
+	Hash   string `yaml:"hash"`
 
 	Body string `yaml:"-"`
 }
@@ -63,6 +69,8 @@ type hashable struct {
 	Artefacts []string `yaml:"artefacts,omitempty"`
 	Links     []Link   `yaml:"links,omitempty"`
 	Outcome   string   `yaml:"outcome,omitempty"`
+	Rung      string   `yaml:"rung,omitempty"`
+	Commit    string   `yaml:"commit,omitempty"`
 	Prev      string   `yaml:"prev"`
 }
 
@@ -81,6 +89,8 @@ func (e Event) ComputeHash() string {
 		Artefacts: e.Artefacts,
 		Links:     e.Links,
 		Outcome:   e.Outcome,
+		Rung:      e.Rung,
+		Commit:    e.Commit,
 		Prev:      e.Prev,
 	}
 	front, err := yaml.Marshal(h)
