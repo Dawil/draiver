@@ -185,13 +185,25 @@ func cardHref(a project.Attempt) string {
 }
 
 // canEnable reports whether an attempt's card should show the green play button:
-// a Running attempt that is not yet enabled (the supervision axis — the same bit
-// the grey session-dot reads, DeriveEnabled). Enabled attempts, and attempts in
-// any other column, get no button. It gates both the rendered button and — via
-// handleEnable's idempotent no-op — the effect of the POST, so the two can never
-// disagree about which cards are actionable.
+// a genuinely *parked* attempt a human could opt into daemon supervision. That is
+// the effective (Control) state, not just the log state — so it gates on all four
+// bits, not the durable pair alone:
+//
+//   - Running + !Enabled — the durable log bits (a.State, DeriveEnabled): not
+//     directly enabled, and not in any other column.
+//   - !Live + !Desired — the runtime bits board() folds over the same card
+//     (attemptLive + DeriveDesired, drvctl-038). A wants:/after:-activated attempt
+//     is supervised *through its parent* and never gets a direct enable event, so
+//     a.Enabled == false; once the daemon spawns its agent it is Live and Desired.
+//     Without these two the button would leak onto that already-running card
+//     (drvweb-022).
+//
+// It gates both the rendered button and — via handleEnable's no-op — the effect
+// of the POST, so the two can never disagree about which cards are actionable. The
+// write path loads without the runtime bits, so handleEnable must re-derive Live/
+// Desired (fillRuntime) before this check or the POST fires for a buttonless card.
 func canEnable(a project.Attempt) bool {
-	return a.State == project.Running && !a.Enabled
+	return a.State == project.Running && !a.Enabled && !a.Live && !a.Desired
 }
 
 // canArchive reports whether an attempt's card should show the archive affordance
@@ -939,6 +951,30 @@ func (s *Server) attemptLive(a project.Attempt) bool {
 	return ok && id.PID != 0 && s.alive(id.PID)
 }
 
+// fillRuntime populates the two runtime bits (Live/Desired) on an attempt that
+// project.LoadAttempt leaves at their false defaults — the same fleet-wide
+// DeriveDesired + live probe board() folds over each card. A write handler that
+// gates on canEnable must call it first, so its check sees the *effective* state
+// the card render did, not just the durable log bits: a wants:/after:-activated
+// attempt is Desired+Live but not Enabled, so without this its enable POST would
+// still fire for a card that shows no button (drvweb-022). Desiredness is
+// fleet-wide (a via-parent child is pulled in down a wants: edge under another
+// ticket), so it is derived over every attempt, exactly as board() does.
+func (s *Server) fillRuntime(a *project.Attempt) error {
+	all, err := project.LoadAll(s.root)
+	if err != nil {
+		return err
+	}
+	edges, err := project.LoadAllEdges(s.root)
+	if err != nil {
+		return err
+	}
+	desired := project.DeriveDesired(all, edges)
+	a.Desired = desired[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
+	a.Live = s.attemptLive(*a)
+	return nil
+}
+
 func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {
 	vm, err := s.board()
 	if err != nil {
@@ -1294,6 +1330,15 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := project.LoadAttempt(s.root, id, att)
 	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// LoadAttempt leaves Live/Desired at their false defaults, but canEnable now
+	// gates on them (drvweb-022): re-derive the runtime bits as board() does so the
+	// write path sees the same effective state the card render did — otherwise a
+	// via-parent-activated (Desired+Live) attempt's POST would still fire though its
+	// card shows no button.
+	if err := s.fillRuntime(&a); err != nil {
 		s.fail(w, err)
 		return
 	}
