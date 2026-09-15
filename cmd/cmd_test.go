@@ -34,6 +34,16 @@ func resetFlagsChanged(c *cobra.Command) {
 // tests don't contaminate each other.
 func run(t *testing.T, args ...string) (string, int) {
 	t.Helper()
+	out, code, _ := runE(t, args...)
+	return out, code
+}
+
+// runE is run's sibling that also returns the raw error. The root command sets
+// SilenceErrors, so a failing command writes nothing to the output buffer — a test
+// that asserts on the *message* (e.g. the review gate's refusal text) must read the
+// returned error, not out.
+func runE(t *testing.T, args ...string) (string, int, error) {
+	t.Helper()
 	dataFlag, actorFlag, attemptFlag = "", "", ""
 	logType = ""
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
@@ -70,7 +80,7 @@ func run(t *testing.T, args ...string) (string, int) {
 			code = 1
 		}
 	}
-	return out.String(), code
+	return out.String(), code, err
 }
 
 // newTicket creates a data root and a ticket "PROJ-1", returning the root. The

@@ -500,6 +500,20 @@ func (m *Manager) keyForPath(path string) Key {
 	return k
 }
 
+// Locate returns the managed worktree for k as git currently tracks it, without
+// ever cutting one. ok is false when no live checkout exists for the attempt — it
+// was never created, or was retired (the branch may still exist) — so a read-only
+// caller can tell "the checkout is here, read it" from "there is no worktree to
+// read." It is the gate's counterpart to Create: the review gate resolves the
+// attempt's checkout to load its pyramid and HEAD, and must not have the
+// side effect of materializing a worktree just by asking where one would be.
+func (m *Manager) Locate(ctx context.Context, k Key) (Worktree, bool, error) {
+	if err := k.valid(); err != nil {
+		return Worktree{}, false, err
+	}
+	return m.find(ctx, k)
+}
+
 // find returns the managed worktree for k, matched by its branch ref.
 func (m *Manager) find(ctx context.Context, k Key) (Worktree, bool, error) {
 	wts, err := m.List(ctx)

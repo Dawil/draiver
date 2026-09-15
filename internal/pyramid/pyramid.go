@@ -53,6 +53,45 @@ func (p *Pyramid) Target() Level {
 	return p.Levels[len(p.Levels)-1]
 }
 
+// Result is one logged rung outcome the review gate folds over: a rung that was
+// recorded green (drvctl-048 only logs passing results) and the commit it passed
+// at. It is a neutral pair deliberately decoupled from internal/event, so this
+// data-model package stays free of the log schema — the caller maps its
+// test-result events onto Results.
+type Result struct {
+	Rung   string
+	Commit string
+}
+
+// HighestAtHEAD folds results down to "the highest logged rung at this commit":
+// the top-most rung in climb order that has a Result whose Commit equals head. A
+// Result naming a rung not in this pyramid (a renamed or removed level) is
+// ignored, and a Result whose Commit != head is stale — it does not count, so a
+// commit made after logging correctly invalidates it. ok is false when no result
+// matches HEAD at all, i.e. nothing was climbed at this commit.
+//
+// The fold is trivial precisely because only green results are logged: there is
+// no failing/partial state to reconcile, just the highest rung present at HEAD.
+func (p *Pyramid) HighestAtHEAD(results []Result, head string) (Level, bool) {
+	index := make(map[string]int, len(p.Levels))
+	for i, lv := range p.Levels {
+		index[lv.Name] = i
+	}
+	best := -1
+	for _, r := range results {
+		if r.Commit != head {
+			continue
+		}
+		if i, ok := index[r.Rung]; ok && i > best {
+			best = i
+		}
+	}
+	if best < 0 {
+		return Level{}, false
+	}
+	return p.Levels[best], true
+}
+
 // Load resolves and reads .test-pyramid.yaml from a worktree path.
 //
 // A missing file is a valid, non-error state: it returns (nil, nil), meaning "this
