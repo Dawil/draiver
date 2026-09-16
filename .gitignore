@@ -2,6 +2,7 @@
 /draiver
 *.test
 *.out
+internal/e2e/integration/.bin/draiver
 
 # Local data
 .draiver/
