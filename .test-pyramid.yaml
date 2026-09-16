@@ -1,0 +1,20 @@
+# .test-pyramid.yaml — draiver's own test pyramid (drv-010, dogfooding drv-009).
+#
+# Levels are ordered bottom-to-top: the list order IS the pyramid, so the last
+# entry is the target (top) rung. drv-009's Review gate requires the target rung
+# green-at-HEAD before a claim is accepted on this repo's tickets.
+#
+#   unit        — today's fast, container-free suite; the near-universal base rung.
+#   integration — Testcontainers suite (a real Forgejo forge + a real served
+#                 webui) behind the `integration` build tag, so `go test ./...`
+#                 (the unit rung) stays fast and needs no Docker daemon.
+#
+# Run the top rung locally with `draiver test integration` or, directly,
+# `go test -tags=integration ./internal/e2e/integration/...`. The integration
+# rung needs a container runtime (Docker/Podman); it skips cleanly when none is
+# available. See docs/integration-testing.md.
+levels:
+  - name: unit
+    run: go test ./...
+  - name: integration
+    run: go test -tags=integration ./internal/e2e/integration/...
