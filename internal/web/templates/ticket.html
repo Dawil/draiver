@@ -26,7 +26,8 @@
     </nav>
     <h1>{{.Attempt.Ticket}} <span class="att">/{{.Attempt.ID}}</span>
       {{template "state-badge" (badge .Attempt.State false)}}
-      {{template "session-dot" .Attempt}}</h1>
+      {{template "session-dot" .Attempt}}
+      {{template "pyramid-badge" .Attempt}}</h1>
     <p class="tagline">{{.Attempt.Title}}
       {{if .Attempt.Tool}} · <span data-testid="attempt-tool">{{.Attempt.Tool}}</span>{{end}}
       {{if .Attempt.Model}} · {{.Attempt.Model}}{{end}}

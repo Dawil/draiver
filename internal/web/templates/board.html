@@ -48,6 +48,7 @@
     <span class="title">{{.Title}}</span>
     <span class="meta-row">
       {{template "session-dot" .}}
+      {{template "pyramid-badge" .}}
       {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
       {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
     </span>

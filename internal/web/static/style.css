@@ -138,6 +138,21 @@ body {
    one. The waratah crimson is a hue apart from the rust reserved for Stuck. */
 .session-error { background: var(--dot-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot-error) 60%, transparent); }
 .badge { font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
+/* Test-pyramid badge (drvweb-021). A compact pill of rungs (unit ✓ · integration ✓)
+   surfacing the highest logged rung whose commit == current HEAD. Green when it
+   describes HEAD; muted with a "stale" flag when the last recorded result predates
+   the tip. Reached rungs also carry a ✓ glyph so the state is not colour alone
+   (colour-blind / screen readers), and the whole pill has a title/aria-label. */
+.pyramid { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+           border-radius: 999px; padding: 0 7px; border: 1px solid var(--line); }
+.pyramid-green { color: var(--done); border-color: color-mix(in srgb, var(--done) 55%, var(--line)); }
+.pyramid-stale { color: var(--muted); border-style: dashed; }
+.pyramid .pyramid-rung { display: inline-flex; align-items: center; }
+.pyramid .rung-off { color: var(--muted); opacity: .6; }
+.pyramid .rung-check { margin-left: 2px; }
+.pyramid .pyramid-sep { color: var(--muted); opacity: .5; }
+.pyramid .pyramid-flag { margin-left: 3px; text-transform: uppercase; letter-spacing: .06em;
+           font-size: 9px; opacity: .8; }
 /* control-state accents come from the parent column */
 .col-stuck .card { background: var(--alert-bg); border-color: var(--alert); }
 .col-running .card, .col-done .card { opacity: .9; }
