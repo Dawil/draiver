@@ -420,6 +420,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"cachePanel":    cachePanel,
 			"cohortRow":     cohortRow,
 			"sessionDot":    s.sessionDot,
+			"pyramidBadge":  s.pyramidBadge,
 			"paletteVars":   paletteVars,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
