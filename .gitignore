@@ -2,6 +2,7 @@
 /draiver
 *.test
 *.out
+internal/e2e/integration/.bin/draiver
 
 # Local data
 .draiver/
@@ -16,6 +17,8 @@ node_modules/
 /e2e/playwright/.cache/
 /e2e/.bin/
 /e2e/.fixture-data/
+# integration-rung harness builds the draiver binary here (runtime.go)
+/internal/e2e/integration/.bin/
 
 # misc
 .DS_Store
