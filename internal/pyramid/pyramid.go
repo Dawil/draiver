@@ -113,12 +113,26 @@ func Load(worktreePath string) (*Pyramid, error) {
 		}
 		return nil, fmt.Errorf("read pyramid %s: %w", path, err)
 	}
+	p, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return p, nil
+}
+
+// Parse decodes and validates a pyramid from raw .test-pyramid.yaml bytes — the
+// content-addressed core of Load, for callers that hold the file's bytes rather
+// than a directory on disk (e.g. a read-only board reading it from a branch ref
+// via `git show <branch>:.test-pyramid.yaml`, with no live worktree to Load from).
+// Unlike Load, an empty/absent file is the caller's concern: Parse validates that
+// there is at least one level.
+func Parse(data []byte) (*Pyramid, error) {
 	var p Pyramid
 	if err := yaml.Unmarshal(data, &p); err != nil {
-		return nil, fmt.Errorf("parse pyramid %s: %w", path, err)
+		return nil, fmt.Errorf("parse pyramid: %w", err)
 	}
 	if err := p.validate(); err != nil {
-		return nil, fmt.Errorf("invalid pyramid %s: %w", path, err)
+		return nil, fmt.Errorf("invalid pyramid: %w", err)
 	}
 	return &p, nil
 }

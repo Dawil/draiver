@@ -153,17 +153,47 @@ func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
 	if err != nil {
 		return nil
 	}
-	wt, ok, err := wm.Locate(ctx, worktree.Key{Ticket: a.Ticket, Attempt: a.ID})
+	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
+	wt, ok, err := wm.Locate(ctx, key)
+	if err != nil {
+		return nil
+	}
+	if ok {
+		// Live checkout: read the pyramid and HEAD straight from the worktree.
+		p, err := pyramid.Load(wt.Path)
+		if err != nil {
+			return nil
+		}
+		head, err := worktree.HeadSHA(ctx, wt.Path)
+		if err != nil {
+			return nil
+		}
+		return projectPyramid(p, a.Events, head)
+	}
+	// No live checkout — the attempt retired into Review and the daemon reclaimed
+	// its worktree, but the branch survives. Read the same two facts from the base
+	// repo via the branch ref, so the badge stays visible exactly where a reviewer
+	// wants it. Still live (git's current ref), still no stored HEAD SHA.
+	return s.branchPyramid(ctx, wm, key, a.Events)
+}
+
+// branchPyramid is pyramidBadge's fallback when no live worktree exists: it folds
+// the attempt's test-result log against its branch tip and the .test-pyramid.yaml
+// committed on that branch, read from the base repo without a checkout. A missing
+// branch, a missing .test-pyramid.yaml, or any git/parse error yields nil (render
+// nothing) — the same best-effort degradation as the live path.
+func (s *Server) branchPyramid(ctx context.Context, wm *worktree.Manager, key worktree.Key, events []event.Event) *pyramidVM {
+	head, ok, err := wm.BranchSHA(ctx, key)
 	if err != nil || !ok {
 		return nil
 	}
-	p, err := pyramid.Load(wt.Path)
+	data, ok, err := wm.FileAtBranch(ctx, key, pyramid.FileName)
+	if err != nil || !ok {
+		return nil
+	}
+	p, err := pyramid.Parse(data)
 	if err != nil {
 		return nil
 	}
-	head, err := worktree.HeadSHA(ctx, wt.Path)
-	if err != nil {
-		return nil
-	}
-	return projectPyramid(p, a.Events, head)
+	return projectPyramid(p, events, head)
 }

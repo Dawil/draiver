@@ -528,6 +528,51 @@ func (m *Manager) find(ctx context.Context, k Key) (Worktree, bool, error) {
 	return Worktree{}, false, nil
 }
 
+// BranchSHA resolves the tip of an attempt's branch ref in the base repo to its
+// full commit oid, without a live worktree — the read-only counterpart to HeadSHA
+// for a caller (the board) that must still see an attempt whose checkout has been
+// reclaimed (retired to Review), where Locate returns ok=false but the branch
+// survives. It is "live" in the same sense HeadSHA is: it reads git's current ref,
+// stores nothing. ok is false when the branch does not exist (never created, or
+// pruned) — a benign "nothing to read", not an error.
+func (m *Manager) BranchSHA(ctx context.Context, k Key) (string, bool, error) {
+	if err := k.valid(); err != nil {
+		return "", false, err
+	}
+	branch := k.branch()
+	exists, err := m.branchExists(ctx, branch)
+	if err != nil || !exists {
+		return "", false, err
+	}
+	sha, err := m.revParse(ctx, "refs/heads/"+branch)
+	if err != nil {
+		return "", false, err
+	}
+	return sha, true, nil
+}
+
+// FileAtBranch returns the bytes of relpath as committed at an attempt's branch
+// tip (`git show <branch>:<relpath>`), without a live worktree — so the board can
+// read an attempt's .test-pyramid.yaml straight from its branch when the checkout
+// has been reclaimed. ok is false when the branch exists but has no such path (or
+// the branch is absent): a benign "nothing there", distinct from a git failure,
+// which is returned as err.
+func (m *Manager) FileAtBranch(ctx context.Context, k Key, relpath string) ([]byte, bool, error) {
+	if err := k.valid(); err != nil {
+		return nil, false, err
+	}
+	out, err := m.git(ctx, "show", k.branch()+":"+relpath)
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			// git show exits nonzero when the ref or path is absent — nothing to read.
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("worktree: show %s:%s: %w", k.branch(), relpath, err)
+	}
+	return []byte(out), true, nil
+}
+
 // managed reports whether path is the base itself or sits under it.
 func (m *Manager) managed(path string) bool {
 	p := filepath.Clean(path)
