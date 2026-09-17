@@ -151,11 +151,22 @@ func projectPyramid(p *pyramid.Pyramid, events []event.Event, head string, dirty
 	return vm
 }
 
-// pyramidBadge is the FuncMap entry the card and detail templates call: it resolves
-// the attempt's live checkout, loads its pyramid, reads live HEAD, and folds its
-// test-result log into the badge VM. It is the read-only, no-write-path projection
-// drvweb-021 adds over drvctl-048/049 — HEAD is read live (`git rev-parse HEAD`),
-// nothing is stored.
+// pyramidState is the live git-derived input the badge projects over: the attempt's
+// loaded pyramid (nil when the branch/worktree carries no .test-pyramid.yaml), its
+// current HEAD (read live), and whether its working tree is dirty. It is the seam
+// between the I/O half of the projection (reading git) and the pure fold: gathering
+// it is what touches the worktree/branch, so isolating it behind pyramidGit lets a
+// test drive the render off canned state without a real repo (drvweb-021 #32).
+type pyramidState struct {
+	Pyramid *pyramid.Pyramid
+	Head    string
+	Dirty   bool
+}
+
+// pyramidBadge is the FuncMap entry the card and detail templates call: it gathers
+// the attempt's live git state and folds its test-result log into the badge VM. It
+// is the read-only, no-write-path projection drvweb-021 adds over drvctl-048/049 —
+// HEAD is read live (`git rev-parse HEAD`), nothing is stored.
 //
 // Like sessionDot, it is best-effort presentation: any resolution or I/O failure —
 // no recorded repo, a repo that is not a git base, no live worktree, a malformed
@@ -163,19 +174,36 @@ func projectPyramid(p *pyramid.Pyramid, events []event.Event, head string, dirty
 // than breaking the board, which renders many cards and must survive one attempt's
 // broken checkout. The badge is additive: it only ever appears on positive proof of
 // a recorded result, never fails a render.
+//
+// The git reads live behind s.pyramidGit, an injectable field (defaulting to
+// gatherPyramidState) mirroring s.alive: a test swaps in a stub returning canned
+// pyramidState, then asserts the rendered HTML — mocking the git layer to check the
+// webui returns the right badge, exactly as drvweb-021 #32 requires.
 func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
-	if a.Repo == "" {
+	st, ok := s.pyramidGit(context.Background(), a)
+	if !ok {
 		return nil
 	}
-	ctx := context.Background()
+	return projectPyramid(st.Pyramid, a.Events, st.Head, st.Dirty)
+}
+
+// gatherPyramidState is the default pyramidGit: it reads the pyramid, HEAD, and
+// dirtiness from the attempt's live checkout, falling back to its branch ref once
+// the worktree is reclaimed. ok is false — render nothing — on no recorded repo, a
+// non-git base, no checkout and no branch, or any git/parse error, the same
+// best-effort degradation the badge has always had.
+func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyramidState, bool) {
+	if a.Repo == "" {
+		return pyramidState{}, false
+	}
 	wm, err := worktree.NewManager(a.Repo)
 	if err != nil {
-		return nil
+		return pyramidState{}, false
 	}
 	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
 	wt, ok, err := wm.Locate(ctx, key)
 	if err != nil {
-		return nil
+		return pyramidState{}, false
 	}
 	if ok {
 		// Live checkout: read the pyramid, HEAD, and cleanliness straight from the
@@ -184,47 +212,47 @@ func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
 		// `draiver test` would still pass (drvweb-021 #27).
 		p, err := pyramid.Load(wt.Path)
 		if err != nil {
-			return nil
+			return pyramidState{}, false
 		}
 		head, err := worktree.HeadSHA(ctx, wt.Path)
 		if err != nil {
-			return nil
+			return pyramidState{}, false
 		}
 		dirty, err := worktree.DirtyAt(ctx, wt.Path)
 		if err != nil {
-			return nil
+			return pyramidState{}, false
 		}
-		return projectPyramid(p, a.Events, head, dirty)
+		return pyramidState{Pyramid: p, Head: head, Dirty: dirty}, true
 	}
 	// No live checkout — the attempt retired into Review and the daemon reclaimed
 	// its worktree, but the branch survives. Read the same two facts from the base
 	// repo via the branch ref, so the badge stays visible exactly where a reviewer
 	// wants it. Still live (git's current ref), still no stored HEAD SHA.
-	return s.branchPyramid(ctx, wm, key, a.Events)
+	return s.branchPyramidState(ctx, wm, key)
 }
 
-// branchPyramid is pyramidBadge's fallback when no live worktree exists: it folds
-// the attempt's test-result log against its branch tip and the .test-pyramid.yaml
-// committed on that branch, read from the base repo without a checkout. A missing
-// branch, a missing .test-pyramid.yaml, or any git/parse error yields nil (render
-// nothing) — the same best-effort degradation as the live path.
+// branchPyramidState is gatherPyramidState's fallback when no live worktree exists:
+// it reads the attempt's branch tip and the .test-pyramid.yaml committed on that
+// branch, from the base repo without a checkout. A missing branch, a missing
+// .test-pyramid.yaml, or any git/parse error yields ok=false (render nothing) — the
+// same best-effort degradation as the live path.
 //
-// It projects with dirty=false: a committed branch tip has no working tree to be
-// dirty. A checkout the daemon keeps warm while dirty is still found by Locate, so
-// it takes the live path above where DirtyAt observes it — this fallback is only
-// reached once the worktree is gone.
-func (s *Server) branchPyramid(ctx context.Context, wm *worktree.Manager, key worktree.Key, events []event.Event) *pyramidVM {
+// It reports Dirty=false: a committed branch tip has no working tree to be dirty. A
+// checkout the daemon keeps warm while dirty is still found by Locate, so it takes
+// the live path above where DirtyAt observes it — this fallback is only reached once
+// the worktree is gone.
+func (s *Server) branchPyramidState(ctx context.Context, wm *worktree.Manager, key worktree.Key) (pyramidState, bool) {
 	head, ok, err := wm.BranchSHA(ctx, key)
 	if err != nil || !ok {
-		return nil
+		return pyramidState{}, false
 	}
 	data, ok, err := wm.FileAtBranch(ctx, key, pyramid.FileName)
 	if err != nil || !ok {
-		return nil
+		return pyramidState{}, false
 	}
 	p, err := pyramid.Parse(data)
 	if err != nil {
-		return nil
+		return pyramidState{}, false
 	}
-	return projectPyramid(p, events, head, false)
+	return pyramidState{Pyramid: p, Head: head, Dirty: false}, true
 }

@@ -27,6 +27,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -68,6 +69,13 @@ type Server struct {
 	// alive probes whether a recorded session pid is still running. It defaults to
 	// a signal-0 OS probe (pidAlive); tests inject a deterministic stub.
 	alive func(pid int) bool
+	// pyramidGit gathers the live git state a pyramid badge projects over — the
+	// loaded pyramid, HEAD, and worktree dirtiness — from an attempt's worktree or
+	// branch ref. It defaults to gatherPyramidState (the real git reads); tests
+	// inject a deterministic stub so the badge render can be exercised off canned
+	// state without a real repo (drvweb-021 #32). ok is false when there is nothing
+	// to project (no repo, no checkout/branch, no pyramid, or a git error).
+	pyramidGit func(ctx context.Context, a project.Attempt) (pyramidState, bool)
 	// actor is the identity stamped on both web writes — a composed log event and
 	// a board enable. The board has no CLI actor context, so it is configured at
 	// construction (see WithActor); it defaults to human:webui.
@@ -400,6 +408,9 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 		parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
 	))
 	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui", supDefault: project.SupervisionPassthrough}
+	// gatherPyramidState is a method, so bind it once s exists; tests overwrite the
+	// field with a stub, exactly as they do s.alive.
+	s.pyramidGit = s.gatherPyramidState
 	for _, opt := range opts {
 		opt(s)
 	}
