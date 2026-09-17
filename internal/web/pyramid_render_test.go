@@ -152,6 +152,52 @@ func TestRenderPyramidBadge_LiveWorktreeGreen(t *testing.T) {
 	}
 }
 
+// #27: a live worktree at the recorded commit but with uncommitted changes must NOT
+// render green — re-running `draiver test` might no longer pass. The badge shows the
+// dirty state (data-dirty="true", not green) so the board reflects the real branch
+// state at a glance.
+func TestRenderPyramidBadge_DirtyWorktreeNotGreen(t *testing.T) {
+	repo := initRepo(t, true)
+	ticket, id := "PYR-5", "0001"
+
+	m, err := worktree.NewManager(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := m.Create(context.Background(), worktree.Spec{Key: worktree.Key{Ticket: ticket, Attempt: id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := runGit(t, wt.Path, "rev-parse", "HEAD")
+
+	// Uncommitted change in the checkout — exactly what #27 is about (editing while a
+	// result at HEAD is already logged).
+	if err := os.WriteFile(filepath.Join(wt.Path, "scratch.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := seedReviewAttempt(t, repo, ticket, id,
+		event.Event{Type: "created", Actor: "a"},
+		event.Event{Type: "test-result", Actor: "agent:x", Rung: "integration", Commit: head},
+		event.Event{Type: "review", Actor: "agent:x", Body: "please review"},
+	)
+
+	badge := `data-testid="pyramid-` + ticket + "-" + id + `"`
+	for _, page := range []struct {
+		name, body string
+	}{{"board", board(t, root)}, {"detail", detail(t, root, ticket, id)}} {
+		if !strings.Contains(page.body, badge) {
+			t.Fatalf("%s: pyramid badge %s not rendered", page.name, badge)
+		}
+		if strings.Contains(page.body, "pyramid-green") {
+			t.Errorf("%s: a dirty worktree must not render green", page.name)
+		}
+		if !strings.Contains(page.body, "pyramid-dirty") || !strings.Contains(page.body, `data-dirty="true"`) {
+			t.Errorf("%s: expected the dirty state (pyramid-dirty, data-dirty=true)", page.name)
+		}
+	}
+}
+
 // The regression from #21: once the attempt retires to Review its worktree is
 // reclaimed, so Locate finds nothing — but the branch survives, and the badge must
 // still render (read from the branch ref). This is the case the live-only code

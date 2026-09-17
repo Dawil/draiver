@@ -141,12 +141,16 @@ body {
 /* Test-pyramid badge (drvweb-021). A compact pill of rungs (unit ✓ · integration ✓)
    surfacing the highest logged rung whose commit == current HEAD. Green when it
    describes HEAD; muted with a "stale" flag when the last recorded result predates
-   the tip. Reached rungs also carry a ✓ glyph so the state is not colour alone
-   (colour-blind / screen readers), and the whole pill has a title/aria-label. */
+   the tip; muted with a dotted border and an "uncommitted" flag when a result names
+   HEAD but the worktree is dirty, so re-running `draiver test` might not still pass
+   (drvweb-021 #27). Reached rungs also carry a ✓ glyph so the state is not colour
+   alone (colour-blind / screen readers), and the whole pill has a title/aria-label:
+   green vs stale vs dirty is legible without seeing colour. */
 .pyramid { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
            border-radius: 999px; padding: 0 7px; border: 1px solid var(--line); }
 .pyramid-green { color: var(--done); border-color: color-mix(in srgb, var(--done) 55%, var(--line)); }
 .pyramid-stale { color: var(--muted); border-style: dashed; }
+.pyramid-dirty { color: var(--muted); border-style: dotted; }
 .pyramid .pyramid-rung { display: inline-flex; align-items: center; }
 .pyramid .rung-off { color: var(--muted); opacity: .6; }
 .pyramid .rung-check { margin-left: 2px; }

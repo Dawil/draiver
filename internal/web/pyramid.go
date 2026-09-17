@@ -32,6 +32,13 @@ type pyramidVM struct {
 	// rungs are then shown dimmed rather than green, and StaleAt names the commit the
 	// last result was recorded at.
 	Stale bool
+	// Dirty is true when a result names the current HEAD but the worktree holds
+	// uncommitted changes: re-running `draiver test` might no longer pass, so the
+	// recorded green no longer describes the tree (drvweb-021 #27). Like Stale it
+	// renders dimmed rather than green; unlike Stale, HEAD has not moved — only the
+	// working tree diverged. Stale and Dirty are mutually exclusive: Dirty is set
+	// only on the otherwise-green-at-HEAD path.
+	Dirty bool
 	// Head is the short current-HEAD SHA (read live), and StaleAt the short SHA the
 	// highest stale result was recorded at (empty unless Stale) — both for the badge
 	// tooltip / label.
@@ -67,8 +74,10 @@ func shortSHA(sha string) string {
 // logged, or when every logged rung names a level absent from the current pyramid
 // (a renamed/removed rung): in all three there is no recorded verification of a
 // known rung to surface. Otherwise it reports green-at-HEAD (a result whose commit
-// equals head) or, failing that, stale (a result at an older commit).
-func projectPyramid(p *pyramid.Pyramid, events []event.Event, head string) *pyramidVM {
+// equals head, in a clean tree), dirty (such a result but the worktree has
+// uncommitted changes), or stale (a result at an older commit). dirty is an I/O fact
+// like head; the caller reads it live so this fold stays pure and testable.
+func projectPyramid(p *pyramid.Pyramid, events []event.Event, head string, dirty bool) *pyramidVM {
 	if p == nil {
 		return nil
 	}
@@ -102,6 +111,16 @@ func projectPyramid(p *pyramid.Pyramid, events []event.Event, head string) *pyra
 		hi := index[highest.Name]
 		for i := range vm.Rungs {
 			vm.Rungs[i].Reached = i <= hi
+		}
+		if dirty {
+			// A result names HEAD, but the working tree has uncommitted changes:
+			// re-running `draiver test` might no longer pass, so the recorded green no
+			// longer describes the tree. Show the rungs it reached, dimmed, and say
+			// why — never green (drvweb-021 #27).
+			vm.Dirty = true
+			vm.Label = "test pyramid: " + highest.Name + " was green at HEAD " + vm.Head +
+				", but the worktree has uncommitted changes — re-run `draiver test`"
+			return vm
 		}
 		vm.Label = "test pyramid: green through " + highest.Name + " at HEAD " + vm.Head
 		return vm
@@ -159,7 +178,10 @@ func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
 		return nil
 	}
 	if ok {
-		// Live checkout: read the pyramid and HEAD straight from the worktree.
+		// Live checkout: read the pyramid, HEAD, and cleanliness straight from the
+		// worktree. Dirtiness is read live — the same `git status --porcelain` the
+		// `test --log` gate uses — so the badge only stays green while re-running
+		// `draiver test` would still pass (drvweb-021 #27).
 		p, err := pyramid.Load(wt.Path)
 		if err != nil {
 			return nil
@@ -168,7 +190,11 @@ func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
 		if err != nil {
 			return nil
 		}
-		return projectPyramid(p, a.Events, head)
+		dirty, err := worktree.DirtyAt(ctx, wt.Path)
+		if err != nil {
+			return nil
+		}
+		return projectPyramid(p, a.Events, head, dirty)
 	}
 	// No live checkout — the attempt retired into Review and the daemon reclaimed
 	// its worktree, but the branch survives. Read the same two facts from the base
@@ -182,6 +208,11 @@ func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
 // committed on that branch, read from the base repo without a checkout. A missing
 // branch, a missing .test-pyramid.yaml, or any git/parse error yields nil (render
 // nothing) — the same best-effort degradation as the live path.
+//
+// It projects with dirty=false: a committed branch tip has no working tree to be
+// dirty. A checkout the daemon keeps warm while dirty is still found by Locate, so
+// it takes the live path above where DirtyAt observes it — this fallback is only
+// reached once the worktree is gone.
 func (s *Server) branchPyramid(ctx context.Context, wm *worktree.Manager, key worktree.Key, events []event.Event) *pyramidVM {
 	head, ok, err := wm.BranchSHA(ctx, key)
 	if err != nil || !ok {
@@ -195,5 +226,5 @@ func (s *Server) branchPyramid(ctx context.Context, wm *worktree.Manager, key wo
 	if err != nil {
 		return nil
 	}
-	return projectPyramid(p, events, head)
+	return projectPyramid(p, events, head, false)
 }
