@@ -192,6 +192,64 @@ func DeriveDesired(all []Attempt, edges map[string]Edges) map[Ref]bool {
 	return desired
 }
 
+// DeriveEscalated computes, per attempt, the pre-digest parent that an open
+// escalation has *moved up* to — the read-side twin of
+// reverse_wants.wakeWanter's wake predicate (drvctl-050). It is what turns the
+// reverse-`wants:` edge from copy-up (child *and* parent both Needs-me) into
+// move-up (child leaves the human inbox, the parent carries it): an attempt maps
+// to parent P iff
+//
+//   - the attempt itself is NeedsMe (an open escalation to absorb), and
+//   - P is the lexically-first ticket whose spec.md `wants:` names the attempt's
+//     ticket and whose latest attempt is an **enabled, Running** coordinator with
+//     **effective supervision pre-digest** — exactly the predicate the reconciler
+//     wakes P on, so the projection and the wake can never disagree about who is
+//     handling the child.
+//
+// Attempts with no such parent are absent from the map: under passthrough (the
+// floor and the default), with no wanter, or with a disabled / non-Running /
+// non-pre-digest wanter, the child stays Needs-me and in the human inbox. `def`
+// is the fleet's configured default mode, folded under each wanter's per-ticket
+// override via Effective. Pure given `all` (LoadAll's sorted output) + edges.
+func DeriveEscalated(all []Attempt, edges map[string]Edges, def Supervision) map[Ref]string {
+	reverse := reverseWants(edges)
+	byTicket := map[string][]Attempt{}
+	for _, a := range all {
+		byTicket[a.Ticket] = append(byTicket[a.Ticket], a)
+	}
+	out := map[Ref]string{}
+	for _, a := range all {
+		if a.State != NeedsMe {
+			continue
+		}
+		if p := escalationParent(a.Ticket, byTicket, reverse, def); p != "" {
+			out[Ref{Ticket: a.Ticket, Attempt: a.ID}] = p
+		}
+	}
+	return out
+}
+
+// escalationParent returns the coordinator a Needs-me child moves up to, or ""
+// when none qualifies. It mirrors reverse_wants.wakeWanter exactly — Enabled,
+// latest State Running (a dormant Pending coordinator derives Running from its
+// log), effective mode pre-digest — walking the sorted wanter list so the
+// attribution is deterministic (the lexically-first qualifying parent wins when
+// a child is wanted by several).
+func escalationParent(child string, byTicket map[string][]Attempt, reverse map[string][]string, def Supervision) string {
+	for _, w := range reverse[child] {
+		atts := byTicket[w]
+		if len(atts) == 0 {
+			continue
+		}
+		latest := atts[len(atts)-1]
+		if latest.Enabled && latest.State == Running &&
+			Effective(latest.Supervision, def) == SupervisionPreDigest {
+			return w
+		}
+	}
+	return ""
+}
+
 // reachedThreshold captures how far a ticket's work has progressed for the
 // forward gate's two admission thresholds: `review` is set once any attempt is at
 // Review-or-Done, `done` once any attempt is Done. It is the read-side twin of

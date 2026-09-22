@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
@@ -39,9 +40,38 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		printBoard(cmd, root, attempts, desired)
+		escalated, err := computeEscalated(root)
+		if err != nil {
+			return err
+		}
+		printBoard(cmd, root, attempts, desired, escalated)
 		return nil
 	},
+}
+
+// computeEscalated derives, fleet-wide, which Needs-me attempts have been moved up
+// to a pre-digest parent (drvctl-050) — the "escalated to P" input to the board
+// projection. It folds the configured default supervision mode (a missing config
+// yields the passthrough floor, under which the map is empty and nothing moves).
+func computeEscalated(root store.Root) (map[project.Ref]string, error) {
+	all, err := project.LoadAll(root)
+	if err != nil {
+		return nil, err
+	}
+	edges, err := project.LoadAllEdges(root)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, err
+	}
+	// A bad config value degrades to the passthrough floor here (unlike the daemon,
+	// which fails loud) — status is a read-only board print, not a supervision run,
+	// so it must never fail to render over a mis-set dial; Effective treats the
+	// unparsed default as passthrough.
+	def, _ := project.ParseSupervision(cfg.DefaultSupervision)
+	return project.DeriveEscalated(all, edges, def), nil
 }
 
 // computeDesired derives the declaratively-desired attempt set across the whole
@@ -106,7 +136,7 @@ func writeState(root store.Root, a project.Attempt, now time.Time) error {
 	return nil
 }
 
-func printBoard(cmd *cobra.Command, root store.Root, attempts []project.Attempt, desired map[project.Ref]bool) {
+func printBoard(cmd *cobra.Command, root store.Root, attempts []project.Attempt, desired map[project.Ref]bool, escalated map[project.Ref]string) {
 	out := cmd.OutOrStdout()
 	var running, pending, done int
 	var needsMe, review []project.Attempt
@@ -115,10 +145,12 @@ func printBoard(cmd *cobra.Command, root store.Root, attempts []project.Attempt,
 		// live agent is waiting on a gate/activation, not working. Fill the runtime
 		// bits here — desiredness from the fleet-wide set, liveness from the session
 		// pid probe — rather than in the log-pure loader, so the count reflects the
-		// fleet's real state at status time.
+		// fleet's real state at status time. EscalatedTo folds the pre-digest move-up
+		// on top: a moved-up Needs-me child counts as Pending, off the Needs-me tally.
 		a.Desired = desired[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
 		a.Live = session.Alive(root, a.Ticket, a.ID)
-		switch a.Control() {
+		a.EscalatedTo = escalated[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
+		switch a.BoardState() {
 		case project.Running:
 			running++
 		case project.Pending:

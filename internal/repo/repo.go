@@ -127,9 +127,57 @@ func (r *Repo) Supervision(ticket, att string, mode project.Supervision) (event.
 // this attempt (the CLI's own pre-append validation), then appends the resolution
 // referencing it. Escalation and resolution together form one durable artefact.
 func (r *Repo) Resolve(ticket, att string, seq int, answer string) (event.Event, error) {
-	events, err := ticketlog.Read(r.root, ticket, att)
+	if err := r.checkEscalation(ticket, att, seq); err != nil {
+		return event.Event{}, err
+	}
+	return r.AppendAt(ticket, att, event.Event{
+		Type: "resolution",
+		Refs: []int{seq},
+		Body: answer,
+	})
+}
+
+// ResolveBy is the downward-resolution flow drvctl-050 adds to the `wants:` edge:
+// a parent Capability P answers a child's open escalation, authorized *by the edge
+// itself*. It errors and writes nothing unless P's spec.md `wants:` names the child
+// (edge-authorised via LoadEdges) — the same authorisation the reverse index
+// carries. On success it appends a resolution to the CHILD's log referencing
+// escalation #seq, but stamped with a distinct `parent:<P>` provenance actor (not
+// a human/agent identity), so `log`/`brief` show the parent, not a human, closed
+// the loop.
+//
+// Two bounds fall out for free. First, unblock ≠ ratify: ResolveBy only ever
+// writes a `resolution` event, so a parent structurally cannot mark a child
+// Review→Done — the scoped verb grants no new event type. Second, the child
+// attempt resolves exactly as a plain resolve does (the caller passes the child's
+// resolved attempt), so `--by` stays consistent with the unscoped verb.
+func (r *Repo) ResolveBy(parent, child, att string, seq int, answer string) (event.Event, error) {
+	edges, err := project.LoadEdges(r.root, parent)
 	if err != nil {
 		return event.Event{}, err
+	}
+	if !wants(edges.Wants, child) {
+		return event.Event{}, fmt.Errorf("%s does not want %s — not authorized", parent, child)
+	}
+	if err := r.checkEscalation(child, att, seq); err != nil {
+		return event.Event{}, err
+	}
+	return r.AppendAt(child, att, event.Event{
+		Type:  "resolution",
+		Refs:  []int{seq},
+		Body:  answer,
+		Actor: "parent:" + parent,
+	})
+}
+
+// checkEscalation is the shared pre-append validation both resolve flows fold
+// through: seq must name an event on the attempt, and that event must be an open
+// escalation type. It reads the log but writes nothing, so a failed check leaves
+// the log untouched (the "errors and writes nothing" guarantee).
+func (r *Repo) checkEscalation(ticket, att string, seq int) error {
+	events, err := ticketlog.Read(r.root, ticket, att)
+	if err != nil {
+		return err
 	}
 	var found *event.Event
 	for i := range events {
@@ -139,16 +187,23 @@ func (r *Repo) Resolve(ticket, att string, seq int, answer string) (event.Event,
 		}
 	}
 	if found == nil {
-		return event.Event{}, fmt.Errorf("no event #%d on %s/%s", seq, ticket, att)
+		return fmt.Errorf("no event #%d on %s/%s", seq, ticket, att)
 	}
 	if found.Type != "escalation" {
-		return event.Event{}, fmt.Errorf("event #%d on %s/%s is a %q, not an escalation", seq, ticket, att, found.Type)
+		return fmt.Errorf("event #%d on %s/%s is a %q, not an escalation", seq, ticket, att, found.Type)
 	}
-	return r.AppendAt(ticket, att, event.Event{
-		Type: "resolution",
-		Refs: []int{seq},
-		Body: answer,
-	})
+	return nil
+}
+
+// wants reports whether a spec's `wants:` id set names child — the edge-authorisation
+// check ResolveBy gates on.
+func wants(list []string, child string) bool {
+	for _, w := range list {
+		if w == child {
+			return true
+		}
+	}
+	return false
 }
 
 // ArchiveResult reports what an Archive/Unarchive did: the written event and, for

@@ -924,6 +924,11 @@ func (s *Server) board() (boardVM, error) {
 		return boardVM{}, err
 	}
 	desired := project.DeriveDesired(attempts, edges)
+	// The pre-digest move-up (drvctl-050): a Needs-me child whose escalation was
+	// absorbed by an enabled pre-digest parent projects Pending "escalated to P",
+	// off the Needs-me column and attributed to the parent. Fleet-wide like desired,
+	// folded under the same config default the capability panel resolves against.
+	escalated := project.DeriveEscalated(attempts, edges, s.supDefault)
 	var vm boardVM
 	for _, a := range attempts {
 		// An archived attempt lands in no column — that is the whole board effect of
@@ -933,13 +938,20 @@ func (s *Server) board() (boardVM, error) {
 		}
 		a.Desired = desired[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
 		a.Live = s.attemptLive(a)
-		switch a.Control() {
+		a.EscalatedTo = escalated[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
+		switch a.BoardState() {
 		case project.Running:
 			vm.Running = append(vm.Running, a)
 		case project.Pending:
-			// The "waiting on X" reason peeks at sibling tickets' states, so it is
-			// filled only for the cards that show it (drvweb-015).
-			a.WaitingReason = project.WaitingReason(a.Ticket, attempts, edges)
+			// The Pending reason is either the move-up attribution ("escalated to P")
+			// or the forward-gate "waiting on X" peek — the two ways an attempt lands
+			// Pending. A moved-up child is Running-in-log, so WaitingReason would read
+			// "waiting to start"; the escalated reason is the truthful one.
+			if a.EscalatedTo != "" {
+				a.WaitingReason = project.EscalatedReason(a.EscalatedTo)
+			} else {
+				a.WaitingReason = project.WaitingReason(a.Ticket, attempts, edges)
+			}
 			vm.Pending = append(vm.Pending, a)
 		case project.NeedsMe:
 			vm.NeedsMe = append(vm.NeedsMe, a)

@@ -24,6 +24,14 @@ var inboxCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// The human inbox excludes a child whose escalation moved up to a pre-digest
+		// parent (drvctl-050): the manager fields it, so it is not the human's to
+		// resolve directly. Same fleet-wide move-up the board projects; under
+		// passthrough (the default) the map is empty and every escalation shows.
+		escalated, err := computeEscalated(root)
+		if err != nil {
+			return err
+		}
 		me := actorName(resolveActor())
 
 		out := cmd.OutOrStdout()
@@ -31,6 +39,9 @@ var inboxCmd = &cobra.Command{
 		for _, a := range attempts {
 			if inboxMine && !assigneeMatches(a.Assignee, me) {
 				continue
+			}
+			if p := escalated[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]; p != "" {
+				continue // moved up to parent p — not in the human inbox
 			}
 			for _, e := range a.OpenEscalations {
 				fmt.Fprintf(out, "%s/%s #%d — %s\n", a.Ticket, a.ID, e.Seq, firstLine(e.Body))
