@@ -24,10 +24,13 @@ Enable `CAP-A`. Its `wants:` pulls the three sub-tickets into the fleet. `SRC-1`
 runs; `INFRA-1` and `E2E-1` sit **Pending** behind their `after:` gates. `SRC-1`
 reaches Review → `INFRA-1` admits; both reach Review → `E2E-1` admits and runs the
 integration test. If the test fails, `E2E-1` **Escalates** with a concrete
-diagnosis; that escalation **wakes `CAP-A`** (dormant until now), which assesses
+diagnosis; that escalation **wakes `CAP-A`** (dormant until now) and moves `E2E-1`
+to **Pending** ("escalated to CAP-A"), off the human's inbox. `CAP-A` assesses
 across all three sub-tickets and — depending on its **supervision mode** — either
-routes the block to a human or pre-digests it into a recommendation the human
-ratifies. `CAP-A` is **Done** when its coordinator claims Review and a human
+routes the block to a human (passthrough) or, in pre-digest, **classifies** it:
+resolving `E2E-1` itself if it can (`resolve --by`, e.g. handing over a sibling's
+endpoint), else consolidating one escalation for the human and relaying the answer
+back down. `CAP-A` is **Done** when its coordinator claims Review and a human
 ratifies — never by rollup.
 
 Everything below is the machinery behind that paragraph.
@@ -46,8 +49,12 @@ re-argued here:
 - **Admission is fire-once and edge-triggered** (a satisfied gate is a latch; a
   later change in a dependency does not auto-restart the dependent — staleness
   surfaces at the integration test).
-- **Cross-ticket mutation is human-gated: escalate-and-recommend.** An agent never
-  writes into another ticket's log; it proposes, a human ratifies, `ctld` executes.
+- **Cross-ticket mutation is bounded, not forbidden (refined by drvctl-050).** An
+  agent may not mutate an *arbitrary* ticket. A **parent** may, through the
+  edge-authorised `resolve --by`, write a **resolution** into a child it `wants:` —
+  it may *unblock* a report, but never *ratify* it (Review → Done stays human-only).
+  The general case is still escalate-and-recommend: propose, a human ratifies,
+  `ctld` executes.
 
 ## The three relations
 
@@ -56,7 +63,7 @@ Review/Done — a native reinterpretation, not a literal port):
 
 | Field on ticket X's `spec.md` | Points to | Meaning |
 | --- | --- | --- |
-| `wants:` | tickets X pulls in | *"If I am enabled, enable them."* The grouping / `.target` edge. **Enable flows down it; escalation flows up it** (see below). |
+| `wants:` | tickets X pulls in | *"If I am enabled, enable them."* The grouping / `.target` edge. **Enable flows down it; escalation flows up it; resolution flows back down it** (see below). |
 | `after:` | tickets X waits on | *"Admit me once they reach **Review**."* Ordering gate on the success *claim*. |
 | `requires:` | tickets X waits on | *"Admit me once they reach **Done**."* Ordering gate on the *merged* terminal. |
 
@@ -87,6 +94,35 @@ escalation flows *up* the same edge.
 Children stay fully decoupled — they never name the coordinator (a Jira task doesn't
 reference its epic to report a blocker; the epic owns the relationship).
 
+**Escalation *moves* up, it does not *copy* up (drvctl-050).** The reverse edge was
+originally implemented as a *copy*: a child escalation woke the coordinator *and*
+left the child in Needs-me, so one blocker surfaced twice on the human's board and
+resolving the parent left the child stuck. Under **pre-digest** the escalation now
+*moves*: while an enabled pre-digest parent `wants:` it, a Needs-me child renders as
+**Pending** ("escalated to `<P>`", see below) and is *not counted in the human
+inbox* — the report leaves the CEO's desk once its manager is seized of it. Under
+**passthrough** there is no coordinator to route to, so the child stays Needs-me and
+the human is first responder. The invariant: **at most one ticket per escalation
+path sits in the human inbox — the highest awake manager on that path.**
+
+**The third flow — resolution back down (drvctl-050).** `wants:` is a **delegation
+edge**: holding it authorises the parent to *unblock* the child. A scoped verb,
+`draiver resolve <CHILD> <seq> --by <PARENT>`, writes a resolution into the child's
+log iff `PARENT wants: CHILD`, so **the parent is the sole resolver of its
+children**. One mechanism serves two triggers: the parent answers from its own
+knowledge (the ball-pass / cross-ticket-context class — "the backend's endpoint is
+X", the answer that lives in a *sibling's* state, not the human's head), or it
+escalates once, the human answers *the parent*, and the parent relays the answer
+back down. The human is a consultant to the manager, never a first responder to the
+report.
+
+> **Authorisation rule:** a `resolution` written by ticket P against child C is
+> accepted iff P's `spec.md` `wants:` C. The verb can only write a resolution, never
+> a review/done — so a parent may **unblock** a child but never **ratify** it
+> (**unblock ≠ ratify**). Every delegated child still surfaces at Review for the
+> human, so over-shielding is self-limiting: a wrongly-unblocked child either
+> re-escalates on resume or fails Review.
+
 **This extends machinery that exists; it is not a new subsystem.** `draiverctl.md`
 already makes the log dir a `.path` unit: *"a new `resolution` event fires a resume
 session."* Today the trigger is "a `resolution` in **my own** log wakes me." The
@@ -99,10 +135,12 @@ and its output is human-gated regardless.
 
 A fifth control state, below Needs-me on the attention scale:
 
-- **Pending** — enabled/desired, **no live agent, no escalation**, advancing
-  automatically when a gate opens or an activation fires. It requires **zero human
-  attention** (Needs-me needs a human; Pending needs nothing) and renders as a quiet
-  count.
+- **Pending** — enabled/desired, **no live agent**, advancing automatically when a
+  gate opens or an activation fires. It requires **zero human attention** (Needs-me
+  needs a human; Pending needs nothing) and renders as a quiet count. Normally it
+  also has **no open escalation** — with one exception below: a child whose
+  escalation has been delegated *up* to its coordinator (drvctl-050) is Pending
+  because the escalation is the *manager's* to answer, not the human's.
 
 **"No agent" is not the new part.** Needs-me, Review, and Done already have no live
 agent — a Needs-me ticket escalated (exit 3), its session ended, and it waits for a
@@ -116,6 +154,17 @@ clean (the tier discipline). Its core derivation is local; only the human-facing
 *reason* ("waiting on SRC-1") peeks at a sibling's state, and that peek is a
 session-tier computation.
 
+**Delegated children (drvctl-050).** Pre-digest adds a second route into Pending: a
+child *with* an open escalation, when an enabled pre-digest parent `wants:` it, is
+**reattributed** from Needs-me to Pending with the reason "escalated to `<P>`". This
+is the one case where an open escalation still reads Pending — the escalation is not
+the human's to answer, it is the manager's, so it drops out of the inbox count and
+renders under P on the board. It stays a read-time projection off the hash chain
+(the child's own derived `State` is unchanged — the escalation is still open in its
+log); the "escalated to `<P>`" reason is the same session-tier sibling peek as
+"waiting on SRC-1". Under **passthrough** no reattribution happens — the child stays
+Needs-me.
+
 **systemd mapping.** systemd splits this across concepts, which is why no single
 word ports: a dependency-ordered **job** sits in state `waiting` until predecessors
 finish; a path/socket-activated unit is `inactive (dead)` while its activator
@@ -128,7 +177,7 @@ The Capability ticket is a **normal ticket** (own repo or none, own log, portabl
 distinguished only by an **event-driven lifecycle**:
 
 ```
-Pending ──(child escalates)──▶ Running (assess + escalate-and-recommend) ──▶ Pending
+Pending ──(child escalates)──▶ Running (assess → resolve --by │ escalate) ──▶ Pending
    │                                                                            │
    └───────────(all children Done)──▶ Running (final review claim) ──▶ Review ──▶ Done
 ```
@@ -136,9 +185,12 @@ Pending ──(child escalates)──▶ Running (assess + escalate-and-recommen
 - **It reads siblings via the CLI, not a special brief.** The coordinator agent has
   `draiver` like any agent; for cross-ticket context it runs `draiver brief OTHER`
   or reads the logs itself. Nothing to build there.
-- **It is a proposer, not an executor** (escalate-and-recommend). The deterministic
+- **It proposes; the one thing it may execute is a child *unblock*** (drvctl-050).
+  For anything novel it is a proposer (escalate-and-recommend) and the deterministic
   `ctld` and the human own execution — the line that keeps this from being
-  stochastic-all-the-way-down.
+  stochastic-all-the-way-down. The bounded exception is `resolve --by`: it may write
+  a resolution into a child it `wants:` (unblock), but never ratify Review → Done —
+  and a wrongly-unblocked child is caught by re-escalation or at Review.
 - **Dormancy is the cattle/pet split, verbatim.** Between wakes the session is
   reaped (cattle); the attempt/log persists (pet); a wake `--resume`s from `brief`.
 - **Completion is its own review claim, not a rollup.** When it assesses all children
@@ -163,7 +215,7 @@ the ratification gate stays until trust is earned.
 | Mode | On a sub-ticket escalation | Human's role | New machinery |
 | --- | --- | --- | --- |
 | **Passthrough** | Goes straight to Needs-me; no coordinator wakes. The Capability is a Pending shell that wakes only for its final review. | First-responder & router | none beyond the DAG |
-| **Pre-digest** *(the incremental step)* | Reverse-`wants:` wakes the coordinator; it assesses across children and posts one **consolidated recommendation**. | Ratifier | coordinator agent + activation |
+| **Pre-digest** *(the incremental step)* | Reverse-`wants:` wakes the coordinator to **classify**: *auto-fixable by me* → it resolves the child itself (`resolve --by`, the ball-pass / cross-ticket-context class); *needs a human* → one **consolidated escalation**, then it relays the answer back down. The child is **Pending** ("escalated to P") throughout, off the inbox. | Consultant / ratifier | coordinator agent + activation + `resolve --by` (drvctl-050) |
 | **Auto-execute** *(future trust-dial)* | The coordinator applies a **whitelisted class** of reopens itself; the rest still escalate. | Exception-handler only | auto-apply path + whitelist + audit |
 
 - **Passthrough** is the floor — it works with today's primitives plus the DAG.
@@ -207,6 +259,10 @@ Most of this is recombination. The new primitives, in full:
 6. The coordinator lifecycle + the supervision mode (passthrough / pre-digest;
    auto-execute deferred).
 7. Cycle detection at the authoring seam.
+8. **Downward resolution over `wants:`** (drvctl-050) — a scoped, edge-authorised
+   `resolve --by <parent>`; escalation that *moves* (child → Pending "escalated to
+   P") instead of copying; the unblock ≠ ratify bound. Refines primitive 5's reverse
+   edge from copy-up to move-up-and-resolve-down.
 
 ## Implementation tickets
 
@@ -224,10 +280,14 @@ the coordinator + supervision dial. Engine = `drvctl`; UI = `drvweb`.
 | **drvweb-015** | Board: render **Pending** — a quiet zero-attention count/column, one card per Pending attempt, with the "waiting on X" reason. | 039 |
 | **drvweb-016** | Edit dependency edges in the UI — reuse the drvweb-009 provenance inline-edit style, but **scoped to `spec.md`** (ticket-level) on the attempts-index page, backed by the drvctl-037 verb; surface cycle-refusal inline. | 037 |
 | **drvweb-017** | Capability view — on a Capability ticket, show its `wants:` sub-fleet (child states + gates) and a control to set the supervision mode. | 038, 042, 015 |
+| **drvctl-050** | Downward resolution over `wants:` — scoped `resolve --by <parent>` (edge-authorised, provenance-stamped, unblock ≠ ratify); escalation *moves* up (a Needs-me child with an enabled pre-digest parent → **Pending** "escalated to P", off the inbox) instead of copying. Refines drvctl-041 (copy-up → move-up); reuses the drvweb-015 Pending render. | 041, 042 |
 
 Follow-ons (noted, not scheduled): `focus`/`isolate` a Capability (roadmap Tier 2);
 **auto-execute** mode + whitelist + audit (the trust-dial, after pre-digest data);
-**new-attempt-on-retrigger** (auto-freshness beyond fire-once).
+**new-attempt-on-retrigger** (auto-freshness beyond fire-once); the **classification
++ outcome dataset** (log drvctl-050's parent classify/resolve calls, self-labelled by
+the child's later trajectory — the demand signal that earns auto-execute); a
+**staleness check** for a child left "escalated to P" with no parent movement.
 
 ## Open questions
 

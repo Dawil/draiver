@@ -6,16 +6,21 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Dawil/draiver/internal/event"
-	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/repo"
 )
+
+var resolveByFlag string
 
 var resolveCmd = &cobra.Command{
 	Use:   "resolve TICKET ESCALATION_SEQ ANSWER",
 	Short: "Answer an escalation, linking the resolution back to it",
 	Long: "resolve appends a resolution event referencing the escalation by its seq\n" +
 		"within the attempt. Escalation and resolution together form one durable artefact.\n" +
-		"Target a specific attempt with --attempt (defaults to the latest).",
+		"Target a specific attempt with --attempt (defaults to the latest).\n\n" +
+		"With --by PARENT, a coordinator resolves one of its children's escalations\n" +
+		"(the downward-resolution flow over the `wants:` edge): PARENT must `wants:`\n" +
+		"TICKET, and the resolution is stamped with PARENT's provenance rather than a\n" +
+		"human actor. It can only ever unblock — never ratify a child Review→Done.",
 	Args: cobra.ExactArgs(3),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
@@ -36,29 +41,18 @@ var resolveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		events, err := ticketlog.Read(root, id, att)
-		if err != nil {
-			return err
-		}
-		var found *event.Event
-		for i := range events {
-			if events[i].Seq == seq {
-				found = &events[i]
-				break
-			}
-		}
-		if found == nil {
-			return fmt.Errorf("no event #%d on %s/%s", seq, id, att)
-		}
-		if found.Type != "escalation" {
-			return fmt.Errorf("event #%d on %s/%s is a %q, not an escalation", seq, id, att, found.Type)
-		}
 
-		e, _, err := appendEvent(id, event.Event{
-			Type: "resolution",
-			Refs: []int{seq},
-			Body: answer,
-		})
+		r := repo.New(root, resolveActor())
+		if resolveByFlag != "" {
+			e, err := r.ResolveBy(resolveByFlag, id, att, seq, answer)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "resolved %s/%s #%d -> resolution #%d (by %s)\n",
+				id, att, seq, e.Seq, resolveByFlag)
+			return nil
+		}
+		e, err := r.Resolve(id, att, seq, answer)
 		if err != nil {
 			return err
 		}
@@ -68,5 +62,6 @@ var resolveCmd = &cobra.Command{
 }
 
 func init() {
+	resolveCmd.Flags().StringVar(&resolveByFlag, "by", "", "resolve on behalf of a parent Capability that `wants:` this ticket (downward resolution)")
 	rootCmd.AddCommand(resolveCmd)
 }

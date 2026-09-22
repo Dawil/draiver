@@ -61,6 +61,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	mergeDryRun, mergeSync, landEscalate, landNoEscalate = false, false, false, false
 	mergeRemote = ""
 	archiveAccepted, archiveAbandoned = false, false
+	resolveByFlag = ""
 	testLog = false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 	resetFlagsChanged(rootCmd)
@@ -180,6 +181,161 @@ func TestResolveRejectsNonEscalation(t *testing.T) {
 	}
 	if _, code := run(t, "--data", dir, "resolve", "PROJ-1", "99", "nope"); code == 0 {
 		t.Error("expected nonzero exit resolving a missing seq")
+	}
+}
+
+// seedParentChild creates a data root with a parent PROJ-1 that `wants:` a child
+// PROJ-2, and escalates the child so seq 2 is an open escalation on PROJ-2.
+func seedParentChild(t *testing.T) string {
+	t.Helper()
+	dir := newTicket(t) // PROJ-1
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-2", "--title", "Child", "--repo", dir); code != 0 {
+		t.Fatal("new child exited nonzero")
+	}
+	if _, code := run(t, "--data", dir, "depends", "PROJ-1", "--wants", "PROJ-2"); code != 0 {
+		t.Fatal("depends exited nonzero")
+	}
+	if _, code := run(t, "--data", dir, "--actor", "agent:child", "escalate", "PROJ-2", "which endpoint?"); code != ExitEscalated {
+		t.Fatal("child escalate did not gate")
+	}
+	return dir
+}
+
+// A parent that `wants:` a child may resolve the child's escalation with --by; the
+// resolution lands on the CHILD's log, references the escalation, and is stamped
+// with parent: provenance distinct from any human actor. drvctl-050 acceptance.
+func TestResolveByParentUnblocksChild(t *testing.T) {
+	dir := seedParentChild(t)
+	out, code := run(t, "--data", dir, "--actor", "agent:parent", "resolve", "PROJ-2", "2", "the endpoint is /v2/foo", "--by", "PROJ-1")
+	if code != 0 {
+		t.Fatalf("resolve --by exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "by PROJ-1") {
+		t.Errorf("output missing by-provenance: %q", out)
+	}
+	events, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	last := events[len(events)-1]
+	if last.Type != "resolution" {
+		t.Errorf("--by wrote a %q, not a resolution (unblock ≠ ratify)", last.Type)
+	}
+	if len(last.Refs) != 1 || last.Refs[0] != 2 {
+		t.Errorf("resolution not linked to escalation #2: %+v", last.Refs)
+	}
+	if last.Actor != "parent:PROJ-1" {
+		t.Errorf("provenance actor = %q want parent:PROJ-1 (distinct from a human)", last.Actor)
+	}
+	// The child is unblocked: no open escalation remains.
+	if a, _ := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-2", "0001"); a.State == project.NeedsMe {
+		t.Errorf("child still NeedsMe after --by resolve")
+	}
+}
+
+// A parent that does NOT `wants:` the child is refused, and nothing is written —
+// authorisation rides on the edge. drvctl-050 acceptance.
+func TestResolveByUnauthorizedWritesNothing(t *testing.T) {
+	dir := seedParentChild(t)
+	// PROJ-3 exists but does not want PROJ-2.
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-3", "--title", "Stranger", "--repo", dir); code != 0 {
+		t.Fatal("new PROJ-3 exited nonzero")
+	}
+	before, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	_, code, err := runE(t, "--data", dir, "resolve", "PROJ-2", "2", "sneaky", "--by", "PROJ-3")
+	if code == 0 {
+		t.Fatal("expected nonzero exit resolving unauthorized")
+	}
+	if err == nil || !strings.Contains(err.Error(), "does not want") || !strings.Contains(err.Error(), "not authorized") {
+		t.Errorf("error = %v, want a 'does not want … not authorized' refusal", err)
+	}
+	after, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	if len(after) != len(before) {
+		t.Errorf("unauthorized --by wrote to the log: %d events, was %d", len(after), len(before))
+	}
+	// The child is still blocked — the refusal did not touch its escalation.
+	if a, _ := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-2", "0001"); a.State != project.NeedsMe {
+		t.Errorf("child state = %q want NeedsMe (refusal left it blocked)", a.State)
+	}
+}
+
+// enablePreDigestParent turns PROJ-1 into an enabled pre-digest coordinator, the
+// state under which a child escalation moves up rather than surfacing to the human.
+func enablePreDigestParent(t *testing.T, dir string) {
+	t.Helper()
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "ctl", "enable", "PROJ-1@0001"); code != 0 {
+		t.Fatal("ctl enable exited nonzero")
+	}
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "ctl", "supervision", "PROJ-1@0001", "pre-digest"); code != 0 {
+		t.Fatal("ctl supervision exited nonzero")
+	}
+}
+
+// Under pre-digest, a child escalation moved up to its parent drops out of the
+// human inbox; under passthrough (the default) it stays. drvctl-050 acceptance.
+func TestInboxExcludesMovedUpChild(t *testing.T) {
+	dir := seedParentChild(t)
+	// Passthrough (default): the child's escalation is in the inbox.
+	if out, code := run(t, "--data", dir, "inbox"); code != 0 || !strings.Contains(out, "PROJ-2/0001 #2") {
+		t.Fatalf("passthrough inbox should list the child escalation, got %q (code %d)", out, code)
+	}
+	enablePreDigestParent(t, dir)
+	out, code := run(t, "--data", dir, "inbox")
+	if code != 0 {
+		t.Fatalf("inbox exited %d: %s", code, out)
+	}
+	if strings.Contains(out, "PROJ-2") {
+		t.Errorf("moved-up child still in inbox: %q", out)
+	}
+	if !strings.Contains(out, "inbox clear") {
+		t.Errorf("inbox not clear after move-up: %q", out)
+	}
+}
+
+// Under pre-digest, status projects the moved-up child as Pending, off the Needs-me
+// tally; under passthrough it counts in Needs-me. drvctl-050 acceptance.
+func TestStatusProjectsMovedUpChildAsPending(t *testing.T) {
+	dir := seedParentChild(t)
+	if out, _ := run(t, "--data", dir, "status"); !strings.Contains(out, "Needs me: 1") {
+		t.Fatalf("passthrough status should count the child in Needs me: %q", out)
+	}
+	enablePreDigestParent(t, dir)
+	out, code := run(t, "--data", dir, "status")
+	if code != 0 {
+		t.Fatalf("status exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "Needs me: 0") {
+		t.Errorf("moved-up child still counted in Needs me: %q", out)
+	}
+	if strings.Contains(out, "[Needs me] PROJ-2") {
+		t.Errorf("moved-up child still listed under Needs me: %q", out)
+	}
+}
+
+// A --by resolution that does not actually unblock the child is self-correcting:
+// the child re-escalates on resume and re-projects as moved-up (still off the human
+// inbox while the pre-digest parent stands). drvctl-050 loop-closure acceptance.
+func TestResolveByReEscalationReProjects(t *testing.T) {
+	dir := seedParentChild(t)
+	enablePreDigestParent(t, dir)
+	// Parent unblocks escalation #2 with an answer that turns out insufficient.
+	if _, code := run(t, "--data", dir, "--actor", "agent:parent", "resolve", "PROJ-2", "2", "try /v1", "--by", "PROJ-1"); code != 0 {
+		t.Fatal("first --by resolve failed")
+	}
+	if out, _ := run(t, "--data", dir, "status"); !strings.Contains(out, "Needs me: 0") {
+		t.Fatalf("child should be unblocked after resolve: %q", out)
+	}
+	// The child resumes, finds the answer wrong, and re-escalates (new escalation).
+	if _, code := run(t, "--data", dir, "--actor", "agent:child", "escalate", "PROJ-2", "/v1 404s too"); code != ExitEscalated {
+		t.Fatal("re-escalate did not gate")
+	}
+	// It is Needs-me on its own log again, but the standing pre-digest parent moves it
+	// back up — still off the human inbox, re-projected correctly.
+	if a, _ := project.LoadAttempt(store.Root{Dir: dir}, "PROJ-2", "0001"); a.State != project.NeedsMe {
+		t.Errorf("child log state = %q want NeedsMe after re-escalation", a.State)
+	}
+	if out, _ := run(t, "--data", dir, "status"); !strings.Contains(out, "Needs me: 0") {
+		t.Errorf("re-escalated child not re-projected as moved-up: %q", out)
+	}
+	if out, _ := run(t, "--data", dir, "inbox"); strings.Contains(out, "PROJ-2") {
+		t.Errorf("re-escalated child leaked back into the human inbox: %q", out)
 	}
 }
 

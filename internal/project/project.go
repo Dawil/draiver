@@ -80,6 +80,14 @@ type Attempt struct {
 	// the card renders it only where it means something.
 	WaitingReason string
 
+	// EscalatedTo is the pre-digest parent this attempt's open escalation has moved
+	// up to (drvctl-050), filled by the presentation caller from DeriveEscalated.
+	// When set, BoardState projects a Needs-me child as Pending "escalated to <P>":
+	// the escalation leaves the human inbox and is carried by the parent instead. A
+	// runtime bit like Desired/Live/WaitingReason — empty on a log-only load and
+	// under passthrough, so the log tier is untouched and off the hash chain.
+	EscalatedTo string
+
 	// Metrics is the attempt's final prompt-caching tally, folded into attempt.md
 	// on retire (drvctl-031). Nil until an attempt retires with a metered session,
 	// so a card renders the cache panel only once there is something to show.
@@ -175,6 +183,30 @@ func Control(state State, desired, live bool) State {
 // Live bits (which a presentation caller fills via DeriveDesired and session.Alive)
 // into the log-derived State. See the package-level Control function.
 func (a Attempt) Control() State { return Control(a.State, a.Desired, a.Live) }
+
+// BoardState is the fully-projected board state: Control's desired/live fold plus
+// the pre-digest move-up (drvctl-050). A Needs-me child whose escalation has been
+// absorbed by an enabled pre-digest parent (EscalatedTo set, from DeriveEscalated)
+// projects as Pending — off the human inbox, attributed to the parent — while its
+// log and derived State stay Needs-me. Every other state passes through Control
+// unchanged; with EscalatedTo empty (passthrough, no qualifying wanter) BoardState
+// is exactly Control. Like Control, a deliberately read-time projection: nothing
+// is written, the hash chain stays clean.
+func (a Attempt) BoardState() State {
+	st := a.Control()
+	if st == NeedsMe && a.EscalatedTo != "" {
+		return Pending
+	}
+	return st
+}
+
+// EscalatedReason is the "escalated to <P>" line a board card shows for a child
+// whose escalation moved up to a pre-digest parent — the Pending WaitingReason for
+// a moved-up card, distinct from the forward-gate "waiting on X" reason. The parent
+// id is backticked so the board's Markdown render sets it as code.
+func EscalatedReason(parent string) string {
+	return "escalated to `" + parent + "`"
+}
 
 // DeriveEnabled reports whether an attempt has opted into daemon supervision.
 // Enablement is a separate axis from control state (State): a Running attempt is

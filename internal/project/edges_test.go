@@ -91,6 +91,93 @@ func TestDeriveDesired(t *testing.T) {
 	}
 }
 
+func TestDeriveEscalated(t *testing.T) {
+	att := func(ticket, id string, state State, enabled bool, sup Supervision) Attempt {
+		return Attempt{Ticket: ticket, ID: id, State: state, Enabled: enabled, Supervision: sup}
+	}
+	// CAP is an enabled pre-digest coordinator wanting SRC and INFRA; both children
+	// are Needs-me. PASS is an enabled coordinator but passthrough — its child PSRC
+	// (also Needs-me) must NOT move up. OFFCAP wants OSRC but is disabled. DORMANT
+	// wants DSRC but its own latest is Review (not a Running dormant shell to wake).
+	all := []Attempt{
+		att("CAP", "0001", Running, true, SupervisionPreDigest),
+		att("SRC", "0001", NeedsMe, false, SupervisionDefault),
+		att("INFRA", "0001", NeedsMe, false, SupervisionDefault),
+		att("PASS", "0001", Running, true, SupervisionPassthrough),
+		att("PSRC", "0001", NeedsMe, false, SupervisionDefault),
+		att("OFFCAP", "0001", Running, false, SupervisionPreDigest),
+		att("OSRC", "0001", NeedsMe, false, SupervisionDefault),
+		att("DORMANT", "0001", Review, true, SupervisionPreDigest),
+		att("DSRC", "0001", NeedsMe, false, SupervisionDefault),
+		att("RUNKID", "0001", Running, false, SupervisionDefault), // not escalating
+	}
+	edges := map[string]Edges{
+		"CAP":     {Wants: []string{"SRC", "INFRA"}},
+		"PASS":    {Wants: []string{"PSRC"}},
+		"OFFCAP":  {Wants: []string{"OSRC"}},
+		"DORMANT": {Wants: []string{"DSRC"}},
+	}
+	// Default passthrough: the fleet default does not matter here since every wanter
+	// carries an explicit override, but pass passthrough to prove the override wins.
+	got := DeriveEscalated(all, edges, SupervisionPassthrough)
+	want := map[Ref]string{
+		{"SRC", "0001"}:   "CAP",
+		{"INFRA", "0001"}: "CAP",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DeriveEscalated = %v\nwant %v", got, want)
+	}
+
+	// BoardState folds the move-up: a moved-up child projects Pending, a non-moved
+	// Needs-me child (passthrough) stays Needs-me.
+	moved := all[1]
+	moved.EscalatedTo = got[Ref{"SRC", "0001"}]
+	if s := moved.BoardState(); s != Pending {
+		t.Errorf("moved-up child BoardState = %q want Pending", s)
+	}
+	if r := EscalatedReason(moved.EscalatedTo); r != "escalated to `CAP`" {
+		t.Errorf("EscalatedReason = %q want %q", r, "escalated to `CAP`")
+	}
+	stuck := all[4] // PSRC, passthrough parent
+	stuck.EscalatedTo = got[Ref{"PSRC", "0001"}]
+	if s := stuck.BoardState(); s != NeedsMe {
+		t.Errorf("passthrough child BoardState = %q want Needs me", s)
+	}
+
+	// The fleet default drives an override-less wanter. Give CAP no explicit override
+	// and flip the default to pre-digest: the same children move up via the default.
+	capDefault := append([]Attempt{}, all...)
+	capDefault[0].Supervision = SupervisionDefault
+	if d := DeriveEscalated(capDefault, edges, SupervisionPreDigest); d[Ref{"SRC", "0001"}] != "CAP" {
+		t.Errorf("default pre-digest should move SRC up to CAP, got %v", d)
+	}
+	// …and under a passthrough default the same override-less coordinator moves nobody.
+	if d := DeriveEscalated(capDefault, edges, SupervisionPassthrough); len(d) != 0 {
+		t.Errorf("default passthrough should move nobody, got %v", d)
+	}
+}
+
+// TestDeriveEscalatedLexicalFirst pins the deterministic tie-break: a child wanted
+// by several qualifying pre-digest coordinators moves up to the lexically-first.
+func TestDeriveEscalatedLexicalFirst(t *testing.T) {
+	att := func(ticket string, state State, enabled bool) Attempt {
+		return Attempt{Ticket: ticket, ID: "0001", State: state, Enabled: enabled, Supervision: SupervisionPreDigest}
+	}
+	all := []Attempt{
+		att("ZED", Running, true),
+		att("ABLE", Running, true),
+		att("KID", NeedsMe, false),
+	}
+	edges := map[string]Edges{
+		"ZED":  {Wants: []string{"KID"}},
+		"ABLE": {Wants: []string{"KID"}},
+	}
+	got := DeriveEscalated(all, edges, SupervisionPassthrough)
+	if got[Ref{"KID", "0001"}] != "ABLE" {
+		t.Errorf("KID should move up to lexically-first ABLE, got %q", got[Ref{"KID", "0001"}])
+	}
+}
+
 func TestWaitingReason(t *testing.T) {
 	att := func(ticket, id string, state State) Attempt {
 		return Attempt{Ticket: ticket, ID: id, State: state}
