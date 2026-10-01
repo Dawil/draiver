@@ -102,6 +102,13 @@ type Config struct {
 	// prefix-sharing invariant). Empty (the default) appends nothing.
 	AppendSystemPromptFile string `json:"append_system_prompt_file"`
 
+	// BDDArtefactKeep caps how many captured BDD run artefact sets `draiver test`
+	// retains per (rung, environment) group — the GC knob keeping the per-attempt
+	// store from growing unbounded as runs regenerate side by side (drv-017).
+	// Retention is additive: on capture the oldest run dirs beyond the cap are
+	// pruned, newest kept. 0 (the default) keeps everything — no GC.
+	BDDArtefactKeep int `json:"bdd_artefact_keep"`
+
 	// Repos holds per-repo setting overrides keyed by the repo path — the same
 	// string an attempt records as its `repo`/provenance Repo (drv-011). Some knobs
 	// are properties of a repo, not a single attempt (which remote is the forge,
@@ -211,6 +218,7 @@ type file struct {
 	ExcludeDynamicSystemPromptSections *bool                `json:"exclude_dynamic_system_prompt_sections,omitempty"`
 	AppendSystemPromptFile             *string              `json:"append_system_prompt_file,omitempty"`
 	DefaultSupervision                 *string              `json:"default_supervision,omitempty"`
+	BDDArtefactKeep                    *int                 `json:"bdd_artefact_keep,omitempty"`
 	Repos                              map[string]*repoFile `json:"repos,omitempty"`
 }
 
@@ -294,6 +302,9 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.DefaultSupervision != nil {
 		c.DefaultSupervision = *f.DefaultSupervision
+	}
+	if f.BDDArtefactKeep != nil {
+		c.BDDArtefactKeep = *f.BDDArtefactKeep
 	}
 	if f.Repos != nil {
 		c.Repos = make(map[string]RepoSettings, len(f.Repos))

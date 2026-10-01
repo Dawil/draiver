@@ -3,18 +3,23 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/bddartefact"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/repo"
+	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -122,11 +127,22 @@ var testCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+
+		// If the target rung declares output artefacts (a BDD/acceptance rung), capture
+		// them into the attempt's artefacts/ store under a per-run key and reference the
+		// set from the test-result event, so the evidence is provenance-anchored and
+		// audit-covered (drv-017). An ordinary rung declares none and this is a no-op.
+		arts, runKey, err := captureBDDArtefacts(out, root, key, p.Levels[len(levels)-1], sha)
+		if err != nil {
+			return err
+		}
+
 		ev, _, err := appendEventAt(root, key.Ticket, key.Attempt, event.Event{
-			Type:   "test-result",
-			Rung:   target,
-			Commit: sha,
-			Body:   fmt.Sprintf("Rung `%s` green @ `%s`.", target, shortSHA(sha)),
+			Type:      "test-result",
+			Rung:      target,
+			Commit:    sha,
+			Artefacts: arts,
+			Body:      testResultBody(target, sha, runKey),
 		})
 		if err != nil {
 			return err
@@ -134,6 +150,73 @@ var testCmd = &cobra.Command{
 		fmt.Fprintf(out, "recorded test-result #%d on %s/%s (rung %q @ %s)\n", ev.Seq, key.Ticket, key.Attempt, target, shortSHA(sha))
 		return nil
 	},
+}
+
+// captureBDDArtefacts captures a BDD/acceptance rung's declared output evidence into
+// the attempt's artefacts/ store under a per-run key, enforces the configured
+// retention cap, and returns the artefacts-relative refs for the test-result event
+// plus the run key (empty when the rung declares no evidence — the ordinary case).
+//
+// The evidence is the rung's CucumberJSON report (drv-016's first-class field) plus
+// any additional Artifacts it declares (embeddings/screenshots dir, script-output
+// files). A rung is a capture rung if it declares either, so a BDD rung that only
+// sets cucumber_json still has its report stored. runRung already consumes the
+// report live for its summary; this captures it durably once the run is green.
+//
+// It is best-effort on context that later tickets fill in: the environment is read
+// as a bare label (drv-012 lifecycle pending) and the healthcheck verdict is left
+// blank until environments land.
+func captureBDDArtefacts(out io.Writer, root store.Root, key worktree.Key, target pyramid.Level, sha string) ([]string, string, error) {
+	cucumber := strings.TrimSpace(target.CucumberJSON)
+	if cucumber == "" && len(target.Artifacts) == 0 {
+		return nil, "", nil
+	}
+	// The cucumber-JSON leads the set (when declared), then the rung's extra outputs.
+	var sources []bddartefact.Source
+	if cucumber != "" {
+		sources = append(sources, bddartefact.Source{Path: cucumber})
+	}
+	for _, a := range target.Artifacts {
+		sources = append(sources, bddartefact.Source{Path: a})
+	}
+	rc := bddartefact.RunContext{
+		Rung:        target.Name,
+		Environment: target.Environment,
+		Commit:      sha,
+		Runstamp:    time.Now().UTC().Format("20060102T150405Z"),
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve working directory: %w", err)
+	}
+	artDir := root.ArtefactsDir(key.Ticket, key.Attempt)
+	runKey, refs, err := bddartefact.Capture(artDir, wd, rc, sources)
+	if err != nil {
+		return nil, "", fmt.Errorf("capture BDD artefacts: %w", err)
+	}
+	fmt.Fprintf(out, "captured %d BDD artefact(s) under %s\n", len(refs), runKey)
+
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, "", err
+	}
+	removed, err := bddartefact.Prune(artDir, rc.Rung, rc.Env(), cfg.BDDArtefactKeep)
+	if err != nil {
+		return nil, "", fmt.Errorf("prune BDD artefacts: %w", err)
+	}
+	if len(removed) > 0 {
+		fmt.Fprintf(out, "pruned %d old BDD run(s) (keep=%d)\n", len(removed), cfg.BDDArtefactKeep)
+	}
+	return refs, runKey, nil
+}
+
+// testResultBody renders the test-result event body, noting the captured run key
+// when a BDD rung produced artefacts.
+func testResultBody(target, sha, runKey string) string {
+	if runKey == "" {
+		return fmt.Sprintf("Rung `%s` green @ `%s`.", target, shortSHA(sha))
+	}
+	return fmt.Sprintf("Rung `%s` green @ `%s`. BDD artefacts captured under `%s`.", target, shortSHA(sha), runKey)
 }
 
 // runRung executes one rung in its environment, mapping each kind of failure to
