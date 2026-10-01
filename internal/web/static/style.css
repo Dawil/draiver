@@ -228,6 +228,18 @@ body {
 .action-git-push:hover, .action-git-sync:hover { border-color: var(--accent); color: var(--accent); }
 .git-result { font-size: 13px; margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
 
+/* BDD report embed (drv-018): the captured cucumber run rendered inline from the
+   artefact store, with a run selector and an open-standalone link. The report
+   itself lives inside a sandboxed iframe with its own styles. */
+.bdd-report { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.bdd-report-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; }
+.bdd-report-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+.bdd-run-select { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.bdd-run-select select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+.bdd-report-open { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; }
+.bdd-report-open:hover { text-decoration: underline; }
+.bdd-report-frame { width: 100%; height: 540px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+
 /* Provenance panel: a quiet editor for the repo/base a merge/sync gate on. It sits
    between the spec and the log; the callout only lights up on the merge-blocking
    case (a Review attempt with no base). */

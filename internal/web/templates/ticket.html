@@ -174,6 +174,36 @@
       </section>
       {{end}}
 
+      {{/* BDD report (drv-018): the latest captured run rendered inline from the
+           artefact store, with a selector among the side-by-side regenerations
+           drv-017 stores. The iframe loads the report by-reference (inline=0) so
+           its screenshots stream from the asset route rather than bloating this
+           page; "Open standalone" opens the self-contained file (every screenshot
+           inlined) that drv-019 will offer as a download. The iframe is sandboxed
+           to allow-scripts only (the report's own expand/collapse JS) with no
+           same-origin access, since it renders untrusted test output. Hidden until
+           a run has been captured for the attempt. */}}
+      {{if .Report.HasRuns}}
+      <section class="bdd-report" data-testid="bdd-report">
+        <div class="bdd-report-head">
+          <h2 class="bdd-report-title">BDD report</h2>
+          <label class="bdd-run-select">Run
+            <select data-testid="bdd-run-select" onchange="var o=this.selectedOptions[0];var f=document.getElementById('bdd-report-frame');if(f)f.src=o.value;var a=document.getElementById('bdd-report-open');if(a)a.href=o.dataset.standalone;">
+              {{range .Report.Groups}}
+              <optgroup label="{{.Label}}">
+                {{range .Runs}}<option value="{{.Src}}" data-standalone="{{.Standalone}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+              </optgroup>
+              {{end}}
+            </select>
+          </label>
+          <a id="bdd-report-open" class="bdd-report-open" data-testid="bdd-report-open"
+            href="{{.Report.StandaloneSrc}}" target="_blank" rel="noopener">Open standalone ↗</a>
+        </div>
+        <iframe id="bdd-report-frame" class="bdd-report-frame" data-testid="bdd-report-frame"
+          src="{{.Report.IframeSrc}}" sandbox="allow-scripts" title="BDD report" loading="lazy"></iframe>
+      </section>
+      {{end}}
+
       <div class="log-region" data-testid="log-region" data-order="newest"
         {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
         {{template "attempt-log" .}}

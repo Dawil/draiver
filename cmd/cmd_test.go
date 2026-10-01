@@ -64,6 +64,8 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	resolveByFlag = ""
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog = false
+	reportJSON, reportRun, reportOut = "", "", ""
+	reportInline, reportDemo = true, false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 	resetFlagsChanged(rootCmd)
 

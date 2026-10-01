@@ -1,0 +1,153 @@
+[
+  {
+    "uri": "features/standalone_report.feature",
+    "id": "standalone-cucumber-html-report",
+    "keyword": "Feature",
+    "name": "Standalone cucumber HTML report (drv-018)",
+    "description": "  Renders a captured run's cucumber-JSON + embeddings into a report a\n  human can digest at a glance: self-contained, industry-comparable, and\n  embedded in the webui. These scenarios mirror the ticket's acceptance\n  criteria so the generated report doubles as a visual spec of the feature.",
+    "tags": [
+      { "name": "@drv-018", "line": 1 },
+      { "name": "@report", "line": 1 }
+    ],
+    "elements": [
+      {
+        "id": "standalone-cucumber-html-report;self-contained",
+        "keyword": "Scenario",
+        "name": "A known cucumber-JSON + screenshot renders a self-contained file",
+        "type": "scenario",
+        "line": 8,
+        "tags": [{ "name": "@renderer", "line": 7 }],
+        "steps": [
+          {
+            "keyword": "Given ",
+            "name": "a cucumber-JSON run with an embedded screenshot",
+            "line": 9,
+            "result": { "status": "passed", "duration": 4200000 },
+            "match": { "location": "features/steps/render.rb:12" }
+          },
+          {
+            "keyword": "When ",
+            "name": "the renderer produces a standalone HTML report",
+            "line": 10,
+            "result": { "status": "passed", "duration": 18500000 },
+            "match": { "location": "features/steps/render.rb:21" }
+          },
+          {
+            "keyword": "Then ",
+            "name": "the file inlines CSS, JS and base64 images with no external references",
+            "line": 11,
+            "result": { "status": "passed", "duration": 2600000 },
+            "match": { "location": "features/steps/render.rb:34" },
+            "embeddings": [
+              {
+                "mime_type": "image/png",
+                "name": "report-card.png",
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAKAAAABkCAIAAACO1KzYAAAAuUlEQVR42u3RMQ0AMAgAQZR06IYGvNRtfaGChVzyCv7i/qfFhQWABViABViABViAAQuwAAuwAAuwAAMWYAEWYAEWYAEWYMACLMACLMACLMCABViABViABViAAQuwAAuwAAuwAAswYAEWYAHWIPDJ0uIAAxZgARZgARZgAQYswAIswAIswAIMWIAFWIAFWIAFWIABC7AAC7AAC7AAAxZgARZgARZgAQYswAIswAIswAIswIAFWIAFWIM1vYON+th/f5sAAAAASUVORK5CYII="
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "standalone-cucumber-html-report;offline",
+        "keyword": "Scenario",
+        "name": "The standalone file opens with images intact offline",
+        "type": "scenario",
+        "line": 14,
+        "tags": [{ "name": "@renderer", "line": 13 }],
+        "steps": [
+          {
+            "keyword": "Given ",
+            "name": "a generated standalone report file",
+            "line": 15,
+            "result": { "status": "passed", "duration": 1100000 },
+            "match": { "location": "features/steps/offline.rb:9" }
+          },
+          {
+            "keyword": "When ",
+            "name": "it is opened from the filesystem with no network",
+            "line": 16,
+            "result": { "status": "passed", "duration": 7300000 },
+            "match": { "location": "features/steps/offline.rb:17" }
+          },
+          {
+            "keyword": "Then ",
+            "name": "every screenshot renders from its inlined data URI",
+            "line": 17,
+            "result": { "status": "passed", "duration": 900000 },
+            "match": { "location": "features/steps/offline.rb:25" }
+          }
+        ]
+      },
+      {
+        "id": "standalone-cucumber-html-report;large-embeddings",
+        "keyword": "Scenario",
+        "name": "Large embeddings don't break the page",
+        "type": "scenario",
+        "line": 20,
+        "tags": [{ "name": "@webui", "line": 19 }],
+        "steps": [
+          {
+            "keyword": "Given ",
+            "name": "a run whose screenshots total several megabytes",
+            "line": 21,
+            "result": { "status": "passed", "duration": 5400000 },
+            "match": { "location": "features/steps/webui.rb:11" }
+          },
+          {
+            "keyword": "When ",
+            "name": "the inline webui view renders the report",
+            "line": 22,
+            "result": { "status": "passed", "duration": 9100000 },
+            "match": { "location": "features/steps/webui.rb:18" },
+            "embeddings": [
+              {
+                "mime_type": "text/plain",
+                "name": "render-note.txt",
+                "data": "SW5saW5lIHZpZXcgcmVzb2x2ZXMgaGVhdnkgZW1iZWRkaW5ncyBieSByZWZlcmVuY2UgKGlubGluZT0wKSBzbyB0aGV5IHN0cmVhbSBmcm9tIHRoZSAvcmVwb3J0L2Fzc2V0IHJvdXRlIGluc3RlYWQgb2YgYmxvYXRpbmcgdGhlIGF0dGVtcHQgcGFnZS4="
+              }
+            ]
+          },
+          {
+            "keyword": "Then ",
+            "name": "heavy embeddings are served by reference, not inlined into the attempt page",
+            "line": 23,
+            "result": { "status": "passed", "duration": 1300000 },
+            "match": { "location": "features/steps/webui.rb:27" }
+          }
+        ]
+      },
+      {
+        "id": "standalone-cucumber-html-report;embed-select",
+        "keyword": "Scenario",
+        "name": "The report embeds on the attempt page, selecting among runs",
+        "type": "scenario",
+        "line": 26,
+        "tags": [{ "name": "@webui", "line": 25 }],
+        "steps": [
+          {
+            "keyword": "Given ",
+            "name": "several side-by-side regenerations of a scenario are captured",
+            "line": 27,
+            "result": { "status": "passed", "duration": 3800000 },
+            "match": { "location": "features/steps/webui.rb:40" }
+          },
+          {
+            "keyword": "When ",
+            "name": "the human opens the attempt page",
+            "line": 28,
+            "result": { "status": "passed", "duration": 6200000 },
+            "match": { "location": "features/steps/webui.rb:48" }
+          },
+          {
+            "keyword": "Then ",
+            "name": "the latest run renders inline with a selector among the regenerations",
+            "line": 29,
+            "result": { "status": "passed", "duration": 1500000 },
+            "match": { "location": "features/steps/webui.rb:55" }
+          }
+        ]
+      }
+    ]
+  }
+]
