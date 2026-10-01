@@ -212,7 +212,17 @@ func scaffoldSpec(id, title string) []byte {
 	b.WriteString("---\n\n")
 	fmt.Fprintf(&b, "# %s\n\n", title)
 	b.WriteString("<!-- Frontloaded design goes here. This file is the immutable input,\n")
-	b.WriteString("     shared by every attempt; everything mutable lives in the log. -->\n")
+	b.WriteString("     shared by every attempt; everything mutable lives in the log. -->\n\n")
+	// The `## Acceptance criteria` section is a light convention (drv-015), not a
+	// schema: plain-text statements of done authored by whoever writes the ticket
+	// (human or agent). It is ordinary spec prose, so `brief` surfaces it for free;
+	// the attempt's agent translates it into Gherkin features + steps in the code
+	// repo. See docs/acceptance-criteria.md.
+	b.WriteString("## Acceptance criteria\n\n")
+	b.WriteString("<!-- Plain-text statements of done — the human's authority/intent, e.g.\n")
+	b.WriteString("     \"user can log in and click through to the dashboard\". The attempt's\n")
+	b.WriteString("     agent translates these into Gherkin .feature files + steps in the code\n")
+	b.WriteString("     repo. See docs/acceptance-criteria.md. -->\n")
 	return []byte(b.String())
 }
 
