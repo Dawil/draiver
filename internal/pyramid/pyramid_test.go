@@ -194,6 +194,35 @@ func TestLoad_ValidEnvironments(t *testing.T) {
 	}
 }
 
+// A level's cucumber_json field (the BDD-rung convention, drv-016) parses, and is
+// blank on a plain rung.
+func TestLoad_CucumberJSONField(t *testing.T) {
+	body := `
+environments:
+  - name: staging
+    healthchecks:
+      - name: up
+        script: "true"
+levels:
+  - name: unit
+    run: go test ./...
+  - name: acceptance
+    run: godog run -f cucumber > report.json
+    cucumber_json: report.json
+    environment: staging
+`
+	p, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("valid BDD ladder should parse: %v", err)
+	}
+	if p.Levels[0].CucumberJSON != "" {
+		t.Errorf("plain rung should carry no cucumber_json, got %q", p.Levels[0].CucumberJSON)
+	}
+	if got := p.Levels[1].CucumberJSON; got != "report.json" {
+		t.Errorf("BDD rung cucumber_json = %q, want report.json", got)
+	}
+}
+
 func TestEnvironmentFor(t *testing.T) {
 	p, err := Load(writePyramid(t, validEnvLadder))
 	if err != nil {

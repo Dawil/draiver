@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/repo"
@@ -181,10 +183,43 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 	}
 
 	fmt.Fprintf(out, "== %s: %s\n", lv.Name, lv.Run)
-	if err := runShell(ctx, cmd, wd, lv.Run); err != nil {
-		return fmt.Errorf("rung %q not green: %w", lv.Name, err)
+	runErr := runShell(ctx, cmd, wd, lv.Run)
+
+	// A BDD/acceptance rung (drv-016) declares the cucumber-JSON its runner writes.
+	// Capture it whether the run passed or failed — a red run's report is exactly
+	// what drv-018 renders to show which scenarios broke — but never let capture
+	// change the rung's verdict (best-effort, like `down`): the run's exit code
+	// stays authoritative.
+	if cj := strings.TrimSpace(lv.CucumberJSON); cj != "" {
+		captureCucumber(cmd, wd, lv.Name, cj)
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("rung %q not green: %w", lv.Name, runErr)
 	}
 	return nil
+}
+
+// captureCucumber reads, parses, and summarises the cucumber-JSON a BDD rung's run
+// emitted at rel (relative to wd), printing a one-line summary — draiver consuming
+// the runner-agnostic interchange, not the tool. It is best-effort: a missing or
+// invalid report is a warning that never changes the rung's verdict, so a green run
+// whose runner forgot to write the report still passes (loudly). Durable storage of
+// the report/embeddings is drv-017's concern; this only proves the JSON is present
+// and consumable and surfaces what it contains.
+func captureCucumber(cmd *cobra.Command, wd, rung, rel string) {
+	path := filepath.Join(wd, rel)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: rung %q cucumber-JSON %q not captured (ignored): %v\n", rung, rel, err)
+		return
+	}
+	rep, err := cucumber.Parse(data)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: rung %q cucumber-JSON %q not valid (ignored): %v\n", rung, rel, err)
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "== %s: captured cucumber-JSON %s — %s\n", rung, rel, rep.Summary())
 }
 
 // runShell runs one shell command in wd, wiring its stdio to the cobra command's
