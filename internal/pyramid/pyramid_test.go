@@ -148,6 +148,180 @@ levels:
 	}
 }
 
+const validEnvLadder = `
+environments:
+  - name: local
+    healthchecks:
+      - name: postgres-up
+        script: pg_isready -h localhost
+  - name: staging
+    up:   docker compose -f staging.yml up -d
+    down: docker compose -f staging.yml down -v
+    healthchecks:
+      - name: api-reachable
+        script: curl -fsS https://staging.example.com/healthz
+
+levels:
+  - name: unit
+    run: go test ./...
+  - name: integration
+    run: go test -tags=integration ./...
+    environment: local
+  - name: e2e
+    run: go test -tags=e2e ./...
+    environment: staging
+`
+
+func TestLoad_ValidEnvironments(t *testing.T) {
+	p, err := Load(writePyramid(t, validEnvLadder))
+	if err != nil {
+		t.Fatalf("valid env ladder should load: %v", err)
+	}
+	if len(p.Environments) != 2 {
+		t.Fatalf("got %d environments, want 2", len(p.Environments))
+	}
+	// staging carries up/down and one healthcheck.
+	staging := p.Environments[1]
+	if staging.Name != "staging" || staging.Up == "" || staging.Down == "" {
+		t.Errorf("staging env not parsed: %+v", staging)
+	}
+	if len(staging.Healthchecks) != 1 || staging.Healthchecks[0].Name != "api-reachable" {
+		t.Errorf("staging healthchecks not parsed: %+v", staging.Healthchecks)
+	}
+	// local may omit up/down.
+	if local := p.Environments[0]; local.Up != "" || local.Down != "" {
+		t.Errorf("local env should have no up/down: %+v", local)
+	}
+}
+
+func TestEnvironmentFor(t *testing.T) {
+	p, err := Load(writePyramid(t, validEnvLadder))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	byName := map[string]Level{}
+	for _, lv := range p.Levels {
+		byName[lv.Name] = lv
+	}
+
+	// An unbound level (unit) resolves to the ambient context: ok is false.
+	if env, ok := p.EnvironmentFor(byName["unit"]); ok {
+		t.Errorf("unit binds no environment, got %+v", env)
+	}
+	// A bound level resolves to its named environment.
+	if env, ok := p.EnvironmentFor(byName["integration"]); !ok || env.Name != "local" {
+		t.Errorf("integration should resolve to local, got %+v ok=%v", env, ok)
+	}
+	if env, ok := p.EnvironmentFor(byName["e2e"]); !ok || env.Name != "staging" {
+		t.Errorf("e2e should resolve to staging, got %+v ok=%v", env, ok)
+	}
+	// A hand-built level naming nothing-declared resolves to (nil, false).
+	if env, ok := p.EnvironmentFor(Level{Name: "x", Environment: "ghost"}); ok {
+		t.Errorf("unknown env name must not resolve, got %+v", env)
+	}
+}
+
+func TestLoad_InvalidEnvironments(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantSub string
+	}{
+		{
+			name: "level names an undeclared environment",
+			body: `
+levels:
+  - name: unit
+    run: go test ./...
+    environment: nope
+`,
+			wantSub: `environment "nope" is not declared`,
+		},
+		{
+			name: "duplicate environment names",
+			body: `
+environments:
+  - name: local
+    healthchecks: []
+  - name: local
+    healthchecks: []
+levels:
+  - name: unit
+    run: go test ./...
+`,
+			wantSub: "duplicate name",
+		},
+		{
+			name: "blank environment name",
+			body: `
+environments:
+  - name: "  "
+    healthchecks: []
+levels:
+  - name: unit
+    run: go test ./...
+`,
+			wantSub: "environment 0: name is blank",
+		},
+		{
+			name: "blank healthcheck name",
+			body: `
+environments:
+  - name: local
+    healthchecks:
+      - name: "  "
+        script: pg_isready
+levels:
+  - name: unit
+    run: go test ./...
+`,
+			wantSub: "name is blank",
+		},
+		{
+			name: "blank healthcheck script",
+			body: `
+environments:
+  - name: local
+    healthchecks:
+      - name: db
+        script: "  "
+levels:
+  - name: unit
+    run: go test ./...
+`,
+			wantSub: "script is blank",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Load(writePyramid(t, tc.body))
+			if err == nil {
+				t.Fatalf("invalid env file should error, got %+v", p)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q does not mention %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+// An empty environments list, and a healthchecks list left empty, are both valid:
+// backward compatibility and "an env may need no probes" respectively.
+func TestLoad_EmptyEnvironmentsIsValid(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    healthchecks: []
+levels:
+  - name: unit
+    run: go test ./...
+    environment: local
+`
+	if _, err := Load(writePyramid(t, body)); err != nil {
+		t.Fatalf("an env with no healthchecks should be valid: %v", err)
+	}
+}
+
 // threeRung is a bottom-to-top ladder used by the fold tests; "e2e" is the target.
 var threeRung = &Pyramid{Levels: []Level{
 	{Name: "unit", Run: "x"},

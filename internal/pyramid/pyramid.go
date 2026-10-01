@@ -28,22 +28,84 @@ import (
 const FileName = ".test-pyramid.yaml"
 
 // Level is one rung of the pyramid: a named verification step and the shell
-// command that runs it. v1 is deliberately minimal — a level's own Run does any
-// env bring-up and teardown, so there is no up/down/healthcheck/timeout yet. Those
-// can be added as new fields without a schema break because Load ignores unknown
-// keys (see Load).
+// command that runs it. A level says *what the code is* (its Run); *where it runs*
+// is factored out into a named Environment (drv-012), which a level references by
+// name via Environment — unset means the implicit ambient context (today's
+// behaviour), so existing files keep working.
 type Level struct {
 	// Name is a unique, non-blank identifier for the rung (e.g. "unit").
 	Name string `yaml:"name"`
 	// Run is the shell command that executes the rung. Non-blank.
 	Run string `yaml:"run"`
+	// Environment optionally names one entry in the pyramid's Environments list —
+	// the context this rung executes in (local / staging / QA …). Blank is the
+	// implicit ambient context: no up/down/healthcheck, run as today. A non-blank
+	// name that resolves to no environment is a validation error (see validate).
+	Environment string `yaml:"environment"`
+}
+
+// Healthcheck is one readiness probe of an Environment: a named shell command that
+// must exit zero before a rung's Run executes. It probes a dependency draiver does
+// NOT own (a sibling's deployed infra, a staging URL) — so a red probe is a
+// dependency-not-ready *block*, not a code fault (see the control-outcome mapping
+// in cmd/test.go). An environment may carry zero or more.
+type Healthcheck struct {
+	// Name is a non-blank label for the probe (e.g. "postgres-up"), used in output.
+	Name string `yaml:"name"`
+	// Script is the non-blank shell command whose exit code is the probe verdict.
+	Script string `yaml:"script"`
+}
+
+// Environment is a named, reusable context a rung executes in: how to bring it Up,
+// tear it Down, and probe whether its dependencies are ready (Healthchecks). It
+// draws the same own-it-vs-observe-it line the forge coupling does — Up/Down are an
+// env draiver *owns* (its ExecStartPre/ExecStopPost), Healthchecks observe an env
+// it does *not*. Up and Down are optional (a local env may need neither);
+// Healthchecks may be empty.
+type Environment struct {
+	// Name is a unique, non-blank identifier a Level references via Environment.
+	Name string `yaml:"name"`
+	// Up optionally brings the environment up before a rung runs. Like a Level's Run,
+	// it is a shell command *string* executed via `sh -c` (not a path draiver points
+	// at); inline the command, or `sh -c` a script file yourself. A non-zero exit is
+	// an infrastructure fault (the harness, not the agent's code) → escalate.
+	Up string `yaml:"up"`
+	// Down optionally tears the environment down after a rung. Like Up and a Level's
+	// Run, it is a shell command string executed via `sh -c`. It runs unconditionally
+	// (pass or fail) and best-effort: a failure never changes a rung's verdict.
+	Down string `yaml:"down"`
+	// Healthchecks are the readiness probes run after Up and before the rung's Run;
+	// a red probe blocks the rung (dependency not ready), it is not a code fault.
+	Healthchecks []Healthcheck `yaml:"healthchecks"`
 }
 
 // Pyramid is a repo's parsed, validated test-pyramid declaration. Levels is an
 // ordered list, bottom-to-top: the list order IS the pyramid, so the last entry is
-// the target (top) rung.
+// the target (top) rung. Environments is an unordered, by-name set of the contexts
+// levels can reference; it is a sibling of Levels, not nested under one, precisely
+// so one staging/QA context defined once can be shared by several rungs.
 type Pyramid struct {
-	Levels []Level `yaml:"levels"`
+	Levels       []Level       `yaml:"levels"`
+	Environments []Environment `yaml:"environments"`
+}
+
+// EnvironmentFor resolves the Environment a level targets. ok is false when the
+// level binds no environment (the ambient context) — the common case. For a
+// Pyramid returned by Load/Parse, a level whose Environment is non-blank always
+// resolves (validate guarantees it), so ok is false there only for the unset case;
+// a non-blank name that matches nothing still returns (nil, false) defensively, for
+// callers holding a hand-built, unvalidated Pyramid.
+func (p *Pyramid) EnvironmentFor(lv Level) (*Environment, bool) {
+	want := strings.TrimSpace(lv.Environment)
+	if want == "" {
+		return nil, false
+	}
+	for i := range p.Environments {
+		if strings.TrimSpace(p.Environments[i].Name) == want {
+			return &p.Environments[i], true
+		}
+	}
+	return nil, false
 }
 
 // Target returns the top (last) rung — the target the pyramid climbs toward. It is
@@ -163,13 +225,38 @@ func Parse(data []byte) (*Pyramid, error) {
 	return &p, nil
 }
 
-// validate enforces the v1 invariants: at least one level, every name unique and
-// non-blank, every run non-blank. Blank means empty-after-trim, so a name or run of
+// validate enforces the invariants: at least one level, every level name unique and
+// non-blank, every run non-blank; every environment name unique and non-blank, each
+// healthcheck's name and script non-blank; and every level's environment (when set)
+// resolves to a declared environment. Blank means empty-after-trim, so a field of
 // only whitespace is rejected as the typo it almost certainly is.
 func (p *Pyramid) validate() error {
 	if len(p.Levels) == 0 {
 		return errors.New("levels is empty: a pyramid needs at least one level")
 	}
+
+	// Environments first, so a level's environment can be resolved against a known
+	// name set below.
+	envs := make(map[string]bool, len(p.Environments))
+	for i, env := range p.Environments {
+		name := strings.TrimSpace(env.Name)
+		if name == "" {
+			return fmt.Errorf("environment %d: name is blank", i)
+		}
+		if envs[name] {
+			return fmt.Errorf("environment %d: duplicate name %q", i, name)
+		}
+		envs[name] = true
+		for j, hc := range env.Healthchecks {
+			if strings.TrimSpace(hc.Name) == "" {
+				return fmt.Errorf("environment %q healthcheck %d: name is blank", name, j)
+			}
+			if strings.TrimSpace(hc.Script) == "" {
+				return fmt.Errorf("environment %q healthcheck %q: script is blank", name, strings.TrimSpace(hc.Name))
+			}
+		}
+	}
+
 	seen := make(map[string]bool, len(p.Levels))
 	for i, lv := range p.Levels {
 		name := strings.TrimSpace(lv.Name)
@@ -183,6 +270,22 @@ func (p *Pyramid) validate() error {
 		if strings.TrimSpace(lv.Run) == "" {
 			return fmt.Errorf("level %d (%q): run is blank", i, name)
 		}
+		if env := strings.TrimSpace(lv.Environment); env != "" && !envs[env] {
+			return fmt.Errorf("level %q: environment %q is not declared (environments: %s)", name, env, envNames(p))
+		}
 	}
 	return nil
+}
+
+// envNames lists the declared environment names, for an error that names what the
+// level could have referenced. It returns "none" when no environments are declared.
+func envNames(p *Pyramid) string {
+	if len(p.Environments) == 0 {
+		return "none"
+	}
+	names := make([]string, len(p.Environments))
+	for i, env := range p.Environments {
+		names[i] = env.Name
+	}
+	return strings.Join(names, ", ")
 }

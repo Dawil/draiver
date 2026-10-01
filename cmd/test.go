@@ -91,17 +91,13 @@ var testCmd = &cobra.Command{
 		}
 
 		// Climb base→target, streaming each rung's output, stopping at the first that
-		// is not green. A failing rung returns a plain error (exit 1) and — crucially —
-		// logs nothing, so the log holds only passing results by construction.
+		// is not green. Each rung runs in its environment (if it names one): up →
+		// healthchecks → run → (always) down. A failing rung logs nothing — the log
+		// holds only passing results by construction — and each failure maps to its
+		// control outcome (infra→escalate, dependency→block, code→fault) via runRung.
 		for _, lv := range levels {
-			fmt.Fprintf(out, "== %s: %s\n", lv.Name, lv.Run)
-			rc := exec.CommandContext(ctx, "sh", "-c", lv.Run)
-			rc.Dir = wd
-			rc.Stdout = cmd.OutOrStdout()
-			rc.Stderr = cmd.ErrOrStderr()
-			rc.Stdin = os.Stdin
-			if err := rc.Run(); err != nil {
-				return fmt.Errorf("rung %q not green: %w", lv.Name, err)
+			if err := runRung(ctx, cmd, wd, p, lv); err != nil {
+				return err
 			}
 		}
 		fmt.Fprintf(out, "all green through %q\n", target)
@@ -136,6 +132,71 @@ var testCmd = &cobra.Command{
 		fmt.Fprintf(out, "recorded test-result #%d on %s/%s (rung %q @ %s)\n", ev.Seq, key.Ticket, key.Attempt, target, shortSHA(sha))
 		return nil
 	},
+}
+
+// runRung executes one rung in its environment, mapping each kind of failure to
+// its control outcome (drv-012). Order: env `up` → the env's healthchecks → the
+// level's `run`, with the env's `down` always run afterwards if the env was
+// entered. A rung with no environment is just its `run`, exactly as before.
+//
+//   - `up` non-zero → the harness could not stand the env up: an infrastructure
+//     fault, not the agent's code → ExitEnvUp (escalate).
+//   - a red healthcheck → a dependency the env only observes isn't ready → a block,
+//     not a code fault → ExitBlocked (the pass-the-ball signal).
+//   - `run` non-zero → the code is wrong at this rung → exit 1 (a plain error).
+//
+// `down` runs unconditionally once `up` has been attempted (the env may be partly
+// up even when `up` failed) and is best-effort: a non-zero `down` is a warning and
+// never changes the rung's verdict, so teardown trouble can never un-close a
+// ticket.
+func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, lv pyramid.Level) error {
+	out := cmd.OutOrStdout()
+	env, hasEnv := p.EnvironmentFor(lv)
+
+	if hasEnv && strings.TrimSpace(env.Down) != "" {
+		// Guaranteed teardown: scheduled before `up` runs so a failed/partial `up`
+		// still gets torn down. Best-effort — a `down` failure is only warned about.
+		defer func() {
+			fmt.Fprintf(out, "== %s/%s: down: %s\n", lv.Name, env.Name, env.Down)
+			if err := runShell(ctx, cmd, wd, env.Down); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: environment %q down failed (ignored): %v\n", env.Name, err)
+			}
+		}()
+	}
+
+	if hasEnv && strings.TrimSpace(env.Up) != "" {
+		fmt.Fprintf(out, "== %s/%s: up: %s\n", lv.Name, env.Name, env.Up)
+		if err := runShell(ctx, cmd, wd, env.Up); err != nil {
+			return &exitError{code: ExitEnvUp, msg: fmt.Sprintf("environment %q up failed — infrastructure fault, not your code; escalate: %v", env.Name, err)}
+		}
+	}
+
+	if hasEnv {
+		for _, hc := range env.Healthchecks {
+			fmt.Fprintf(out, "== %s/%s: healthcheck %s: %s\n", lv.Name, env.Name, hc.Name, hc.Script)
+			if err := runShell(ctx, cmd, wd, hc.Script); err != nil {
+				return &exitError{code: ExitBlocked, msg: fmt.Sprintf("environment %q healthcheck %q red — dependency not ready (blocked, not a code fault): %v", env.Name, hc.Name, err)}
+			}
+		}
+	}
+
+	fmt.Fprintf(out, "== %s: %s\n", lv.Name, lv.Run)
+	if err := runShell(ctx, cmd, wd, lv.Run); err != nil {
+		return fmt.Errorf("rung %q not green: %w", lv.Name, err)
+	}
+	return nil
+}
+
+// runShell runs one shell command in wd, wiring its stdio to the cobra command's
+// streams — the single exec seam every rung step (up/healthcheck/run/down) goes
+// through, so output ordering and interpretation are identical across them.
+func runShell(ctx context.Context, cmd *cobra.Command, wd, script string) error {
+	rc := exec.CommandContext(ctx, "sh", "-c", script)
+	rc.Dir = wd
+	rc.Stdout = cmd.OutOrStdout()
+	rc.Stderr = cmd.ErrOrStderr()
+	rc.Stdin = os.Stdin
+	return rc.Run()
 }
 
 // repoRungForWorktree resolves the repo's configured default_test_rung (drv-011)

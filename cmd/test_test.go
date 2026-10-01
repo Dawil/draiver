@@ -55,6 +55,163 @@ func pyramidCheckout(t *testing.T, ticket, attempt string, commit bool, rungs []
 	return dir
 }
 
+// pyramidCheckoutYAML is pyramidCheckout's sibling for tests that need the richer
+// environments schema: it writes body verbatim as the checkout's .test-pyramid.yaml
+// (committed when commit is true) on the attempt branch and chdirs into it.
+func pyramidCheckoutYAML(t *testing.T, ticket, attempt string, commit bool, body string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	gitInDir(t, dir, "init", "-q", "-b", "main")
+	gitInDir(t, dir, "commit", "-q", "--allow-empty", "-m", "init")
+	gitInDir(t, dir, "checkout", "-q", "-b", "draiver/"+ticket+"/"+attempt)
+	if err := os.WriteFile(filepath.Join(dir, ".test-pyramid.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if commit {
+		gitInDir(t, dir, "add", ".test-pyramid.yaml")
+		gitInDir(t, dir, "commit", "-q", "-m", "add pyramid")
+	}
+	t.Chdir(dir)
+	return dir
+}
+
+// A rung with an environment runs up → healthchecks → run → down, in that order,
+// and down runs after the rung's run. Each step echoes a marker so the output
+// ordering is observable.
+func TestEnvRunsUpHealthcheckRunDownInOrder(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    up: echo MARK_UP
+    down: echo MARK_DOWN
+    healthchecks:
+      - name: ready
+        script: echo MARK_HC
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("all-green env rung exited %d: %s", code, out)
+	}
+	order := []string{"MARK_UP", "MARK_HC", "MARK_RUN", "MARK_DOWN"}
+	last := -1
+	for _, m := range order {
+		i := strings.Index(out, m)
+		if i < 0 {
+			t.Fatalf("missing %q in output:\n%s", m, out)
+		}
+		if i < last {
+			t.Errorf("step %q out of order in output:\n%s", m, out)
+		}
+		last = i
+	}
+}
+
+// A failing env `up` is an infrastructure fault: exit ExitEnvUp, the rung's run is
+// never reached, and down still runs (best-effort teardown of a partial up).
+func TestEnvUpFailureEscalates(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    up: "false"
+    down: echo MARK_DOWN
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != ExitEnvUp {
+		t.Fatalf("up failure should exit %d, got %d: %s", ExitEnvUp, code, out)
+	}
+	if strings.Contains(out, "MARK_RUN") {
+		t.Errorf("run must not execute after a failed up: %s", out)
+	}
+	if !strings.Contains(out, "MARK_DOWN") {
+		t.Errorf("down must run even after a failed up: %s", out)
+	}
+}
+
+// A red healthcheck is a dependency-not-ready block: exit ExitBlocked, run never
+// executes, down still runs.
+func TestEnvHealthcheckRedBlocks(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    down: echo MARK_DOWN
+    healthchecks:
+      - name: dep
+        script: "false"
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != ExitBlocked {
+		t.Fatalf("red healthcheck should exit %d, got %d: %s", ExitBlocked, code, out)
+	}
+	if strings.Contains(out, "MARK_RUN") {
+		t.Errorf("run must not execute after a red healthcheck: %s", out)
+	}
+	if !strings.Contains(out, "MARK_DOWN") {
+		t.Errorf("down must run after a red healthcheck: %s", out)
+	}
+}
+
+// A failing `run` inside an environment is a code fault: plain exit 1 (not an env
+// exit code), and down still runs.
+func TestEnvRunFailureIsCodeFault(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    down: echo MARK_DOWN
+levels:
+  - name: unit
+    run: "false"
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 1 {
+		t.Fatalf("a failing run should be a code fault (exit 1), got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "MARK_DOWN") {
+		t.Errorf("down must run after a failing run: %s", out)
+	}
+}
+
+// A failing `down` is best-effort: it never changes the rung's verdict, so an
+// otherwise-green rung still exits 0 and a warning is surfaced.
+func TestEnvDownFailureIsBestEffort(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    down: "false"
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("a failing down must not change a green verdict, got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "warning") || !strings.Contains(out, "down failed") {
+		t.Errorf("a failing down should surface a warning: %s", out)
+	}
+}
+
 // A repo with no .test-pyramid.yaml has nothing to run: exit 0 with a clear note.
 func TestBareNoPyramidIsClean(t *testing.T) {
 	t.Chdir(t.TempDir())
@@ -123,7 +280,7 @@ func TestUnknownRungRejected(t *testing.T) {
 
 // --log refuses a dirty tree up front and records nothing.
 func TestLogRefusesDirtyTree(t *testing.T) {
-	dir := newTicket(t) // store root with PROJ-1/0001
+	dir := newTicket(t)                                                        // store root with PROJ-1/0001
 	pyramidCheckout(t, "PROJ-1", "0001", false, [][2]string{{"unit", "true"}}) // uncommitted pyramid → dirty
 	out, code := run(t, "--data", dir, "test", "--log")
 	if code == 0 {
