@@ -155,8 +155,8 @@ environments:
       - name: postgres-up
         script: pg_isready -h localhost
   - name: staging
-    up:   ./scripts/staging-up.sh
-    down: ./scripts/staging-down.sh
+    up:   docker compose -f staging.yml up -d
+    down: docker compose -f staging.yml down -v
     healthchecks:
       - name: api-reachable
         script: curl -fsS https://staging.example.com/healthz

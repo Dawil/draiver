@@ -121,8 +121,11 @@ environments:
       - name: postgres-up
         script: pg_isready -h localhost
   - name: staging
-    up:   ./scripts/staging-up.sh       # optional
-    down: ./scripts/staging-down.sh     # optional
+    # up/down are script strings, executed via `sh -c` exactly like a level's
+    # `run:` — not a path draiver points at. Inline the command (or `sh -c` a
+    # file yourself if you keep one).
+    up:   docker compose -f staging.yml up -d      # optional
+    down: docker compose -f staging.yml down -v    # optional
     healthchecks:
       - name: api-reachable
         script: curl -fsS https://staging.example.com/healthz

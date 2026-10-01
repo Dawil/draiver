@@ -65,12 +65,14 @@ type Healthcheck struct {
 type Environment struct {
 	// Name is a unique, non-blank identifier a Level references via Environment.
 	Name string `yaml:"name"`
-	// Up optionally brings the environment up before a rung runs. A non-zero exit is
+	// Up optionally brings the environment up before a rung runs. Like a Level's Run,
+	// it is a shell command *string* executed via `sh -c` (not a path draiver points
+	// at); inline the command, or `sh -c` a script file yourself. A non-zero exit is
 	// an infrastructure fault (the harness, not the agent's code) → escalate.
 	Up string `yaml:"up"`
-	// Down optionally tears the environment down after a rung. It runs
-	// unconditionally (pass or fail) and best-effort: a failure never changes a
-	// rung's verdict.
+	// Down optionally tears the environment down after a rung. Like Up and a Level's
+	// Run, it is a shell command string executed via `sh -c`. It runs unconditionally
+	// (pass or fail) and best-effort: a failure never changes a rung's verdict.
 	Down string `yaml:"down"`
 	// Healthchecks are the readiness probes run after Up and before the rung's Run;
 	// a red probe blocks the rung (dependency not ready), it is not a code fault.
