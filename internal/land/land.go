@@ -238,55 +238,138 @@ func FormatPushReport(ticket, att string, res PushResult) []string {
 	return lines
 }
 
-// SyncResult reports a successful back-merge of the base into the attempt branch:
-// the worktree outcome and, when a merge commit actually landed, the durable
-// `note` recording it (Recorded is false, and Note zero, when the branch was
-// already up to date — nothing to pull in, nothing to record).
+// SyncResult reports a sync: the optional refresh of the local base from its
+// remote (Refreshed is false when the repo has no remote — a purely local
+// back-merge) and the additive back-merge of the base into the attempt branch,
+// plus the durable `note` recording whatever moved. Recorded is false, and Note
+// zero, when nothing changed in either direction — already current both ways.
 type SyncResult struct {
-	Synced   worktree.Synced
-	Note     event.Event
-	Recorded bool
+	Refreshed bool             // a remote was configured and a pull of the base was attempted
+	Fetched   worktree.Fetched // the fetched remote base (zero value when !Refreshed or the fetch failed)
+	Pull      worktree.Pulled  // the local-base fast-forward outcome (zero value when !Refreshed)
+	Synced    worktree.Synced  // the base → branch back-merge outcome
+	Note      event.Event
+	Recorded  bool
 }
 
-// Sync back-merges ticket/att's recorded base into its per-attempt branch
-// additively (internal/worktree's Sync — existing SHAs preserved, at most one
-// merge commit on top) and, when that produced a merge commit, records a `note` so
-// a resume sees the tip moved and why. An already-up-to-date branch records
-// nothing. It is the shared write path behind both `ctl sync` and the webui's Sync
-// button. The sync op's failure (a dirty checkout, a conflict) is returned bare so
-// the CLI can apply its escalate/no-escalate disposition; a resolution or
-// post-sync bookkeeping error is wrapped in *PlainError.
-func Sync(ctx context.Context, gw *repo.Repo, ticket, att string) (SyncResult, error) {
+// Sync brings trunk down from the remote in the two directions drv-013's Sync
+// control means — exactly the spec's "pull the remote's default branch into the
+// local default branch (back-merge trunk into the working tree)":
+//
+//   - (a) it refreshes the local base from its default remote — Fetch (read-only)
+//     then a best-effort fast-forward of the local base toward the remote tip, so
+//     an external PR merge shows up as the local base moving forward rather than
+//     the old, misleading "already up to date".
+//   - (b) it additively back-merges that now-current base into ticket/att's
+//     per-attempt branch (internal/worktree's Sync — existing SHAs preserved, at
+//     most one merge commit on top), so a resume continues on the updated tip and
+//     the branch is ff-landable.
+//
+// Step (a) is best-effort and never fatal: a repo with no remote skips it (an
+// offline back-merge, unchanged from the original behaviour), and a fetch or
+// local-ff problem is folded into the pull's Skipped reason — the base is still
+// back-merged from whatever the local ref holds, so a flaky forge never blocks
+// pulling trunk into the branch. remote selects which git remote exactly as
+// MergeRemote/Push do ("" → the sole remote or the config's primary_remote);
+// configPath is consulted only for primary_remote. It records one `note` capturing
+// whatever moved and is the shared write path behind both `ctl sync` and the
+// webui's Sync button. The back-merge's own failure (a dirty checkout, a conflict)
+// is returned bare so the CLI can apply its escalate/no-escalate disposition; a
+// resolution or bookkeeping error is wrapped in *PlainError.
+func Sync(ctx context.Context, gw *repo.Repo, ticket, att, remote, configPath string) (SyncResult, error) {
 	h, err := Load(gw.Root(), ticket, att)
 	if err != nil {
 		return SyncResult{}, plain(err)
 	}
-	synced, err := h.WM.Sync(ctx, h.Key, h.Base)
-	if err != nil {
-		return SyncResult{}, err
-	}
-	res := SyncResult{Synced: synced}
-	if synced.AlreadyUpToDate {
-		return res, nil
-	}
-	body := fmt.Sprintf("Synced `%s` into `%s` (merge commit, tip %s); the branch is now ff-landable.", synced.Base, synced.Branch, ShortSHA(synced.Tip))
-	e, err := gw.AppendTyped(ticket, att, event.Event{Type: "note", Body: body})
+	var res SyncResult
+	// (a) Refresh the local base from the remote, when one is configured. A repo
+	// without a remote skips straight to the back-merge (offline sync); an ambiguous
+	// remote is a config problem surfaced plainly, but once resolved a fetch/ff fault
+	// is folded into the pull warning rather than failing the whole sync.
+	remotes, err := h.WM.Remotes(ctx)
 	if err != nil {
 		return res, plain(err)
 	}
-	res.Note = e
-	res.Recorded = true
+	if len(remotes) > 0 {
+		resolved, err := h.resolveRemote(ctx, remote, configPath)
+		if err != nil {
+			return res, plain(err)
+		}
+		res.Refreshed = true
+		if fetched, ferr := h.WM.Fetch(ctx, resolved, h.Base); ferr != nil {
+			res.Pull = worktree.Pulled{Base: h.Base, Skipped: ferr.Error()}
+		} else {
+			res.Fetched = fetched
+			pulled, perr := h.WM.PullBase(ctx, fetched)
+			if perr != nil {
+				pulled.Skipped = perr.Error()
+			}
+			res.Pull = pulled
+		}
+	}
+	// (b) Back-merge the now-current local base into the attempt branch.
+	synced, err := h.WM.Sync(ctx, h.Key, h.Base)
+	if err != nil {
+		return res, err
+	}
+	res.Synced = synced
+	// Record one note only when something actually moved — the local base pulled
+	// forward, or a back-merge commit landed. A pure no-op records nothing.
+	if (res.Refreshed && res.Pull.Moved) || !synced.AlreadyUpToDate {
+		e, err := gw.AppendTyped(ticket, att, event.Event{Type: "note", Body: syncNoteBody(res)})
+		if err != nil {
+			return res, plain(err)
+		}
+		res.Note = e
+		res.Recorded = true
+	}
 	return res, nil
 }
 
-// FormatSyncReport renders the human report lines for a sync: the back-merge
-// outcome (or an already-up-to-date no-op) and the recorded note's seq.
-func FormatSyncReport(ticket, att string, res SyncResult) []string {
+// syncNoteBody renders the durable `note` for a sync: the remote-refresh outcome
+// (when a remote was consulted) followed by the back-merge outcome, in Markdown.
+func syncNoteBody(res SyncResult) string {
+	var parts []string
+	if res.Refreshed {
+		switch p := res.Pull; {
+		case p.Moved:
+			parts = append(parts, fmt.Sprintf("Pulled `%s` from `%s`: local `%s` fast-forwarded to %s.", p.Base, res.Fetched.Remote, p.Base, ShortSHA(p.Tip)))
+		case p.Skipped != "":
+			parts = append(parts, fmt.Sprintf("Left local `%s` unchanged — %s.", p.Base, p.Skipped))
+		case p.Already:
+			parts = append(parts, fmt.Sprintf("Local `%s` already current with the remote.", p.Base))
+		}
+	}
 	s := res.Synced
 	if s.AlreadyUpToDate {
-		return []string{fmt.Sprintf("%s/%s: already up to date with %s (nothing to sync)", ticket, att, s.Base)}
+		parts = append(parts, fmt.Sprintf("`%s` already contained in `%s`; nothing to back-merge.", s.Base, s.Branch))
+	} else {
+		parts = append(parts, fmt.Sprintf("Synced `%s` into `%s` (merge commit, tip %s); the branch is now ff-landable.", s.Base, s.Branch, ShortSHA(s.Tip)))
 	}
-	lines := []string{fmt.Sprintf("synced %s into %s (tip %s) — the branch is now ff-landable", s.Base, s.Branch, ShortSHA(s.Tip))}
+	return strings.Join(parts, " ")
+}
+
+// FormatSyncReport renders the human report lines for a sync: the remote-refresh
+// outcome (pulled / already-current / skipped-with-warning), the back-merge
+// outcome, and the recorded note's seq. The webui joins them into its result banner.
+func FormatSyncReport(ticket, att string, res SyncResult) []string {
+	var lines []string
+	if res.Refreshed {
+		switch p := res.Pull; {
+		case p.Moved:
+			lines = append(lines, fmt.Sprintf("pulled %s from %s: local %s fast-forwarded to %s", p.Base, res.Fetched.Remote, p.Base, ShortSHA(p.Tip)))
+		case p.Skipped != "":
+			lines = append(lines, fmt.Sprintf("warning: left local %s unchanged — %s", p.Base, p.Skipped))
+		case p.Already:
+			lines = append(lines, fmt.Sprintf("local %s already up to date with the remote", p.Base))
+		}
+	}
+	s := res.Synced
+	if s.AlreadyUpToDate {
+		lines = append(lines, fmt.Sprintf("%s/%s: %s already contained in the branch (nothing to back-merge)", ticket, att, s.Base))
+	} else {
+		lines = append(lines, fmt.Sprintf("synced %s into %s (tip %s) — the branch is now ff-landable", s.Base, s.Branch, ShortSHA(s.Tip)))
+	}
 	if res.Recorded {
 		lines = append(lines, fmt.Sprintf("recorded a note (seq %d)", res.Note.Seq))
 	}

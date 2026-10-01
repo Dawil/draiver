@@ -157,6 +157,7 @@ body {
 .pyramid .pyramid-sep { color: var(--muted); opacity: .5; }
 .pyramid .pyramid-flag { margin-left: 3px; text-transform: uppercase; letter-spacing: .06em;
            font-size: 9px; opacity: .8; }
+.pyramid .pyramid-env { margin-left: 2px; font-size: 9px; opacity: .7; letter-spacing: .02em; }
 /* control-state accents come from the parent column */
 .col-stuck .card { background: var(--alert-bg); border-color: var(--alert); }
 .col-running .card, .col-done .card { opacity: .9; }
@@ -217,16 +218,8 @@ body {
 .action-decision { border-color: var(--running); color: var(--running); }
 .action-done { border-color: var(--done); color: var(--done); }
 .action-done:hover { background: color-mix(in srgb, var(--done) 18%, transparent); }
-/* "Merged elsewhere — close & pull": the external-land twin of Done, tinted with
-   the Review colour (it acts on a Review attempt). Same pill as the other actions. */
-.action-merge-remote { background: var(--panel-2); color: var(--review); border: 1px solid var(--review); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
-.action-merge-remote:hover { background: color-mix(in srgb, var(--review) 18%, transparent); }
-/* The verb's combined report (closed + pull result / pull warning), OOB-swapped in
-   below the actions after the POST; hidden until it carries a message. */
-.merge-remote-result { font-size: 13px; margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
 /* drv-013 Git controls: a grouped section driving the attempt's local git folder
-   (push / sync) from the board. Pills match the other actions; the result banner
-   reuses the merge-remote-result styling. */
+   (push / sync) from the board. Pills match the other actions. */
 .git-controls { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
 .git-controls-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 4px; }
 .git-controls-hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
@@ -262,10 +255,10 @@ body {
 /* The (i) bubble: a tiny circle whose CSS tooltip (data-tip) explains the field.
    aria-label carries the same text for screen readers; the bubble is focusable so
    the tip is reachable by keyboard, not hover alone. */
-.provenance-info { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; border: 1px solid var(--line); border-radius: 50%; font-size: 9px; font-style: normal; font-weight: 600; line-height: 1; color: var(--muted); cursor: help; }
-.provenance-info:hover, .provenance-info:focus { border-color: var(--accent); color: var(--accent); outline: none; }
-.provenance-info::after { content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 7px); min-width: 180px; max-width: 240px; padding: 7px 9px; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.4; font-weight: 400; white-space: normal; text-align: left; box-shadow: 0 6px 20px rgba(0,0,0,.35); opacity: 0; visibility: hidden; transition: opacity .12s ease; pointer-events: none; z-index: 20; }
-.provenance-info:hover::after, .provenance-info:focus::after { opacity: 1; visibility: visible; }
+.provenance-info, .repo-settings-info { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; border: 1px solid var(--line); border-radius: 50%; font-size: 9px; font-style: normal; font-weight: 600; line-height: 1; color: var(--muted); cursor: help; }
+.provenance-info:hover, .provenance-info:focus, .repo-settings-info:hover, .repo-settings-info:focus { border-color: var(--accent); color: var(--accent); outline: none; }
+.provenance-info::after, .repo-settings-info::after { content: attr(data-tip); position: absolute; left: 0; bottom: calc(100% + 7px); min-width: 180px; max-width: 240px; padding: 7px 9px; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; line-height: 1.4; font-weight: 400; white-space: normal; text-align: left; box-shadow: 0 6px 20px rgba(0,0,0,.35); opacity: 0; visibility: hidden; transition: opacity .12s ease; pointer-events: none; z-index: 20; }
+.provenance-info:hover::after, .provenance-info:focus::after, .repo-settings-info:hover::after, .repo-settings-info:focus::after { opacity: 1; visibility: visible; }
 /* The value: transparent and border-quiet so it reads as text, gaining a frame on
    hover (hint that it is clickable) and a filled, accented field on focus. */
 .provenance-input { width: 100%; min-width: 260px; background: transparent; color: var(--ink); border: 1px solid transparent; border-radius: 6px; padding: 3px 8px; margin: -1px 0; font: inherit; font-size: 13px; cursor: text; }
@@ -274,6 +267,18 @@ body {
 .provenance-input::placeholder { color: var(--muted); opacity: .6; font-style: italic; }
 .provenance-saved { grid-column: 2; justify-self: start; font-size: 12px; color: var(--done); animation: provenance-fade 2.6s ease forwards; }
 @keyframes provenance-fade { 0%, 62% { opacity: 1; } 100% { opacity: 0; } }
+/* panel-row (drv-011): provenance and the per-repo settings editor side by side,
+   wrapping to stacked on a narrow viewport. Each panel drops its own bottom margin
+   (the row owns the spacing) and its inputs shed the wide min-width so two tables
+   share the 860px column without overflowing. */
+.panel-row { display: flex; flex-wrap: wrap; gap: 16px 40px; align-items: start; margin: 0 0 20px; }
+.panel-row .provenance { margin: 0; flex: 1 1 300px; min-width: 0; }
+.panel-row .provenance-input { min-width: 0; }
+/* repo-settings (drv-011): reuses the provenance frame; only the scope note is new —
+   a quiet line making the broader blast radius (every attempt on the repo) explicit,
+   so it is never mistaken for the per-attempt provenance beside it. */
+.repo-settings-scope { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+.repo-settings-scope code { background: var(--panel-2); border-radius: 4px; padding: 0 4px; }
 /* edges editor (drvweb-016): the provenance inline-edit table reused at ticket
    level. Only the heading is new — a quiet label so the relations read as the
    ticket's dependency edges on a page that has no spec context. */

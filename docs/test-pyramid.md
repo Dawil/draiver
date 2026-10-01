@@ -14,11 +14,16 @@
 
 A ticket's attempt should reach **as high as it can — or as high as it is required
 to** — up its repo's test pyramid before it raises for Review. Today "all tests
-green" is a phrase the agent *types into its review claim* (`handbook.md` §5:
+green" is a phrase the agent *types into its review claim* (`handbook.md` §7:
 *"all tests green; covers the spec's three acceptance criteria"*). That is exactly
 the self-report the platform's trust model says it structurally **cannot** trust
 (`coding-agent-platform.md`: *"Success is a claim, not exit 0 … the platform's
 trust model cannot extend to the worker's self-report"*).
+
+The pyramid is also where a ticket's **acceptance criteria** become enforceable: a
+spec authors them as plain prose, the attempt's agent realises them as Gherkin
+features + steps, and those run as a BDD rung climbed here — see
+[`acceptance-criteria.md`](./acceptance-criteria.md).
 
 The test pyramid replaces the phrase with a **fact draiver itself established**: a
 rung draiver *ran* and *adjudicated*, recorded as a structured claim on the
@@ -105,6 +110,141 @@ yourself"*): iterate with `draiver test`, commit, then `draiver test --log` befo
 integration rung stands up real dependencies via [Testcontainers](https://testcontainers.com/)
 — the first real consumer of the feature.
 
+## Environments (drv-012): named up/down/healthcheck contexts
+
+The deferred "fuller vocabulary" below (`up` / `down` / `healthcheck`) is now
+**realised, reorganised around named environments** rather than per-rung inline
+keys. A rung does not run in a vacuum — it runs *in a context* — so
+`.test-pyramid.yaml` gains a top-level `environments:` list, a sibling of `levels:`,
+and a level names the one it targets:
+
+```yaml
+environments:
+  - name: local
+    # up/down optional — a local env may need neither
+    healthchecks:
+      - name: postgres-up
+        script: pg_isready -h localhost
+  - name: staging
+    # up/down are script strings, executed via `sh -c` exactly like a level's
+    # `run:` — not a path draiver points at. Inline the command (or `sh -c` a
+    # file yourself if you keep one).
+    up:   docker compose -f staging.yml up -d      # optional
+    down: docker compose -f staging.yml down -v    # optional
+    healthchecks:
+      - name: api-reachable
+        script: curl -fsS https://staging.example.com/healthz
+
+levels:
+  - name: unit
+    run: go test ./...
+  - name: integration
+    run: go test -tags=integration ./...
+    environment: local                  # <-- rung names its context
+  - name: e2e
+    run: go test -tags=e2e ./...
+    environment: staging
+```
+
+- **Why a separate list, not per-rung inline keys?** One staging/QA context is
+  shared by several rungs (integration *and* e2e both hit staging) — define it once,
+  reference it by name. And it separates *what the code is* (a level's `run`) from
+  *where it runs* (an environment), the same own-it-vs-observe-it line the forge
+  coupling draws between `up` (an env draiver owns) and `healthcheck` (one it only
+  observes).
+- **Binding.** A `Level` gains an optional `environment:` naming one entry. **Unset
+  = the implicit ambient context** (today's behaviour), so existing files keep
+  working. A level naming an unknown environment is a validation error.
+- **Backward compatible.** A file with no `environments` behaves exactly as before;
+  the parser already ignores unknown keys, so old binaries tolerate new files and
+  new binaries tolerate old files.
+
+**Execution order** for a rung with an environment (`draiver test`): run the env's
+`up` → run its `healthcheck`s → run the level's `run` → **always** run `down`
+(unconditionally, pass or fail; a `down` failure is a best-effort warning, never a
+verdict change). Each failure maps to the control outcome the vocabulary settled,
+surfaced as a distinct process exit code so a supervising loop can branch on it:
+
+| Failure | Meaning | Control outcome | Exit |
+| --- | --- | --- | --- |
+| `up` non-zero | the harness could not stand the env up | infra fault, **not** your code → **escalate** | `6` |
+| `healthcheck` red | a dependency the env only observes isn't ready | **block** (the pass-the-ball signal) — not a code fault | `7` |
+| `run` non-zero | the code is wrong at this rung | code fault; the ceiling is below this rung | `1` |
+
+This ticket only *emits* the block signal; wiring a red `healthcheck` into the
+coordinator's reverse-`wants:` activation stays deferred (below).
+
+**The realistic dogfood pattern.** A `local` environment whose healthcheck is a
+container-runtime probe is the honest shape:
+
+```yaml
+environments:
+  - name: local
+    healthchecks:
+      - name: container-runtime
+        script: docker info >/dev/null 2>&1 || podman info >/dev/null 2>&1
+```
+
+On a box with no runtime this **blocks** the integration rung (dependency not
+ready) rather than letting a clean-skip report a false green. *This* repo's own
+`.test-pyramid.yaml` deliberately uses a weaker always-green precondition
+(`go version`) instead, because its integration suite already skips cleanly without
+a runtime and we do not convert that clean-skip into a gate-blocking block as a side
+effect of landing environments.
+
+**Deferred within environments.** Secret/credential injection for `up` /
+`healthcheck` (Resolved-forks #4 below) is out of scope — don't hand staging creds
+to every worktree; that is a follow-up. The webui surfaces *which* environment a
+rung targets, but not a live healthcheck verdict (only green `run` results are
+logged, so no probe outcome is cheaply available to the read-only board).
+
+## BDD / acceptance rung (drv-016): cucumber-JSON is the interchange
+
+An acceptance rung is **not a new rung kind** — it is an ordinary rung that (a)
+binds an `environment:` (drv-012) and (b) declares the **cucumber-JSON** report its
+`run` emits, via `cucumber_json:`. That one field is the whole convention:
+
+```yaml
+environments:
+  - name: staging
+    up:   docker compose -f staging.yml up -d
+    down: docker compose -f staging.yml down -v
+    healthchecks:
+      - name: api-reachable
+        script: curl -fsS https://staging.example.com/healthz
+
+levels:
+  - name: unit
+    run: go test ./...
+  - name: acceptance
+    environment: staging                       # up → healthcheck → run → down
+    run: godog run -f cucumber:report.json ./features   # the repo's BDD runner
+    cucumber_json: report.json                 # where it writes cucumber-JSON
+```
+
+- **draiver never hardcodes a runner.** The `run` is the same generic `sh -c`
+  shell-out every rung uses; it invokes *whatever* BDD tool the repo configures
+  (godog, cucumber-js, behave, pytest-bdd, …). draiver consumes the **JSON, not the
+  tool** — so the rung is runner-agnostic by construction.
+- **`cucumber_json:` names the report**, relative to the worktree root. After the
+  `run`, draiver reads it, parses it (`internal/cucumber`), and prints a one-line
+  summary — proving the report is present and consumable. Capture runs **whether the
+  run passed or failed**: a red run's report is exactly what a human Review and the
+  HTML renderer (drv-018) need to see *which* scenarios broke.
+- **Capture is best-effort.** A missing or invalid report is a warning that never
+  changes the rung's verdict (like `down`): the `run`'s exit code stays
+  authoritative. The control-outcome mapping is unchanged — a red `up` escalates
+  (6), a red `healthcheck` blocks before the run (7), a red `run` is a code fault
+  (1).
+- **The cucumber-JSON is the interchange.** `internal/cucumber` is the shared model
+  both **drv-017** (durable artefact storage of the report + its embedded
+  screenshots) and **drv-018** (HTML rendering) build on. This ticket captures and
+  consumes it; it deliberately does **not** define where the report is durably
+  stored (drv-017) or how it is rendered (drv-018).
+
+A BDD run on its own never substitutes for the human Review — a cleared acceptance
+rung *feeds* the Review, it does not replace it (drv-014).
+
 ## Why this is on-thesis, not a bolt-on
 
 Three of the platform's core values (`coding-agent-platform.md` §"Core values")
@@ -174,6 +314,8 @@ Tier-2/Tier-3 (`draiverctl.md`): engine = `drvctl`, UI = `drvweb`.
 | **drvctl-048** | `draiver test [RUNG] [--log]` — the deterministic executor: climb base→RUNG in the worktree; bare runs on any tree, `--log` refuses on a dirty tree and on all-green writes one hash-chained `{rung, commit}` result event (failures log nothing, exit nonzero). | 047 |
 | **drvctl-049** | The **Review gate** — `draiver review` folds the log for the highest logged rung at HEAD and refuses a claim below the target rung; no file → no gate. | 047, 048 |
 | **drvweb-021** | Board/attempt view — render the attempt's cleared rung (a small pyramid badge), distinguishing green-at-HEAD from stale (result exists but `commit` ≠ tip). | 048 |
+| **drv-012** | **Environments** — a top-level `environments:` list (named `{up?, down?, healthchecks[]}` contexts) + an `environment:` binding on levels, parsed/validated in `internal/pyramid`; `draiver test` honours up → healthcheck → run → down with the control-outcome exit codes (up=6/escalate, healthcheck=7/block, run=1/code-fault); the badge surfaces the targeted env. The concrete realisation of the deferred vocabulary below. | 047, 048, drvweb-021 |
+| **drv-016** | **BDD execution rung** — a rung's optional `cucumber_json:` marks it a BDD/acceptance rung: its `run` shells out to the repo's configured BDD runner (never hardcoded) over an `environment:`, and after the run `draiver test` reads the emitted **cucumber-JSON** via `internal/cucumber` (the runner-agnostic interchange), summarising it best-effort (pass or fail) without changing the verdict. Feeds drv-017 (artefact storage) / drv-018 (HTML). | 012 |
 
 Separately filed: **drv-010** — dogfood the pyramid on this repo with a
 Testcontainers integration rung (depends in spirit on drv-009).
@@ -193,6 +335,12 @@ with it — the parser should tolerate (or explicitly reject-with-a-note) the ex
 keys so they can be added without a schema break.
 
 ## The fuller vocabulary: `up` vs `run` vs `healthcheck`
+
+> **Realised by drv-012** — see *"Environments"* above. The control-outcome
+> semantics this section settled are the valuable, surviving part; drv-012 only
+> reorganises the three commands out of per-rung inline keys into **named,
+> reusable environments** a level references by name. The reverse-`wants:`
+> "pass the ball" wiring (next section) remains deferred.
 
 Beyond the single `run` command, a rung could carry three, each mapping a distinct
 failure to a distinct control outcome — because a red suite means three completely
@@ -277,6 +425,50 @@ three stores (per `targets-and-dependencies.md` §3):
    only once `up`/`healthcheck` land.
 5. **Timeouts.** A hung `run` must not wedge anything: a per-rung `timeout:` in the
    yaml, a trip recorded as a fault. A cheap early add when needed.
+
+## BDD artefact capture & storage (drv-017)
+
+A BDD/acceptance rung produces **evidence** — cucumber-JSON, embeddings
+(screenshots), and script-output files. These are **reproducible, not
+version-controlled**: they belong in the data root, not the code repo. drv-017 adds
+the capture-and-storage layer that puts them there, provenance-anchored.
+
+- **What is captured.** The rung's **cucumber-JSON** report — the first-class
+  `cucumber_json:` field drv-016 already consumes live — plus any additional outputs
+  it declares in an `artifacts:` list (embeddings/screenshots dir, script-output
+  files), all worktree-relative. A rung is a capture rung when it declares *either*,
+  so a BDD rung that only sets `cucumber_json:` still has its report stored:
+
+  ```yaml
+  - name: bdd
+    environment: local
+    run: sh run-acceptance.sh        # emits report.json + shots/ (the crystallised steps)
+    cucumber_json: report.json       # the report (drv-016) — captured as the lead artefact
+    artifacts:
+      - shots                        # extra evidence; a dir is captured recursively
+  ```
+
+  These outputs should be **git-ignored** — they are regenerated evidence, so
+  keeping them untracked lets repeated `draiver test --log` runs stay clean and not
+  trip the dirty-tree guard.
+
+- **Per-run key.** On a green `--log` run, each captured artefact is copied into the
+  attempt's `artefacts/` store under
+  `bdd/<rung>/<env>/<commit>/<runstamp>/…`. The key is **never clobbered**: a
+  collision appends a numeric suffix, so **multiple regenerations of the same
+  artefact coexist side by side** and a prior run is always recoverable.
+
+- **Provenance.** The captured set (plus a `run.json` recording rung, environment,
+  commit, runstamp, and — once drv-012 lands — the healthcheck verdict) is
+  referenced from the run's `test-result` event (`artefacts:`), so it is covered by
+  `draiver audit` and surfaced by `brief`.
+
+- **Retention.** Additive by default — nothing is deleted. The operator config knob
+  `bdd_artefact_keep` caps how many run sets are kept per `(rung, environment)`
+  group; `0` (the default) keeps everything.
+
+The capture is runner-agnostic (it stores whatever files the rung declares) and
+decoupled from how the run is executed (drv-016) or rendered (drv-018).
 
 ## Where it lands relative to draiver's thesis
 

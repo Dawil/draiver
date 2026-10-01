@@ -55,6 +55,276 @@ func pyramidCheckout(t *testing.T, ticket, attempt string, commit bool, rungs []
 	return dir
 }
 
+// pyramidCheckoutYAML is pyramidCheckout's sibling for tests that need the richer
+// environments schema: it writes body verbatim as the checkout's .test-pyramid.yaml
+// (committed when commit is true) on the attempt branch and chdirs into it.
+func pyramidCheckoutYAML(t *testing.T, ticket, attempt string, commit bool, body string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	gitInDir(t, dir, "init", "-q", "-b", "main")
+	gitInDir(t, dir, "commit", "-q", "--allow-empty", "-m", "init")
+	gitInDir(t, dir, "checkout", "-q", "-b", "draiver/"+ticket+"/"+attempt)
+	if err := os.WriteFile(filepath.Join(dir, ".test-pyramid.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if commit {
+		gitInDir(t, dir, "add", ".test-pyramid.yaml")
+		gitInDir(t, dir, "commit", "-q", "-m", "add pyramid")
+	}
+	t.Chdir(dir)
+	return dir
+}
+
+// A rung with an environment runs up → healthchecks → run → down, in that order,
+// and down runs after the rung's run. Each step echoes a marker so the output
+// ordering is observable.
+func TestEnvRunsUpHealthcheckRunDownInOrder(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    up: echo MARK_UP
+    down: echo MARK_DOWN
+    healthchecks:
+      - name: ready
+        script: echo MARK_HC
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("all-green env rung exited %d: %s", code, out)
+	}
+	order := []string{"MARK_UP", "MARK_HC", "MARK_RUN", "MARK_DOWN"}
+	last := -1
+	for _, m := range order {
+		i := strings.Index(out, m)
+		if i < 0 {
+			t.Fatalf("missing %q in output:\n%s", m, out)
+		}
+		if i < last {
+			t.Errorf("step %q out of order in output:\n%s", m, out)
+		}
+		last = i
+	}
+}
+
+// A failing env `up` is an infrastructure fault: exit ExitEnvUp, the rung's run is
+// never reached, and down still runs (best-effort teardown of a partial up).
+func TestEnvUpFailureEscalates(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    up: "false"
+    down: echo MARK_DOWN
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != ExitEnvUp {
+		t.Fatalf("up failure should exit %d, got %d: %s", ExitEnvUp, code, out)
+	}
+	if strings.Contains(out, "MARK_RUN") {
+		t.Errorf("run must not execute after a failed up: %s", out)
+	}
+	if !strings.Contains(out, "MARK_DOWN") {
+		t.Errorf("down must run even after a failed up: %s", out)
+	}
+}
+
+// A red healthcheck is a dependency-not-ready block: exit ExitBlocked, run never
+// executes, down still runs.
+func TestEnvHealthcheckRedBlocks(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    down: echo MARK_DOWN
+    healthchecks:
+      - name: dep
+        script: "false"
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != ExitBlocked {
+		t.Fatalf("red healthcheck should exit %d, got %d: %s", ExitBlocked, code, out)
+	}
+	if strings.Contains(out, "MARK_RUN") {
+		t.Errorf("run must not execute after a red healthcheck: %s", out)
+	}
+	if !strings.Contains(out, "MARK_DOWN") {
+		t.Errorf("down must run after a red healthcheck: %s", out)
+	}
+}
+
+// A failing `run` inside an environment is a code fault: plain exit 1 (not an env
+// exit code), and down still runs.
+func TestEnvRunFailureIsCodeFault(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    down: echo MARK_DOWN
+levels:
+  - name: unit
+    run: "false"
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 1 {
+		t.Fatalf("a failing run should be a code fault (exit 1), got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "MARK_DOWN") {
+		t.Errorf("down must run after a failing run: %s", out)
+	}
+}
+
+// A failing `down` is best-effort: it never changes the rung's verdict, so an
+// otherwise-green rung still exits 0 and a warning is surfaced.
+func TestEnvDownFailureIsBestEffort(t *testing.T) {
+	body := `
+environments:
+  - name: local
+    down: "false"
+levels:
+  - name: unit
+    run: echo MARK_RUN
+    environment: local
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("a failing down must not change a green verdict, got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "warning") || !strings.Contains(out, "down failed") {
+		t.Errorf("a failing down should surface a warning: %s", out)
+	}
+}
+
+// sampleCucumberJSON is a minimal standard cucumber-JSON document: one feature,
+// one scenario, two passed steps — enough to exercise capture + summary.
+const sampleCucumberJSON = `[{"uri":"features/x.feature","keyword":"Feature","name":"X","elements":[` +
+	`{"keyword":"Scenario","name":"works","type":"scenario","steps":[` +
+	`{"keyword":"Given ","name":"a","result":{"status":"passed"}},` +
+	`{"keyword":"Then ","name":"b","result":{"status":"passed"}}]}]}]`
+
+// redCucumberJSON is one failed scenario (a failed step with a screenshot) — the
+// report a red BDD run leaves behind for drv-018 to render.
+const redCucumberJSON = `[{"uri":"features/x.feature","keyword":"Feature","name":"X","elements":[` +
+	`{"keyword":"Scenario","name":"breaks","type":"scenario","steps":[` +
+	`{"keyword":"When ","name":"boom","result":{"status":"failed","error_message":"nope"},` +
+	`"embeddings":[{"mime_type":"image/png","data":"QUJD"}]}]}]}]`
+
+// A BDD rung declares the cucumber-JSON its run emits; on a green run draiver reads,
+// parses, and summarises it — consuming the interchange, not the tool. The rung
+// still exits 0.
+func TestBDDRungCapturesCucumberJSON(t *testing.T) {
+	body := `
+levels:
+  - name: acceptance
+    run: cp src.json report.json
+    cucumber_json: report.json
+`
+	dir := pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	if err := os.WriteFile(filepath.Join(dir, "src.json"), []byte(sampleCucumberJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("green BDD rung exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "captured cucumber-JSON report.json") {
+		t.Errorf("did not report capturing the cucumber-JSON: %q", out)
+	}
+	if !strings.Contains(out, "1 scenario") {
+		t.Errorf("capture summary missing scenario count: %q", out)
+	}
+}
+
+// A BDD run that writes a report and then fails is a code fault (exit 1), but the
+// report is still captured first — a red run's cucumber-JSON is exactly what the
+// human Review and drv-018 need.
+func TestBDDRungCapturesReportOnRedRun(t *testing.T) {
+	body := `
+levels:
+  - name: acceptance
+    run: sh -c 'cp src.json report.json; false'
+    cucumber_json: report.json
+`
+	dir := pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	if err := os.WriteFile(filepath.Join(dir, "src.json"), []byte(redCucumberJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := run(t, "test")
+	if code != 1 {
+		t.Fatalf("a failing BDD run should be a code fault (exit 1), got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "captured cucumber-JSON report.json") {
+		t.Errorf("a red run's report must still be captured: %q", out)
+	}
+}
+
+// A BDD rung whose runner left no report (or an invalid one) warns but never changes
+// an otherwise-green verdict — capture is best-effort, like `down`.
+func TestBDDMissingReportWarnsKeepsVerdict(t *testing.T) {
+	body := `
+levels:
+  - name: acceptance
+    run: "true"
+    cucumber_json: nope.json
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("a missing report must not change a green verdict, got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "warning") || !strings.Contains(out, "not captured") {
+		t.Errorf("a missing report should surface a warning: %q", out)
+	}
+}
+
+// A red healthcheck blocks a BDD rung before its run — so no run, and no report is
+// captured: the block (pass-the-ball) outcome takes precedence over capture.
+func TestBDDHealthcheckRedBlocksBeforeCapture(t *testing.T) {
+	body := `
+environments:
+  - name: staging
+    healthchecks:
+      - name: api
+        script: "false"
+levels:
+  - name: acceptance
+    run: cp src.json report.json
+    cucumber_json: report.json
+    environment: staging
+`
+	dir := pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	if err := os.WriteFile(filepath.Join(dir, "src.json"), []byte(sampleCucumberJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := run(t, "test")
+	if code != ExitBlocked {
+		t.Fatalf("red healthcheck should block (exit %d), got %d: %s", ExitBlocked, code, out)
+	}
+	if strings.Contains(out, "captured cucumber-JSON") {
+		t.Errorf("no report should be captured when the rung is blocked before its run: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "report.json")); err == nil {
+		t.Errorf("the run must not have executed (report.json should not exist)")
+	}
+}
+
 // A repo with no .test-pyramid.yaml has nothing to run: exit 0 with a clear note.
 func TestBareNoPyramidIsClean(t *testing.T) {
 	t.Chdir(t.TempDir())
@@ -123,7 +393,7 @@ func TestUnknownRungRejected(t *testing.T) {
 
 // --log refuses a dirty tree up front and records nothing.
 func TestLogRefusesDirtyTree(t *testing.T) {
-	dir := newTicket(t) // store root with PROJ-1/0001
+	dir := newTicket(t)                                                        // store root with PROJ-1/0001
 	pyramidCheckout(t, "PROJ-1", "0001", false, [][2]string{{"unit", "true"}}) // uncommitted pyramid → dirty
 	out, code := run(t, "--data", dir, "test", "--log")
 	if code == 0 {

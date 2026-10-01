@@ -32,7 +32,7 @@ cloud provider, fully self-serve, fully governed.
 
 Draiver's development cycle has three stages:
 
-1. **Scope** — create the ticket, define acceptance criteria.
+1. **Scope** — create the ticket, define [acceptance criteria](./acceptance-criteria.md).
 2. **Build** — the agent codes the ticket.
 3. **Ratify** — review, approve, merge; CI/CD takes over.
 

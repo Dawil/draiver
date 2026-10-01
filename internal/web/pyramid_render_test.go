@@ -238,9 +238,9 @@ func TestRenderPyramidBadge_StaleWhenTipMovedOn(t *testing.T) {
 	ticket, id := "PYR-3", "0001"
 	branch := "draiver/" + ticket + "/" + id
 
-	old := runGit(t, repo, "rev-parse", "HEAD")        // the commit a result will name
+	old := runGit(t, repo, "rev-parse", "HEAD") // the commit a result will name
 	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "advance")
-	runGit(t, repo, "branch", branch, "main")          // branch tip is now past `old`
+	runGit(t, repo, "branch", branch, "main") // branch tip is now past `old`
 
 	root := seedReviewAttempt(t, repo, ticket, id,
 		event.Event{Type: "created", Actor: "a"},
@@ -275,5 +275,61 @@ func TestRenderPyramidBadge_NoPyramidRendersNothing(t *testing.T) {
 	badge := `data-testid="pyramid-` + ticket + "-" + id + `"`
 	if b := board(t, root); strings.Contains(b, badge) {
 		t.Fatalf("board: badge rendered for a repo with no .test-pyramid.yaml")
+	}
+}
+
+// drv-012: a branch whose .test-pyramid.yaml binds a rung to an environment renders
+// that environment name alongside the cleared rung, so a reviewer sees *where* green
+// was proven, not just how high.
+func TestRenderPyramidBadge_SurfacesEnvironment(t *testing.T) {
+	const envPyramidYAML = "environments:\n" +
+		"  - name: staging\n" +
+		"    healthchecks:\n" +
+		"      - name: api\n" +
+		"        script: curl -fsS https://staging/healthz\n" +
+		"levels:\n" +
+		"  - name: unit\n" +
+		"    run: go test ./...\n" +
+		"  - name: integration\n" +
+		"    run: go test -tags=integration ./...\n" +
+		"    environment: staging\n"
+
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	repo := t.TempDir()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	runGit(t, repo, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, ".test-pyramid.yaml"), []byte(envPyramidYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", ".test-pyramid.yaml")
+	runGit(t, repo, "commit", "-q", "-m", "init")
+
+	ticket, id := "PYR-5", "0001"
+	m, err := worktree.NewManager(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := m.Create(context.Background(), worktree.Spec{Key: worktree.Key{Ticket: ticket, Attempt: id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := runGit(t, wt.Path, "rev-parse", "HEAD")
+
+	root := seedReviewAttempt(t, repo, ticket, id,
+		event.Event{Type: "created", Actor: "a"},
+		event.Event{Type: "test-result", Actor: "agent:x", Rung: "integration", Commit: head},
+		event.Event{Type: "review", Actor: "agent:x", Body: "please review"},
+	)
+
+	envTag := `data-testid="pyramid-env-` + ticket + "-" + id + `-integration"`
+	for _, page := range []struct{ name, body string }{{"board", board(t, root)}, {"detail", detail(t, root, ticket, id)}} {
+		if !strings.Contains(page.body, envTag) {
+			t.Errorf("%s: environment tag %s not rendered:\n%s", page.name, envTag, page.body)
+		}
+		if !strings.Contains(page.body, "@staging") {
+			t.Errorf("%s: expected the @staging environment label", page.name)
+		}
 	}
 }

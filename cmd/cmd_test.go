@@ -62,6 +62,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	mergeRemote = ""
 	archiveAccepted, archiveAbandoned = false, false
 	resolveByFlag = ""
+	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog = false
 	reportJSON, reportRun, reportOut = "", "", ""
 	reportInline, reportDemo = true, false
@@ -108,6 +109,12 @@ func TestNewScaffolds(t *testing.T) {
 	}
 	if !strings.Contains(string(spec), "id: PROJ-1") || !strings.Contains(string(spec), "title: Test") {
 		t.Errorf("spec missing identity frontmatter:\n%s", spec)
+	}
+	// The scaffold carries the drv-015 acceptance-criteria convention so every new
+	// ticket prompts for the plain-text statements of done that the attempt's agent
+	// translates into Gherkin features.
+	if !strings.Contains(string(spec), "## Acceptance criteria") {
+		t.Errorf("spec missing the acceptance-criteria convention heading:\n%s", spec)
 	}
 
 	events, err := ticketlog.Read(root, "PROJ-1", "0001")
