@@ -559,6 +559,67 @@ func (m *Manager) MergeRemote(ctx context.Context, k Key, remote, base string) (
 	return rm, nil
 }
 
+// Pushed reports pushing k's branch to a remote: the local tip that was sent and
+// whether the remote ref was created, fast-forwarded, or already current.
+type Pushed struct {
+	Remote    string
+	Branch    string
+	Tip       string // the local branch tip that was pushed
+	NewBranch bool   // the remote ref did not exist and was created
+	UpToDate  bool   // the remote already held this tip; nothing was sent
+}
+
+// Push sends k's per-attempt branch to remote under the same branch name — a
+// plain push, never --force, so a remote branch that has diverged (someone else
+// pushed meanwhile) is rejected by git rather than overwritten. It is the
+// Manager's SOLE remote-mutating operation; Fetch/MergeRemote are read-only. It
+// requires the branch to exist locally (ErrBranchNotFound) and reports, from
+// git's --porcelain ref status, whether the ref was created, fast-forwarded, or
+// was already up to date.
+func (m *Manager) Push(ctx context.Context, k Key, remote string) (Pushed, error) {
+	if err := k.valid(); err != nil {
+		return Pushed{}, err
+	}
+	if strings.TrimSpace(remote) == "" {
+		return Pushed{}, fmt.Errorf("worktree: push: no remote given")
+	}
+	branch := k.branch()
+	if exists, err := m.branchExists(ctx, branch); err != nil {
+		return Pushed{}, err
+	} else if !exists {
+		return Pushed{}, ErrBranchNotFound
+	}
+	tip, err := m.revParse(ctx, branch)
+	if err != nil {
+		return Pushed{}, err
+	}
+	// An explicit refspec so the push never depends on the repo's push.default, and
+	// --porcelain so the per-ref status is machine-readable. No --force: a
+	// non-fast-forward update is rejected by git (nonzero exit), surfaced as an
+	// error here rather than a silent overwrite.
+	refspec := "refs/heads/" + branch + ":refs/heads/" + branch
+	out, err := m.git(ctx, "push", "--porcelain", remote, refspec)
+	if err != nil {
+		return Pushed{}, fmt.Errorf("worktree: push %s to %s: %w", branch, remote, err)
+	}
+	p := Pushed{Remote: remote, Branch: branch, Tip: tip}
+	// Each --porcelain ref line is "<flag>\t<from>:<to>\t<summary>"; the leading
+	// flag classifies the outcome ('*' new ref, '=' up to date, ' ' fast-forwarded).
+	// Other lines ("To <url>", "Done") do not name our refspec and are ignored.
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" || !strings.Contains(line, refspec) {
+			continue
+		}
+		switch line[0] {
+		case '*':
+			p.NewBranch = true
+		case '=':
+			p.UpToDate = true
+		}
+	}
+	return p, nil
+}
+
 // HeadBranch returns the short name of the branch currently checked out in repo —
 // the default base for a new attempt (the branch the bound repo sits on at create
 // time). A detached HEAD has no branch to record and yields ok=false, so the

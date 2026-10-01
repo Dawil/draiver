@@ -52,7 +52,14 @@
          provenance"; when a Review attempt records no base (the merge-blocking
          state) the panel flags it. The POST re-renders this panel in place
          (outerHTML on #provenance) with the saved values. */}}
-    {{template "provenance-panel" (provenance .Attempt)}}
+    {{/* Provenance and repo-settings sit side by side: the left panel edits THIS
+         attempt's attempt.md (repo/base), the right edits the repo's defaults in the
+         global config.json (drv-011) — one attempt vs every attempt on the repo. The
+         row wraps to stacked on a narrow viewport. */}}
+    <div class="panel-row" data-testid="panel-row">
+      {{template "provenance-panel" (provenance .Attempt)}}
+      {{template "repo-settings-panel" (repoSettings .Attempt)}}
+    </div>
 
     {{/* Prompt-cache panel: the attempt's caching telemetry (drvctl-031), folded
          into attempt.md on retire. caching_active is the headline yes/no — the
@@ -153,6 +160,36 @@
       {{if and .Attempt.Base .Attempt.Repo}}
       <div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hidden></div>
       {{end}}
+      {{end}}
+
+      {{if and .Attempt.Base .Attempt.Repo (ne (printf "%s" .Attempt.State) "Done")}}
+      {{/* drv-013 Git controls: drive the attempt's local git folder from the board
+           without dropping to a terminal. Each button is a same-origin htmx POST to
+           /git/<verb> that re-renders the log region (the verb records a note) and
+           OOB-swaps the result banner with the land report — the merge-remote-result
+           pattern, reused. Both verbs are git-only and non-terminal (they never
+           change the attempt's state): Push sends the branch to the default remote;
+           Sync back-merges <base> in (clean checkout required). Shown while the
+           attempt records both a base and a repo and is not yet Done — without a
+           base/repo there is nothing to push or sync, and a Done attempt's checkout
+           may already be reclaimed. Create-PR / Merge-PR are deliberately absent:
+           they need a forge API (auth + per-forge adapters), split into their own
+           ticket per the spec. */}}
+      <section class="git-controls" data-testid="git-controls">
+        <h2 class="git-controls-title">Git</h2>
+        <p class="git-controls-hint">Drive this attempt's local git folder. Default branch <code>{{.Attempt.Base}}</code>.</p>
+        <div class="git-actions">
+          <button type="button" class="action-git-push" data-testid="action-git-push"
+            hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/push"
+            hx-confirm="Push branch draiver/{{.Attempt.Ticket}}/{{.Attempt.ID}} to the default remote?"
+            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Push to remote</button>
+          <button type="button" class="action-git-sync" data-testid="action-git-sync"
+            hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/sync"
+            hx-confirm="Sync: back-merge {{.Attempt.Base}} into this attempt's branch? Needs a clean checkout."
+            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull {{.Attempt.Base}} in</button>
+        </div>
+        <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
+      </section>
       {{end}}
 
       <div class="log-region" data-testid="log-region" data-order="newest"
@@ -395,6 +432,51 @@
   </form>
 </section>{{end}}
 
+{{/* repo-settings-panel (drv-011): the per-repo defaults editor, immediately right of
+     provenance and reusing its inline-edit mechanics (a Save-buttonless form that
+     posts on any child's change/Enter, outerHTML-swapping itself, with a Saved flash).
+     The scope note makes the broader blast radius explicit — this writes the global
+     config.json, so a change applies to EVERY attempt on the repo, not just this one.
+     Keyed on the attempt's repo: with no repo recorded there is no config key to edit,
+     so the panel renders a disabled hint rather than an editor. Each input prefills
+     from the repo's stored entry; a blank field placeholders the fallback in force
+     (inherited primary_remote, the repo's current branch, the pyramid's top rung) so
+     the resolution chain reads at a glance. Saved is set only on the successful-save
+     response, after the swap. */}}
+{{define "repo-settings-panel"}}<section class="provenance repo-settings" id="repo-settings" data-testid="repo-settings">
+  <p class="repo-settings-scope" data-testid="repo-settings-scope">Repo defaults — applies to <strong>all attempts</strong> on <code>{{.Attempt.Repo}}</code>.</p>
+  {{if not .HasRepo}}
+  <p class="provenance-callout" data-testid="repo-settings-disabled">This attempt records no <code>repo</code>, so there is nothing to key per-repo settings on. Set a <code>repo</code> in provenance first.</p>
+  {{else}}
+  <form class="provenance-table" data-testid="repo-settings-form"
+    hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/repo-settings"
+    hx-trigger="change, submit" hx-target="#repo-settings" hx-swap="outerHTML">
+    <div class="provenance-row">
+      <span class="provenance-key">remote<span class="repo-settings-info" tabindex="0" role="note"
+        aria-label="Default git remote (forge) for this repo — supersedes the global primary_remote."
+        data-tip="Default git remote (forge) for this repo — supersedes the global primary_remote.">i</span></span>
+      <input type="text" name="remote" class="provenance-input" data-testid="repo-settings-remote"
+        value="{{.Remote}}" placeholder="{{if .RemoteHint}}{{.RemoteHint}}{{else}}set a remote…{{end}}" aria-label="default remote" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="provenance-row">
+      <span class="provenance-key">branch<span class="repo-settings-info" tabindex="0" role="note"
+        aria-label="Default branch (trunk) for this repo — what sync pulls and what a new attempt's base defaults to. Distinct from this attempt's base."
+        data-tip="Default branch (trunk) for this repo — what sync pulls and what a new attempt's base defaults to. Distinct from this attempt's base.">i</span></span>
+      <input type="text" name="branch" class="provenance-input" data-testid="repo-settings-branch"
+        value="{{.Branch}}" placeholder="{{if .BranchHint}}{{.BranchHint}}{{else}}set a branch…{{end}}" aria-label="default branch" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="provenance-row">
+      <span class="provenance-key">test rung<span class="repo-settings-info" tabindex="0" role="note"
+        aria-label="Default target test rung — the top rung the pyramid must clear before Review for this repo."
+        data-tip="Default target test rung — the top rung the pyramid must clear before Review for this repo.">i</span></span>
+      <input type="text" name="rung" class="provenance-input" data-testid="repo-settings-rung"
+        value="{{.Rung}}" placeholder="{{if .RungHint}}{{.RungHint}}{{else}}set a rung…{{end}}" aria-label="default test rung" autocomplete="off" spellcheck="false">
+    </div>
+    {{if .Saved}}<span class="provenance-saved" data-testid="repo-settings-saved" role="status">saved ✓</span>{{end}}
+  </form>
+  {{end}}
+</section>{{end}}
+
 {{/* cache-panel: per-attempt prompt-cache telemetry (drvctl-031 + drvweb-018). The
      status line is the headline caching_active yes/no; when off the panel takes the
      .cache-inactive modifier so "the prefix never cached" reads as a warning, not a
@@ -499,3 +581,10 @@
      OOB-swaps the previously-hidden banner into a visible report. The message is
      plain CLI text, HTML-escaped by the template — never routed through markdown. */}}
 {{define "merge-remote-result"}}<div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hx-swap-oob="true">{{.}}</div>{{end}}
+
+{{/* git-result carries a drv-013 Git control's land report (push / sync) back onto
+     the page. The push/sync handlers pair it with the attempt-live fragment: the
+     log region re-renders with the new note and this OOB-swaps the previously-hidden
+     banner into a visible report. Plain CLI text, HTML-escaped by the template —
+     never routed through markdown. */}}
+{{define "git-result"}}<div id="git-result" class="git-result" data-testid="git-result" hx-swap-oob="true">{{.}}</div>{{end}}

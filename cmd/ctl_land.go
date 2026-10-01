@@ -241,25 +241,25 @@ func (lc *landContext) mergeRemote(cmd *cobra.Command) error {
 	return nil
 }
 
-// sync back-merges the base into the branch additively.
+// sync back-merges the base into the branch additively, through the shared
+// internal/land orchestration (the same Sync the webui's button calls in-process)
+// so the CLI verb and the webui share one write path — the note-recording lives in
+// land, not here. A resolution/bookkeeping problem is a plain error (*PlainError);
+// the sync's own failure (dirty checkout, conflict) takes the escalate/no-escalate
+// disposition.
 func (lc *landContext) sync(cmd *cobra.Command) error {
-	synced, err := lc.wm.Sync(cmd.Context(), lc.key, lc.base)
+	res, err := land.Sync(cmd.Context(), repo.New(lc.root, resolveActor()), lc.ticket, lc.attempt)
 	if err != nil {
+		var pe *land.PlainError
+		if errors.As(err, &pe) {
+			return err
+		}
 		return lc.fail(cmd, "sync", err)
 	}
-	if synced.AlreadyUpToDate {
-		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s: already up to date with %s (nothing to sync)\n", lc.ticket, lc.attempt, lc.base)
-		return nil
+	out := cmd.OutOrStdout()
+	for _, line := range land.FormatSyncReport(lc.ticket, lc.attempt, res) {
+		fmt.Fprintln(out, line)
 	}
-	// A back-merge is a real, durable change to the branch; note it so a resumed
-	// agent sees the tip moved and why.
-	body := fmt.Sprintf("Synced %s into %s (merge commit, tip %s) via `ctl sync`; the branch is now ff-landable.", synced.Base, synced.Branch, shortSHA(synced.Tip))
-	if _, err := repo.New(lc.root, resolveActor()).AppendTyped(lc.ticket, lc.attempt, event.Event{
-		Type: "note", Body: body,
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "synced %s/%s: merged %s into %s\n", lc.ticket, lc.attempt, synced.Base, synced.Branch)
 	return nil
 }
 

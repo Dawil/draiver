@@ -187,6 +187,209 @@ func TestLoad_PromptCacheSurface(t *testing.T) {
 	}
 }
 
+func TestLoad_ReposOmittedIsNil(t *testing.T) {
+	// No repos key → nil map, read as "no per-repo overrides".
+	c, err := Load(writeConfig(t, `{"primary_remote": "forgejo"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Repos != nil {
+		t.Errorf("Repos = %+v, want nil (omitted)", c.Repos)
+	}
+}
+
+func TestLoad_ReposParsed(t *testing.T) {
+	path := writeConfig(t, `{
+	  "primary_remote": "origin",
+	  "repos": {
+	    "/home/dev/app": {"default_remote": "forgejo", "default_branch": "main", "default_test_rung": "integration"},
+	    "/home/dev/lib": {"default_branch": "trunk"}
+	  }
+	}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]RepoSettings{
+		"/home/dev/app": {DefaultRemote: "forgejo", DefaultBranch: "main", DefaultTestRung: "integration"},
+		"/home/dev/lib": {DefaultBranch: "trunk"},
+	}
+	if !reflect.DeepEqual(c.Repos, want) {
+		t.Errorf("Repos = %+v, want %+v", c.Repos, want)
+	}
+}
+
+func TestRepoSettings_ResolutionOrder(t *testing.T) {
+	// repo → global → builtin, each key independently. The app repo sets its own
+	// remote (overriding primary_remote) and leaves branch/rung unset; the lib repo
+	// sets nothing, so every key falls through.
+	c, err := Load(writeConfig(t, `{
+	  "primary_remote": "origin",
+	  "repos": {"/home/dev/app": {"default_remote": "forgejo"}}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := c.RepoSettings("/home/dev/app")
+	if app.Remote != "forgejo" {
+		t.Errorf("app remote = %q, want forgejo (per-repo overrides global)", app.Remote)
+	}
+	if app.Branch != "" || app.TestRung != "" {
+		t.Errorf("app branch/rung = %q/%q, want empty (builtin falls through to caller)", app.Branch, app.TestRung)
+	}
+
+	// A repo with no entry: remote falls to the global primary_remote, branch/rung to
+	// the builtin (empty — the caller's git branch / file top rung).
+	lib := c.RepoSettings("/home/dev/lib")
+	if lib.Remote != "origin" {
+		t.Errorf("lib remote = %q, want origin (global fallback)", lib.Remote)
+	}
+	if lib.Branch != "" || lib.TestRung != "" {
+		t.Errorf("lib branch/rung = %q/%q, want empty", lib.Branch, lib.TestRung)
+	}
+
+	// No global primary_remote and no entry → fully unset.
+	bare, _ := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if r := bare.RepoSettings("/x"); r.Remote != "" || r.Branch != "" || r.TestRung != "" {
+		t.Errorf("bare resolve = %+v, want all empty", r)
+	}
+}
+
+func TestSetRepoSettings_MergePreservesUnrelatedKeys(t *testing.T) {
+	// A file carrying global tunables (including an explicit context_limit: 0 that must
+	// survive the round-trip) and one repo's settings. A write to a DIFFERENT repo must
+	// leave every one of those untouched.
+	path := writeConfig(t, `{
+	  "context_limit": 0,
+	  "primary_remote": "forgejo",
+	  "permissions": {"WebFetch": "escalate"},
+	  "repos": {"/home/dev/app": {"default_remote": "origin", "default_branch": "main"}}
+	}`)
+
+	remote := "gitlab"
+	changed, err := SetRepoSettings(path, "/home/dev/lib", RepoSettingsUpdate{DefaultRemote: &remote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ContextLimit != 0 {
+		t.Errorf("context_limit = %d, want 0 (explicit-zero preserved through the merge)", c.ContextLimit)
+	}
+	if c.PrimaryRemote != "forgejo" {
+		t.Errorf("primary_remote = %q, want forgejo (preserved)", c.PrimaryRemote)
+	}
+	if !reflect.DeepEqual(c.Permissions, map[string]string{"WebFetch": "escalate"}) {
+		t.Errorf("permissions = %+v, want preserved", c.Permissions)
+	}
+	if app := c.Repos["/home/dev/app"]; app.DefaultRemote != "origin" || app.DefaultBranch != "main" {
+		t.Errorf("app settings = %+v, want untouched", app)
+	}
+	if lib := c.Repos["/home/dev/lib"]; lib.DefaultRemote != "gitlab" {
+		t.Errorf("lib remote = %q, want gitlab (the write)", lib.DefaultRemote)
+	}
+}
+
+func TestSetRepoSettings_PartialUpdateLeavesOtherKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	branch := "main"
+	if _, err := SetRepoSettings(path, "/r", RepoSettingsUpdate{DefaultBranch: &branch}); err != nil {
+		t.Fatal(err)
+	}
+	// A second write touching only the rung must not blank the branch.
+	rung := "e2e"
+	if _, err := SetRepoSettings(path, "/r", RepoSettingsUpdate{DefaultTestRung: &rung}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.Repos["/r"]
+	if got.DefaultBranch != "main" || got.DefaultTestRung != "e2e" {
+		t.Errorf("settings = %+v, want branch=main rung=e2e (partial updates accrete)", got)
+	}
+}
+
+func TestSetRepoSettings_ClearKeyFallsBack(t *testing.T) {
+	path := writeConfig(t, `{"primary_remote": "forgejo", "repos": {"/r": {"default_remote": "origin"}}}`)
+
+	// An explicit empty value clears the key, so the resolver falls back to the global.
+	empty := ""
+	if _, err := SetRepoSettings(path, "/r", RepoSettingsUpdate{DefaultRemote: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Repos["/r"].DefaultRemote; got != "" {
+		t.Errorf("stored default_remote = %q, want empty (cleared)", got)
+	}
+	if r := c.RepoSettings("/r"); r.Remote != "forgejo" {
+		t.Errorf("resolved remote = %q, want forgejo (fell back after clear)", r.Remote)
+	}
+}
+
+func TestSetRepoSettings_NothingToSetWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	changed, err := SetRepoSettings(path, "/r", RepoSettingsUpdate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("changed = true, want false for an empty update")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("file exists after a no-op update (err=%v), want no file written", err)
+	}
+}
+
+func TestSetRepoSettings_CreatesMissingFile(t *testing.T) {
+	// First write mints config.json (and its parent dir) — the opt-in-file discipline.
+	path := filepath.Join(t.TempDir(), "sub", "config.json")
+	remote := "forgejo"
+	if _, err := SetRepoSettings(path, "/r", RepoSettingsUpdate{DefaultRemote: &remote}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Repos["/r"].DefaultRemote != "forgejo" {
+		t.Errorf("default_remote = %q, want forgejo", c.Repos["/r"].DefaultRemote)
+	}
+}
+
+func TestSetRepoSettings_OneWriteSeenByEveryReader(t *testing.T) {
+	// The store is the single global config, so two readers keyed by the SAME repo path
+	// (standing in for two attempts/tickets on that repo) observe one write — the core
+	// value of per-repo settings living in config, not per-attempt attempt.md.
+	path := filepath.Join(t.TempDir(), "config.json")
+	rung := "integration"
+	if _, err := SetRepoSettings(path, "/home/dev/app", RepoSettingsUpdate{DefaultTestRung: &rung}); err != nil {
+		t.Fatal(err)
+	}
+	for _, reader := range []string{"reader-A", "reader-B"} {
+		c, err := Load(path) // each reader loads the one config independently
+		if err != nil {
+			t.Fatalf("%s: %v", reader, err)
+		}
+		if got := c.RepoSettings("/home/dev/app").TestRung; got != "integration" {
+			t.Errorf("%s resolved rung = %q, want integration", reader, got)
+		}
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")
