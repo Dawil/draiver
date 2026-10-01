@@ -475,6 +475,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/agent-logs", s.handleAgentLogs)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/report", s.handleReport)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/report/asset", s.handleReportAsset)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
@@ -598,6 +600,11 @@ type detailVM struct {
 	// is a Capability (carries `wants:` edges), so the panel renders on a coordinator
 	// and is absent on an ordinary ticket. Built by s.capability.
 	Capability *capabilityVM
+	// Report drives the BDD-report embed (drv-018): the latest captured run shown
+	// inline plus a selector among the side-by-side regenerations. It is always
+	// non-nil; its HasRuns is false (and the section hidden) until drv-017's capture
+	// has written a run for the attempt. Built by s.reportPanel.
+	Report *reportPanelVM
 }
 
 // capabilityVM drives the "capability-panel" partial (drvweb-017): a Capability's
@@ -1198,6 +1205,11 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 		return detailVM{}, err
 	}
 	vm.Capability = cap
+	rp, err := s.reportPanel(id, att)
+	if err != nil {
+		return detailVM{}, err
+	}
+	vm.Report = rp
 	return vm, nil
 }
 

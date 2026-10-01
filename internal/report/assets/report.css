@@ -1,0 +1,138 @@
+/* Self-contained styles for the standalone cucumber report (drv-018). Inlined
+   into the <head> of every rendered file so it opens offline with no network.
+   Uses CSS custom properties with a prefers-color-scheme dark variant so the
+   single file reads well in either mode. */
+:root {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --panel-2: #f0f2f5;
+  --ink: #1b1f24;
+  --muted: #6a737d;
+  --line: #d9dee3;
+  --accent: #2563eb;
+  --passed: #1a7f37;
+  --failed: #cf222e;
+  --skipped: #6a737d;
+  --pending: #9a6700;
+  --undefined: #bc4c00;
+  --ambiguous: #8250df;
+  --code-bg: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #21262d;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --line: #30363d;
+    --accent: #4493f8;
+    --passed: #3fb950;
+    --failed: #f85149;
+    --skipped: #8b949e;
+    --pending: #d29922;
+    --undefined: #db6d28;
+    --ambiguous: #a371f7;
+    --code-bg: #0b0f14;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.report { max-width: 1040px; margin: 0 auto; padding: 24px 20px 64px; }
+header.report-head { margin-bottom: 20px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.subtitle { color: var(--muted); font-size: 13px; }
+
+/* summary */
+.summary { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.stat {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 14px; min-width: 110px;
+}
+.stat .n { font-size: 20px; font-weight: 600; }
+.stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.verdict { font-weight: 600; padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+.verdict.ok { background: color-mix(in srgb, var(--passed) 18%, transparent); color: var(--passed); }
+.verdict.bad { background: color-mix(in srgb, var(--failed) 18%, transparent); color: var(--failed); }
+
+.bar { display: flex; height: 10px; border-radius: 999px; overflow: hidden; border: 1px solid var(--line); margin: 6px 0 2px; }
+.bar > span { display: block; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 12px; }
+.legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+
+.toolbar { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+.toolbar button {
+  font: inherit; font-size: 12px; cursor: pointer; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+}
+.toolbar button:hover { border-color: var(--accent); }
+.toolbar label { font-size: 12px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
+
+/* status colors */
+.status-passed    { --c: var(--passed); }
+.status-failed    { --c: var(--failed); }
+.status-skipped   { --c: var(--skipped); }
+.status-pending   { --c: var(--pending); }
+.status-undefined { --c: var(--undefined); }
+.status-ambiguous { --c: var(--ambiguous); }
+.status-unknown   { --c: var(--muted); }
+.dot { background: var(--c); }
+.seg-passed { background: var(--passed); }
+.seg-failed { background: var(--failed); }
+.seg-skipped { background: var(--skipped); }
+.seg-pending { background: var(--pending); }
+.seg-undefined { background: var(--undefined); }
+.seg-ambiguous { background: var(--ambiguous); }
+.seg-unknown { background: var(--muted); }
+
+/* feature / scenario tree */
+details.feature, details.scenario { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin: 10px 0; }
+details.feature > summary, details.scenario > summary {
+  cursor: pointer; padding: 10px 14px; list-style: none; display: flex; align-items: center; gap: 10px;
+}
+details.feature > summary::-webkit-details-marker, details.scenario > summary::-webkit-details-marker { display: none; }
+summary .marker { color: var(--muted); font-size: 11px; width: 10px; }
+summary .sdot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+summary .title { font-weight: 600; }
+summary .uri { color: var(--muted); font-weight: 400; font-size: 12px; }
+summary .time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.scenario-wrap { padding: 0 14px 8px 34px; }
+.feature-desc { color: var(--muted); padding: 0 14px 8px 34px; white-space: pre-wrap; }
+
+.tags { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.tag { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 4px; padding: 0 6px; font-size: 11px; }
+
+/* steps */
+ol.steps { list-style: none; margin: 6px 0; padding: 0; }
+ol.steps > li { padding: 5px 8px; border-radius: 6px; display: block; }
+ol.steps > li:hover { background: var(--panel-2); }
+.step-line { display: flex; align-items: baseline; gap: 8px; }
+.step-line .sdot { width: 9px; height: 9px; border-radius: 50%; flex: none; align-self: center; }
+.step-kw { color: var(--muted); font-weight: 600; }
+.step-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.step-loc { color: var(--muted); font-size: 11px; margin-left: 17px; }
+.hook-kw { font-style: italic; }
+
+pre.err, pre.out, pre.docstring, pre.text-embed {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; margin: 6px 0 6px 17px; overflow: auto; font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word;
+}
+pre.err { color: var(--failed); border-color: color-mix(in srgb, var(--failed) 40%, var(--line)); }
+table.datatable { border-collapse: collapse; margin: 6px 0 6px 17px; font-size: 12.5px; }
+table.datatable td { border: 1px solid var(--line); padding: 3px 8px; }
+
+.embeds { margin: 6px 0 6px 17px; }
+.embeds > details { margin: 4px 0; }
+.embeds summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.embeds img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; display: block; margin-top: 6px; }
+.embeds a.download { color: var(--accent); font-size: 12px; }
+
+.empty { color: var(--muted); padding: 20px; text-align: center; }
+footer.report-foot { margin-top: 28px; color: var(--muted); font-size: 12px; text-align: center; }
+.filtered-hidden { display: none !important; }
