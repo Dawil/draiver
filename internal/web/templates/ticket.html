@@ -133,36 +133,18 @@
           hx-vals='{"type":"done"}' hx-include="[data-testid=compose-body]"
           hx-confirm="Mark this attempt Done? This is terminal and cannot be undone."
           hx-target="[data-testid=log-region]" hx-swap="innerHTML">Done — close</button>
-        {{if and .Attempt.Base .Attempt.Repo}}
-        {{/* "Merged elsewhere": the real end-of-life flow — the change landed via a
-             PR merged on the forge, so instead of the plain Done this closes AND
-             refreshes the local base in one click. It shells `ctl merge --remote`
-             (drvctl-029), which records `done` on the verified external land and
-             *best-effort* fast-forwards local <base> — a failed pull is a warning,
-             never a block. Terminal and it touches the local repo, so it confirms
-             (wording names the ff). Shown only when the attempt records both a base
-             and a repo — without them there is nothing to fetch/ff, so it degrades
-             to the plain Done above. The result region below carries the verb's
-             combined message (closed + pull result / pull warning), swapped in OOB. */}}
-        <button type="button" class="action-merge-remote" data-testid="action-merge-remote"
-          hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/merge-remote"
-          hx-confirm="Merged elsewhere? This closes the ticket and fast-forwards your local {{.Attempt.Base}} to the remote. This is terminal and cannot be undone."
-          hx-target="[data-testid=log-region]" hx-swap="innerHTML">Merged elsewhere — close &amp; pull {{.Attempt.Base}}</button>
-        {{end}}
       </div>
-      {{if and .Attempt.Base .Attempt.Repo}}
-      <div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hidden></div>
-      {{end}}
       {{end}}
 
       {{if and .Attempt.Base .Attempt.Repo (ne (printf "%s" .Attempt.State) "Done")}}
       {{/* drv-013 Git controls: drive the attempt's local git folder from the board
            without dropping to a terminal. Each button is a same-origin htmx POST to
            /git/<verb> that re-renders the log region (the verb records a note) and
-           OOB-swaps the result banner with the land report — the merge-remote-result
-           pattern, reused. Both verbs are git-only and non-terminal (they never
-           change the attempt's state): Push sends the branch to the default remote;
-           Sync back-merges <base> in (clean checkout required). Shown while the
+           OOB-swaps the result banner with the land report. Both verbs are git-only
+           and non-terminal (they never change the attempt's state): Push sends the
+           branch to the default remote; Sync pulls the remote's <base> into the
+           local <base> and back-merges it into the branch (clean checkout required
+           for the back-merge). Shown while the
            attempt records both a base and a repo and is not yet Done — without a
            base/repo there is nothing to push or sync, and a Done attempt's checkout
            may already be reclaimed. Create-PR / Merge-PR are deliberately absent:
@@ -178,8 +160,8 @@
             hx-target="[data-testid=log-region]" hx-swap="innerHTML">Push to remote</button>
           <button type="button" class="action-git-sync" data-testid="action-git-sync"
             hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/sync"
-            hx-confirm="Sync: back-merge {{.Attempt.Base}} into this attempt's branch? Needs a clean checkout."
-            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull {{.Attempt.Base}} in</button>
+            hx-confirm="Sync: pull the remote's {{.Attempt.Base}} into your local {{.Attempt.Base}} and back-merge it into this attempt's branch? Needs a clean checkout."
+            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull remote {{.Attempt.Base}} in</button>
         </div>
         <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
       </section>
@@ -522,13 +504,6 @@
       </ol>{{end}}
 
 {{define "attempt-live"}}{{template "attempt-log" .}}{{template "state-badge" (badge .Attempt.State true)}}<span id="log-count" class="count" hx-swap-oob="true">{{len .Events}}</span>{{end}}
-
-{{/* merge-remote-result carries `ctl merge --remote`'s combined message (closed +
-     pull result, or closed + pull warning) back onto the page. The handler pairs
-     it with the attempt-live fragment: the log region re-renders to Done and this
-     OOB-swaps the previously-hidden banner into a visible report. The message is
-     plain CLI text, HTML-escaped by the template — never routed through markdown. */}}
-{{define "merge-remote-result"}}<div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hx-swap-oob="true">{{.}}</div>{{end}}
 
 {{/* git-result carries a drv-013 Git control's land report (push / sync) back onto
      the page. The push/sync handlers pair it with the attempt-live fragment: the

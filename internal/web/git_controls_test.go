@@ -32,9 +32,8 @@ func notesOf(t *testing.T, root store.Root, id, att string) []event.Event {
 
 // TestGitControlsGating pins the drv-013 Git section's preconditions: it shows for
 // a Running OR Review attempt that records both a base and a repo (push/sync are
-// useful throughout the attempt's life, unlike the Review-only merge-remote
-// button), is absent without a base/repo, and is absent once the attempt is Done
-// (its checkout may already be reclaimed).
+// useful throughout the attempt's life), is absent without a base/repo, and is
+// absent once the attempt is Done (its checkout may already be reclaimed).
 func TestGitControlsGating(t *testing.T) {
 	root := seedBoard(t)
 	s, err := New(root)
@@ -60,7 +59,7 @@ func TestGitControlsGating(t *testing.T) {
 		`data-testid="git-result"`,
 		`/git/push`,
 		`/git/sync`,
-		`pull main in`,
+		`pull remote main in`,
 	} {
 		if !strings.Contains(review, want) {
 			t.Errorf("Review attempt with base/repo missing %q", want)
@@ -68,14 +67,16 @@ func TestGitControlsGating(t *testing.T) {
 	}
 
 	// Running attempt WITH base+repo → the Git section still shows (push/sync are
-	// not Review-gated), even though the Review-only actions do not.
+	// not Review-gated).
 	writeAttemptMeta(t, root, "PROJ-3", "0001", "/tmp/repo", "main")
 	running := get(t, h, "/ticket/PROJ-3/0001").Body.String()
 	if !strings.Contains(running, `data-testid="git-controls"`) {
 		t.Errorf("a Running attempt with base/repo should show the Git section")
 	}
-	if strings.Contains(running, `data-testid="action-merge-remote"`) {
-		t.Errorf("a Running attempt must not show the Review-only merge-remote button")
+	// The old "Merged elsewhere — close & pull base" button is gone for good: Sync
+	// now owns pulling the remote's base down (drv-013 #12).
+	if strings.Contains(review, `data-testid="action-merge-remote"`) {
+		t.Errorf("the merge-remote button must no longer render")
 	}
 
 	// A Done attempt with base+repo → no Git section.
@@ -159,9 +160,45 @@ func TestGitSyncButtonBackMerges(t *testing.T) {
 	}
 }
 
-// TestGitControlsGuards covers the state-changing routes' guards, mirroring the
-// merge-remote guard test: a cross-origin POST is refused and records nothing, and
-// an unknown attempt 404s — for both verbs.
+// TestGitSyncButtonPullsRemoteIntoLocalBase is the drv-013 #12 fix: the remote's
+// base has moved ahead of the local base (a PR merged on the forge), and Sync pulls
+// it down — fast-forwarding the local base to the remote tip — instead of the old,
+// misleading "already up to date with main". merged=true leaves origin/main at the
+// feature tip while local main sits at the initial commit.
+func TestGitSyncButtonPullsRemoteIntoLocalBase(t *testing.T) {
+	root, repo, checkout, _ := remoteReviewAttempt(t, true)
+	remoteTip := headOfWeb(t, checkout, "HEAD") // origin/main == the pushed feature tip
+	if got := headOfWeb(t, repo, "main"); got == remoteTip {
+		t.Fatalf("precondition: local main should be behind the remote, both at %s", got)
+	}
+
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := post(t, s.Handler(), "/ticket/PROJ-1/0001/git/sync")
+	if rr.Code != 200 {
+		t.Fatalf("POST git/sync = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `data-testid="git-result"`) || !strings.Contains(body, "fast-forwarded") {
+		t.Errorf("banner should report the local base fast-forwarding to the remote\n%s", body)
+	}
+	// The #12 fix: local main actually advanced to the remote tip.
+	if got := headOfWeb(t, repo, "main"); got != remoteTip {
+		t.Errorf("local main = %s, want remote tip %s (pulled)", got, remoteTip)
+	}
+	if got := stateOfWeb(t, root); got != project.Review {
+		t.Errorf("after sync, state = %q, want Review (sync is not terminal)", got)
+	}
+	notes := notesOf(t, root, "PROJ-1", "0001")
+	if len(notes) != 1 || !strings.Contains(notes[0].Body, "Pulled") {
+		t.Errorf("want one `note` recording the pull, got %+v", notes)
+	}
+}
+
+// TestGitControlsGuards covers the state-changing routes' guards: a cross-origin
+// POST is refused and records nothing, and an unknown attempt 404s — for both verbs.
 func TestGitControlsGuards(t *testing.T) {
 	root, _, _, _ := remoteReviewAttempt(t, false)
 	s, err := New(root)
