@@ -37,6 +37,16 @@ type Level struct {
 	Name string `yaml:"name"`
 	// Run is the shell command that executes the rung. Non-blank.
 	Run string `yaml:"run"`
+	// Environment is the optional environment this rung binds to. drv-017 reads it
+	// only as a key label for per-run artefact storage (bdd/<rung>/<env>/…); drv-016
+	// / drv-012 give it lifecycle meaning (up/healthcheck/down). Blank → unbound.
+	Environment string `yaml:"environment,omitempty"`
+	// Artifacts are the optional output files/dirs this rung produces that `draiver
+	// test --log` captures into the attempt's artefacts/ store under a per-run key —
+	// the cucumber-JSON, an embeddings/screenshots dir, and any script-output files
+	// (drv-017). Paths are relative to the worktree. Empty → an ordinary rung with
+	// nothing to capture.
+	Artifacts []string `yaml:"artifacts,omitempty"`
 }
 
 // Pyramid is a repo's parsed, validated test-pyramid declaration. Levels is an

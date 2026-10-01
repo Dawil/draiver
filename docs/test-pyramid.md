@@ -278,6 +278,48 @@ three stores (per `targets-and-dependencies.md` §3):
 5. **Timeouts.** A hung `run` must not wedge anything: a per-rung `timeout:` in the
    yaml, a trip recorded as a fault. A cheap early add when needed.
 
+## BDD artefact capture & storage (drv-017)
+
+A BDD/acceptance rung produces **evidence** — cucumber-JSON, embeddings
+(screenshots), and script-output files. These are **reproducible, not
+version-controlled**: they belong in the data root, not the code repo. drv-017 adds
+the capture-and-storage layer that puts them there, provenance-anchored.
+
+- **Declaring outputs.** A rung declares the files/dirs it produces with an
+  `artifacts:` list (worktree-relative), optionally naming the `environment:` it
+  binds to:
+
+  ```yaml
+  - name: bdd
+    environment: local
+    run: sh run-acceptance.sh        # emits cucumber.json + shots/ (the crystallised steps)
+    artifacts:
+      - cucumber.json
+      - shots                        # a dir is captured recursively
+  ```
+
+  The declared outputs should be **git-ignored** — they are regenerated evidence,
+  so keeping them untracked lets repeated `draiver test --log` runs stay clean and
+  not trip the dirty-tree guard.
+
+- **Per-run key.** On a green `--log` run, each declared artefact is copied into the
+  attempt's `artefacts/` store under
+  `bdd/<rung>/<env>/<commit>/<runstamp>/…`. The key is **never clobbered**: a
+  collision appends a numeric suffix, so **multiple regenerations of the same
+  artefact coexist side by side** and a prior run is always recoverable.
+
+- **Provenance.** The captured set (plus a `run.json` recording rung, environment,
+  commit, runstamp, and — once drv-012 lands — the healthcheck verdict) is
+  referenced from the run's `test-result` event (`artefacts:`), so it is covered by
+  `draiver audit` and surfaced by `brief`.
+
+- **Retention.** Additive by default — nothing is deleted. The operator config knob
+  `bdd_artefact_keep` caps how many run sets are kept per `(rung, environment)`
+  group; `0` (the default) keeps everything.
+
+The capture is runner-agnostic (it stores whatever files the rung declares) and
+decoupled from how the run is executed (drv-016) or rendered (drv-018).
+
 ## Where it lands relative to draiver's thesis
 
 - **Success is ratified, never self-certified.** The pyramid turns *"all tests

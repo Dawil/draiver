@@ -101,6 +101,13 @@ type Config struct {
 	// text is byte-identical across every attempt in a daemon lifetime (the
 	// prefix-sharing invariant). Empty (the default) appends nothing.
 	AppendSystemPromptFile string `json:"append_system_prompt_file"`
+
+	// BDDArtefactKeep caps how many captured BDD run artefact sets `draiver test`
+	// retains per (rung, environment) group — the GC knob keeping the per-attempt
+	// store from growing unbounded as runs regenerate side by side (drv-017).
+	// Retention is additive: on capture the oldest run dirs beyond the cap are
+	// pruned, newest kept. 0 (the default) keeps everything — no GC.
+	BDDArtefactKeep int `json:"bdd_artefact_keep"`
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -127,6 +134,7 @@ type file struct {
 	ExcludeDynamicSystemPromptSections *bool             `json:"exclude_dynamic_system_prompt_sections"`
 	AppendSystemPromptFile             *string           `json:"append_system_prompt_file"`
 	DefaultSupervision                 *string           `json:"default_supervision"`
+	BDDArtefactKeep                    *int              `json:"bdd_artefact_keep"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -198,6 +206,9 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.DefaultSupervision != nil {
 		c.DefaultSupervision = *f.DefaultSupervision
+	}
+	if f.BDDArtefactKeep != nil {
+		c.BDDArtefactKeep = *f.BDDArtefactKeep
 	}
 	return c, nil
 }
