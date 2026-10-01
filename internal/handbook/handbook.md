@@ -22,7 +22,7 @@ isn't the default, pass `--data <dir>` or export `DRAIVER_DATA`.
 Your side of the protocol is entirely CLI: `brief` to load, `log` to record,
 `escalate` to ask, `review` to hand off. Run those yourself — never offload your
 own logging onto the human. The one verb that is *theirs*, not yours, is
-`resolve`: the human answers escalations from the board on their own time (§4).
+`resolve`: the human answers escalations from the board on their own time (§5).
 Assume you cannot see the human in real time — you communicate by writing events
 they will read on the board, not by chatting.
 
@@ -43,10 +43,30 @@ that's a signal the log is leaking state — fix it by logging more, below.
 
 Run it **once, at the start of your session.** Re-briefing mid-session is a
 mistake: don't loop back to it after each event, and — critically — don't poll it
-after you escalate to see whether an answer has landed (see §4). Once you're
+after you escalate to see whether an answer has landed (see §5). Once you're
 working, you have the context; keep going.
 
-## 2. Log gotchas the moment they bite
+## 2. Translate the acceptance criteria into features
+
+The spec's authority over *what "done" means* lives in its **`## Acceptance
+criteria`** section — plain-text statements of intent (e.g. *"user can log in and
+click through to the dashboard"*), authored by whoever wrote the ticket. The brief
+shows them to you as ordinary spec content; they are **not** pre-materialised into
+runnable tests, and there is no checked-in feature store to copy from.
+
+Turning that prose into executable acceptance tests is **your job**: author the
+corresponding Gherkin **`.feature` files + step definitions / execution scripts in
+the code repo**, on your branch, and commit them alongside the code they cover.
+They run under the repo's BDD rung (so `draiver test` can prove them green, §6)
+and, on merge, graduate into trunk as a permanent deterministic acceptance rung —
+the control plane growing one ticket at a time.
+
+Interpret the criteria faithfully. If a statement is ambiguous enough that you
+would be *guessing* at what "done" means, that is a spec question for a human —
+`escalate` it (§5) rather than encoding a guess. A spec with no acceptance-criteria
+section has nothing to translate; carry on.
+
+## 3. Log gotchas the moment they bite
 
 When something surprises you — a broken assumption, a hidden constraint, a
 workaround — record it immediately so no one rediscovers it:
@@ -55,7 +75,7 @@ workaround — record it immediately so no one rediscovers it:
 draiver log <TICKET> --type gotcha "Stripe test keys only work in test mode; live webhooks 401 until the account is verified."
 ```
 
-## 3. Log decision points with the alternatives
+## 4. Log decision points with the alternatives
 
 Every meaningful fork: capture what you chose, what you rejected, and why. This
 is what makes a fresh agent able to continue your reasoning instead of relitigating it.
@@ -88,7 +108,7 @@ MD
 )"
 ```
 
-## 4. When you need a human, escalate — then stop
+## 5. When you need a human, escalate — then stop
 
 When you hit something only a human can decide (missing credentials, a product
 choice, an ambiguous spec), **do not guess past it.** The one mechanism that
@@ -131,7 +151,7 @@ answer and log what you did, closing the escalate → resolve → action arc:
 draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_URL from a fixture; opened PROJ-140 for the real secret."
 ```
 
-## 5. Verify with the test pyramid before you claim
+## 6. Verify with the test pyramid before you claim
 
 If the repo ships a `.test-pyramid.yaml`, prove the work green before you hand it
 off — and the order matters:
@@ -153,10 +173,10 @@ off — and the order matters:
   free.
 
 A repo with no `.test-pyramid.yaml` has nothing to run: `draiver test` says so and
-exits clean. Do this before §6 — a review backed by a logged green result is one a
+exits clean. Do this before §7 — a review backed by a logged green result is one a
 human can trust at a glance.
 
-## 6. Claim review — push, then claim with a link
+## 7. Claim review — push, then claim with a link
 
 When you believe the work is complete, make a **claim** for a human to verify.
 Do not mark the ticket done; that decision is the human's. A claim the human
@@ -175,7 +195,7 @@ push or open a PR. You push, exactly as you run `git commit` yourself.
   `"primary_remote": "forgejo"`).
 - **Ambiguous** — several remotes with no `primary_remote` set, or a
   `primary_remote` that isn't in `git remote` — **do not guess a remote.**
-  Escalate (§4): pushing to the wrong forge is worse than asking.
+  Escalate (§5): pushing to the wrong forge is worse than asking.
 
 ```
 git push -u <remote> HEAD
@@ -207,9 +227,10 @@ draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's thre
 
 ## Loop
 
-Each session: `brief` once → work → `log` gotchas/decisions as you go → when
-blocked, `escalate` and stop (the human resolves from their board, on their own
-time) → when the ticket is worked again, a session `brief`s, reads the
+Each session: `brief` once → work — including translating the spec's acceptance
+criteria into Gherkin features + steps on your branch — → `log` gotchas/decisions
+as you go → when blocked, `escalate` and stop (the human resolves from their board,
+on their own time) → when the ticket is worked again, a session `brief`s, reads the
 resolution, and continues → when the work is done, **verify** (iterate with
 `draiver test`, commit, then `draiver test --log`), **push** to a remote, and
 `review` with a link the human can click.

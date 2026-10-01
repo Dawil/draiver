@@ -14,11 +14,16 @@
 
 A ticket's attempt should reach **as high as it can — or as high as it is required
 to** — up its repo's test pyramid before it raises for Review. Today "all tests
-green" is a phrase the agent *types into its review claim* (`handbook.md` §5:
+green" is a phrase the agent *types into its review claim* (`handbook.md` §7:
 *"all tests green; covers the spec's three acceptance criteria"*). That is exactly
 the self-report the platform's trust model says it structurally **cannot** trust
 (`coding-agent-platform.md`: *"Success is a claim, not exit 0 … the platform's
 trust model cannot extend to the worker's self-report"*).
+
+The pyramid is also where a ticket's **acceptance criteria** become enforceable: a
+spec authors them as plain prose, the attempt's agent realises them as Gherkin
+features + steps, and those run as a BDD rung climbed here — see
+[`acceptance-criteria.md`](./acceptance-criteria.md).
 
 The test pyramid replaces the phrase with a **fact draiver itself established**: a
 rung draiver *ran* and *adjudicated*, recorded as a structured claim on the
