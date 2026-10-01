@@ -198,6 +198,53 @@ to every worktree; that is a follow-up. The webui surfaces *which* environment a
 rung targets, but not a live healthcheck verdict (only green `run` results are
 logged, so no probe outcome is cheaply available to the read-only board).
 
+## BDD / acceptance rung (drv-016): cucumber-JSON is the interchange
+
+An acceptance rung is **not a new rung kind** — it is an ordinary rung that (a)
+binds an `environment:` (drv-012) and (b) declares the **cucumber-JSON** report its
+`run` emits, via `cucumber_json:`. That one field is the whole convention:
+
+```yaml
+environments:
+  - name: staging
+    up:   docker compose -f staging.yml up -d
+    down: docker compose -f staging.yml down -v
+    healthchecks:
+      - name: api-reachable
+        script: curl -fsS https://staging.example.com/healthz
+
+levels:
+  - name: unit
+    run: go test ./...
+  - name: acceptance
+    environment: staging                       # up → healthcheck → run → down
+    run: godog run -f cucumber:report.json ./features   # the repo's BDD runner
+    cucumber_json: report.json                 # where it writes cucumber-JSON
+```
+
+- **draiver never hardcodes a runner.** The `run` is the same generic `sh -c`
+  shell-out every rung uses; it invokes *whatever* BDD tool the repo configures
+  (godog, cucumber-js, behave, pytest-bdd, …). draiver consumes the **JSON, not the
+  tool** — so the rung is runner-agnostic by construction.
+- **`cucumber_json:` names the report**, relative to the worktree root. After the
+  `run`, draiver reads it, parses it (`internal/cucumber`), and prints a one-line
+  summary — proving the report is present and consumable. Capture runs **whether the
+  run passed or failed**: a red run's report is exactly what a human Review and the
+  HTML renderer (drv-018) need to see *which* scenarios broke.
+- **Capture is best-effort.** A missing or invalid report is a warning that never
+  changes the rung's verdict (like `down`): the `run`'s exit code stays
+  authoritative. The control-outcome mapping is unchanged — a red `up` escalates
+  (6), a red `healthcheck` blocks before the run (7), a red `run` is a code fault
+  (1).
+- **The cucumber-JSON is the interchange.** `internal/cucumber` is the shared model
+  both **drv-017** (durable artefact storage of the report + its embedded
+  screenshots) and **drv-018** (HTML rendering) build on. This ticket captures and
+  consumes it; it deliberately does **not** define where the report is durably
+  stored (drv-017) or how it is rendered (drv-018).
+
+A BDD run on its own never substitutes for the human Review — a cleared acceptance
+rung *feeds* the Review, it does not replace it (drv-014).
+
 ## Why this is on-thesis, not a bolt-on
 
 Three of the platform's core values (`coding-agent-platform.md` §"Core values")
@@ -268,6 +315,7 @@ Tier-2/Tier-3 (`draiverctl.md`): engine = `drvctl`, UI = `drvweb`.
 | **drvctl-049** | The **Review gate** — `draiver review` folds the log for the highest logged rung at HEAD and refuses a claim below the target rung; no file → no gate. | 047, 048 |
 | **drvweb-021** | Board/attempt view — render the attempt's cleared rung (a small pyramid badge), distinguishing green-at-HEAD from stale (result exists but `commit` ≠ tip). | 048 |
 | **drv-012** | **Environments** — a top-level `environments:` list (named `{up?, down?, healthchecks[]}` contexts) + an `environment:` binding on levels, parsed/validated in `internal/pyramid`; `draiver test` honours up → healthcheck → run → down with the control-outcome exit codes (up=6/escalate, healthcheck=7/block, run=1/code-fault); the badge surfaces the targeted env. The concrete realisation of the deferred vocabulary below. | 047, 048, drvweb-021 |
+| **drv-016** | **BDD execution rung** — a rung's optional `cucumber_json:` marks it a BDD/acceptance rung: its `run` shells out to the repo's configured BDD runner (never hardcoded) over an `environment:`, and after the run `draiver test` reads the emitted **cucumber-JSON** via `internal/cucumber` (the runner-agnostic interchange), summarising it best-effort (pass or fail) without changing the verdict. Feeds drv-017 (artefact storage) / drv-018 (HTML). | 012 |
 
 Separately filed: **drv-010** — dogfood the pyramid on this repo with a
 Testcontainers integration rung (depends in spirit on drv-009).

@@ -42,6 +42,14 @@ type Level struct {
 	// implicit ambient context: no up/down/healthcheck, run as today. A non-blank
 	// name that resolves to no environment is a validation error (see validate).
 	Environment string `yaml:"environment"`
+	// CucumberJSON optionally names the standard cucumber-JSON report file this
+	// rung's Run writes, relative to the worktree root. Setting it marks the rung a
+	// BDD/acceptance rung (drv-016): after Run, draiver reads and consumes the
+	// cucumber-JSON there — the runner-agnostic interchange drv-017 (artefact
+	// storage) and drv-018 (HTML) build on. Blank is a plain rung: no report capture.
+	// draiver never hardcodes a runner; the Run invokes whatever BDD tool the repo
+	// configures (godog, cucumber-js, …), and only the emitted JSON is consumed.
+	CucumberJSON string `yaml:"cucumber_json"`
 }
 
 // Healthcheck is one readiness probe of an Environment: a named shell command that

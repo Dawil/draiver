@@ -212,6 +212,119 @@ levels:
 	}
 }
 
+// sampleCucumberJSON is a minimal standard cucumber-JSON document: one feature,
+// one scenario, two passed steps — enough to exercise capture + summary.
+const sampleCucumberJSON = `[{"uri":"features/x.feature","keyword":"Feature","name":"X","elements":[` +
+	`{"keyword":"Scenario","name":"works","type":"scenario","steps":[` +
+	`{"keyword":"Given ","name":"a","result":{"status":"passed"}},` +
+	`{"keyword":"Then ","name":"b","result":{"status":"passed"}}]}]}]`
+
+// redCucumberJSON is one failed scenario (a failed step with a screenshot) — the
+// report a red BDD run leaves behind for drv-018 to render.
+const redCucumberJSON = `[{"uri":"features/x.feature","keyword":"Feature","name":"X","elements":[` +
+	`{"keyword":"Scenario","name":"breaks","type":"scenario","steps":[` +
+	`{"keyword":"When ","name":"boom","result":{"status":"failed","error_message":"nope"},` +
+	`"embeddings":[{"mime_type":"image/png","data":"QUJD"}]}]}]}]`
+
+// A BDD rung declares the cucumber-JSON its run emits; on a green run draiver reads,
+// parses, and summarises it — consuming the interchange, not the tool. The rung
+// still exits 0.
+func TestBDDRungCapturesCucumberJSON(t *testing.T) {
+	body := `
+levels:
+  - name: acceptance
+    run: cp src.json report.json
+    cucumber_json: report.json
+`
+	dir := pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	if err := os.WriteFile(filepath.Join(dir, "src.json"), []byte(sampleCucumberJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("green BDD rung exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "captured cucumber-JSON report.json") {
+		t.Errorf("did not report capturing the cucumber-JSON: %q", out)
+	}
+	if !strings.Contains(out, "1 scenario") {
+		t.Errorf("capture summary missing scenario count: %q", out)
+	}
+}
+
+// A BDD run that writes a report and then fails is a code fault (exit 1), but the
+// report is still captured first — a red run's cucumber-JSON is exactly what the
+// human Review and drv-018 need.
+func TestBDDRungCapturesReportOnRedRun(t *testing.T) {
+	body := `
+levels:
+  - name: acceptance
+    run: sh -c 'cp src.json report.json; false'
+    cucumber_json: report.json
+`
+	dir := pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	if err := os.WriteFile(filepath.Join(dir, "src.json"), []byte(redCucumberJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := run(t, "test")
+	if code != 1 {
+		t.Fatalf("a failing BDD run should be a code fault (exit 1), got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "captured cucumber-JSON report.json") {
+		t.Errorf("a red run's report must still be captured: %q", out)
+	}
+}
+
+// A BDD rung whose runner left no report (or an invalid one) warns but never changes
+// an otherwise-green verdict — capture is best-effort, like `down`.
+func TestBDDMissingReportWarnsKeepsVerdict(t *testing.T) {
+	body := `
+levels:
+  - name: acceptance
+    run: "true"
+    cucumber_json: nope.json
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("a missing report must not change a green verdict, got %d: %s", code, out)
+	}
+	if !strings.Contains(out, "warning") || !strings.Contains(out, "not captured") {
+		t.Errorf("a missing report should surface a warning: %q", out)
+	}
+}
+
+// A red healthcheck blocks a BDD rung before its run — so no run, and no report is
+// captured: the block (pass-the-ball) outcome takes precedence over capture.
+func TestBDDHealthcheckRedBlocksBeforeCapture(t *testing.T) {
+	body := `
+environments:
+  - name: staging
+    healthchecks:
+      - name: api
+        script: "false"
+levels:
+  - name: acceptance
+    run: cp src.json report.json
+    cucumber_json: report.json
+    environment: staging
+`
+	dir := pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	if err := os.WriteFile(filepath.Join(dir, "src.json"), []byte(sampleCucumberJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := run(t, "test")
+	if code != ExitBlocked {
+		t.Fatalf("red healthcheck should block (exit %d), got %d: %s", ExitBlocked, code, out)
+	}
+	if strings.Contains(out, "captured cucumber-JSON") {
+		t.Errorf("no report should be captured when the rung is blocked before its run: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "report.json")); err == nil {
+		t.Errorf("the run must not have executed (report.json should not exist)")
+	}
+}
+
 // A repo with no .test-pyramid.yaml has nothing to run: exit 0 with a clear note.
 func TestBareNoPyramidIsClean(t *testing.T) {
 	t.Chdir(t.TempDir())
