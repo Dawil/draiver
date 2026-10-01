@@ -9,6 +9,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
 )
@@ -137,7 +138,17 @@ func reviewGate(ctx context.Context, root store.Root, ticket, att string) error 
 		}
 	}
 
-	target := p.Target()
+	// The target rung: the file's top rung, floored up by the repo's configured
+	// default_test_rung (drv-011) if it names a higher one. The floor can only ever
+	// raise the bar, never lower it, so a repo setting tightens a review but can't
+	// weaken the file author's. Resolved best-effort through the gateway — a missing
+	// or unreadable config leaves the file's top rung as the gate, never failing the
+	// claim on a config error.
+	repoRung := ""
+	if rs, rerr := repo.New(root, resolveActor()).RepoSettings(a.Repo); rerr == nil {
+		repoRung = rs.TestRung
+	}
+	target := p.FloorTarget(repoRung)
 	highest, ok := p.HighestAtHEAD(results, head)
 	if ok && highest.Name == target.Name {
 		// The target rung is green at this exact HEAD — the claim is admitted.

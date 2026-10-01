@@ -53,6 +53,32 @@ func (p *Pyramid) Target() Level {
 	return p.Levels[len(p.Levels)-1]
 }
 
+// FloorTarget returns the rung a consumer should target given the file's ladder and
+// an optional repo-configured default rung (drv-011's default_test_rung). The repo
+// default acts as a FLOOR, never lowering the file's top-rung bar: the result is the
+// higher-in-climb-order of the file's top rung and repoRung. An empty repoRung, or
+// one naming a rung not in this pyramid (a typo, or a level since removed/renamed),
+// leaves the target at the file's top rung.
+//
+// Because the top rung is the maximum climb index, a floor can only ever raise the
+// bar, never lower it — so repo config can tighten a review but structurally cannot
+// weaken one below what the .test-pyramid.yaml author designated. That is the
+// deliberate, conservative resolution of the file-top-vs-repo-default open question
+// (the spec's recommendation): the read is honoured, the gate is never softened.
+func (p *Pyramid) FloorTarget(repoRung string) Level {
+	top := p.Target()
+	if repoRung == "" {
+		return top
+	}
+	topIdx := len(p.Levels) - 1
+	for i, lv := range p.Levels {
+		if lv.Name == repoRung && i > topIdx {
+			return lv
+		}
+	}
+	return top
+}
+
 // Result is one logged rung outcome the review gate folds over: a rung that was
 // recorded green (drvctl-048 only logs passing results) and the commit it passed
 // at. It is a neutral pair deliberately decoupled from internal/event, so this

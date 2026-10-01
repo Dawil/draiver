@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,8 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/pyramid"
+	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -51,7 +54,21 @@ var testCmd = &cobra.Command{
 			return nil
 		}
 
+		// An explicit RUNG wins. Otherwise the default climb target is the repo's
+		// configured default_test_rung (drv-011) when it names a real rung — the
+		// dev-iteration default (decision #4), which may sit *below* the file's top
+		// rung — falling back to the file's top rung when unset or unknown. Resolved
+		// best-effort from the worktree (branch → attempt → recorded repo → config);
+		// any failure leaves the file's top rung, so `test` never breaks on a
+		// config/identify error. The Review gate applies this same rung as a FLOOR
+		// instead (it can only raise its bar, never lower it), so what `test` iterates
+		// at by default may be lower than what `review` ultimately demands.
 		target := p.Target().Name
+		if rr := repoRungForWorktree(ctx, wd); rr != "" {
+			if _, ok := levelsUpTo(p, rr); ok {
+				target = rr
+			}
+		}
 		if len(args) == 1 {
 			target = args[0]
 		}
@@ -119,6 +136,32 @@ var testCmd = &cobra.Command{
 		fmt.Fprintf(out, "recorded test-result #%d on %s/%s (rung %q @ %s)\n", ev.Seq, key.Ticket, key.Attempt, target, shortSHA(sha))
 		return nil
 	},
+}
+
+// repoRungForWorktree resolves the repo's configured default_test_rung (drv-011)
+// for the attempt the worktree at wd belongs to, best-effort: it maps the checkout's
+// branch to an attempt (worktree.Identify), reads that attempt's recorded repo, and
+// resolves the per-repo setting through the gateway. It returns "" — leaving the
+// caller on the file's top rung — on any failure (a non-attempt branch, a missing
+// attempt, an unreadable config), so the fast `test` loop never breaks on config.
+func repoRungForWorktree(ctx context.Context, wd string) string {
+	key, err := worktree.Identify(ctx, wd)
+	if err != nil {
+		return ""
+	}
+	root, err := resolveRoot()
+	if err != nil {
+		return ""
+	}
+	meta, err := attempt.LoadMeta(root, key.Ticket, key.Attempt)
+	if err != nil {
+		return ""
+	}
+	rs, err := repo.New(root, resolveActor()).RepoSettings(meta.Repo)
+	if err != nil {
+		return ""
+	}
+	return rs.TestRung
 }
 
 // levelsUpTo returns the rungs from the base up to and including the one named

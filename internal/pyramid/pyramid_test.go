@@ -155,6 +155,26 @@ var threeRung = &Pyramid{Levels: []Level{
 	{Name: "e2e", Run: "x"},
 }}
 
+func TestFloorTarget(t *testing.T) {
+	cases := []struct {
+		name     string
+		repoRung string
+		want     string
+	}{
+		{"unset repo rung → file top", "", "e2e"},
+		{"repo rung below top → floored up to file top (never lowers the bar)", "unit", "e2e"},
+		{"repo rung equal to top → file top", "e2e", "e2e"},
+		{"unknown repo rung (typo) → ignored, file top", "smoke", "e2e"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := threeRung.FloorTarget(tc.repoRung).Name; got != tc.want {
+				t.Errorf("FloorTarget(%q) = %q, want %q", tc.repoRung, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHighestAtHEAD(t *testing.T) {
 	const head = "cafef00d"
 	const old = "deadbeef"
@@ -189,7 +209,7 @@ func TestHighestAtHEAD(t *testing.T) {
 		{
 			name: "a stale top rung does not outrank a fresh lower rung",
 			results: []Result{
-				{Rung: "e2e", Commit: old},         // stale — the claim-invalidating case
+				{Rung: "e2e", Commit: old},          // stale — the claim-invalidating case
 				{Rung: "integration", Commit: head}, // the real highest at HEAD
 			},
 			want: "integration",

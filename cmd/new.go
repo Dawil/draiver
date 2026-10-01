@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/Dawil/draiver/internal/attempt"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -105,11 +106,21 @@ const errNoRepo = "a repo path is required: pass --repo <local git working tree>
 // here — at creation, near the person who can fix it — rather than deferring the
 // failure to the first `ctl merge`. flagBase is trimmed; an explicit --base is
 // trusted as given (it need not exist yet — sync can create history under it).
-func resolveBase(ctx context.Context, repo, flagBase string) (string, error) {
+func resolveBase(ctx context.Context, repoPath, flagBase string) (string, error) {
 	if b := strings.TrimSpace(flagBase); b != "" {
 		return b, nil
 	}
-	head, ok, err := worktree.HeadBranch(ctx, repo)
+	// With no explicit --base, the repo's configured default_branch (drv-011) is the
+	// next source before git: a repo can declare its trunk once in config and every
+	// new attempt defaults its base from it. Read best-effort — a missing/unreadable
+	// config (or an unset default_branch) just falls through to the repo's current
+	// branch below, so creation never fails on a config error.
+	if cfg, err := config.Load(""); err == nil {
+		if b := cfg.RepoSettings(repoPath).Branch; b != "" {
+			return b, nil
+		}
+	}
+	head, ok, err := worktree.HeadBranch(ctx, repoPath)
 	switch {
 	case err != nil:
 		// The repo path is not a resolvable git working tree (git missing, or the

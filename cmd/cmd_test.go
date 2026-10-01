@@ -62,6 +62,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	mergeRemote = ""
 	archiveAccepted, archiveAbandoned = false, false
 	resolveByFlag = ""
+	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog = false
 	t.Setenv("DRAIVER_ATTEMPT", "")
 	resetFlagsChanged(rootCmd)

@@ -285,6 +285,30 @@ func ArchiveBody(outcome string) string {
 	return "Closed and archived from the board."
 }
 
+// SetRepoSettings merges a partial per-repo settings update into the global config
+// (drv-011) through the gateway, so the web layer never pokes config.json directly
+// any more than it pokes attempt.md — the same write invariant SetProvenance holds,
+// for a different store with a broader blast radius (every attempt on the repo, not
+// one). It is the shared write behind the `config repo` verb and the attempt page's
+// repo-settings panel. With no field set it writes nothing and reports changed=false,
+// leaving the "nothing to set" framing to the caller, exactly like SetProvenance.
+// The config path is resolved from the daemon's own flag/env/default (passing ""),
+// matching every other config read this gateway folds through.
+func (r *Repo) SetRepoSettings(repoPath string, upd config.RepoSettingsUpdate) (bool, error) {
+	return config.SetRepoSettings("", repoPath, upd)
+}
+
+// RepoSettings resolves a repo's effective settings (per-repo → global → builtin)
+// by loading the global config through the gateway. An empty resolved field hands
+// the builtin back to the caller (the repo's current branch, the pyramid's top rung).
+func (r *Repo) RepoSettings(repoPath string) (config.Resolved, error) {
+	cfg, err := config.Load("")
+	if err != nil {
+		return config.Resolved{}, err
+	}
+	return cfg.RepoSettings(repoPath), nil
+}
+
 // LoadAttempt loads one attempt's derived state and event log.
 func (r *Repo) LoadAttempt(ticket, att string) (project.Attempt, error) {
 	return project.LoadAttempt(r.root, ticket, att)
