@@ -12,11 +12,13 @@ import (
 )
 
 // bddPyramidCheckout makes a committed checkout whose top rung is a BDD/acceptance
-// rung: it declares output artefacts and its `run` is a crystallised step script
-// that produces them (a cucumber-JSON + a screenshots dir). The outputs are
-// gitignored — they are reproducible evidence, not version-controlled — so the tree
-// stays clean across repeated `--log` runs and the dirty-tree guard never trips. It
-// chdirs the test into the checkout and returns its path.
+// rung: it names its cucumber-JSON report (drv-016's first-class cucumber_json) and
+// declares an extra output artefact (a screenshots dir), its `run` a crystallised
+// step script that produces both. The rung binds the `local` environment, which the
+// file declares (drv-012 validates that every referenced environment exists). The
+// outputs are gitignored — reproducible evidence, not version-controlled — so the
+// tree stays clean across repeated `--log` runs and the dirty-tree guard never trips.
+// It chdirs the test into the checkout and returns its path.
 func bddPyramidCheckout(t *testing.T, ticket, attempt string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -27,8 +29,13 @@ func bddPyramidCheckout(t *testing.T, ticket, attempt string) string {
 	gitInDir(t, dir, "commit", "-q", "--allow-empty", "-m", "init")
 	gitInDir(t, dir, "checkout", "-q", "-b", "draiver/"+ticket+"/"+attempt)
 
+	// A minimal but valid cucumber-JSON document (a top-level array), so runRung's
+	// live consume parses cleanly and the capture stores a real report.
+	cucumberJSON := `[{"uri":"f.feature","keyword":"Feature","name":"X",` +
+		`"elements":[{"keyword":"Scenario","name":"works","type":"scenario",` +
+		`"steps":[{"keyword":"Given ","name":"a step","result":{"status":"passed"}}]}]}]`
 	mustWrite(t, filepath.Join(dir, "bdd.sh"),
-		"printf '{\"ok\":true}' > cucumber.json\n"+
+		"cat > cucumber.json <<'JSON'\n"+cucumberJSON+"\nJSON\n"+
 			"mkdir -p shots\n"+
 			"printf img > shots/a.png\n")
 	mustWrite(t, filepath.Join(dir, ".gitignore"), "cucumber.json\nshots/\n")
@@ -38,9 +45,11 @@ func bddPyramidCheckout(t *testing.T, ticket, attempt string) string {
 			"  - name: bdd\n"+
 			"    environment: local\n"+
 			"    run: sh bdd.sh\n"+
+			"    cucumber_json: cucumber.json\n"+
 			"    artifacts:\n"+
-			"      - cucumber.json\n"+
-			"      - shots\n")
+			"      - shots\n"+
+			"environments:\n"+
+			"  - name: local\n")
 	gitInDir(t, dir, "add", "-A")
 	gitInDir(t, dir, "commit", "-q", "-m", "bdd rung + crystallised script")
 	t.Chdir(dir)

@@ -86,7 +86,7 @@ func TestProjectPyramid_Stale(t *testing.T) {
 func TestProjectPyramid_GreenBeatsOlderHigher(t *testing.T) {
 	events := []event.Event{
 		result("integration", "old1"), // higher rung, but stale
-		result("unit", "head3"),        // lower rung, at HEAD
+		result("unit", "head3"),       // lower rung, at HEAD
 	}
 	vm := projectPyramid(twoRung(), events, "head3", false)
 	if vm == nil || vm.Stale {
@@ -133,6 +133,28 @@ func TestProjectPyramid_CleanStaysGreen(t *testing.T) {
 	vm := projectPyramid(twoRung(), events, "head1", false)
 	if vm == nil || vm.Dirty || vm.Stale {
 		t.Fatalf("a clean tree at HEAD must be plain green, got %+v", vm)
+	}
+}
+
+// A rung's targeted environment is carried onto its VM (drv-012), empty for the
+// ambient context, so the badge can surface *where* green was proven.
+func TestProjectPyramid_SurfacesEnvironment(t *testing.T) {
+	p := &pyramid.Pyramid{
+		Environments: []pyramid.Environment{{Name: "staging"}},
+		Levels: []pyramid.Level{
+			{Name: "unit"}, // ambient
+			{Name: "integration", Environment: "staging"}, // bound
+		},
+	}
+	vm := projectPyramid(p, []event.Event{result("integration", "h")}, "h", false)
+	if vm == nil || len(vm.Rungs) != 2 {
+		t.Fatalf("expected a 2-rung badge, got %+v", vm)
+	}
+	if vm.Rungs[0].Environment != "" {
+		t.Errorf("ambient rung should carry no environment, got %q", vm.Rungs[0].Environment)
+	}
+	if vm.Rungs[1].Environment != "staging" {
+		t.Errorf("bound rung should carry its environment, got %q", vm.Rungs[1].Environment)
 	}
 }
 

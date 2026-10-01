@@ -108,6 +108,83 @@ type Config struct {
 	// Retention is additive: on capture the oldest run dirs beyond the cap are
 	// pruned, newest kept. 0 (the default) keeps everything — no GC.
 	BDDArtefactKeep int `json:"bdd_artefact_keep"`
+
+	// Repos holds per-repo setting overrides keyed by the repo path — the same
+	// string an attempt records as its `repo`/provenance Repo (drv-011). Some knobs
+	// are properties of a repo, not a single attempt (which remote is the forge,
+	// which branch is the trunk, how high the pyramid must climb); setting them once
+	// here lets every attempt on that repo read the same value from the same place.
+	// A repo with no entry falls through to the global default, then the builtin —
+	// see RepoSettings. Omitted (the default) → nil, read as "no per-repo overrides".
+	Repos map[string]RepoSettings `json:"repos"`
+}
+
+// RepoSettings is one repo's stored overrides. Each field is a plain string; an
+// empty one means "unset — fall through to the global default, then the builtin",
+// the resolution RepoSettings applies. It mirrors the shape the config file carries
+// under repos.<path> and the fields the attempt page's repo-settings panel edits.
+type RepoSettings struct {
+	// DefaultRemote is the git remote name/URL git actions use for this repo,
+	// superseding the global PrimaryRemote. Empty → fall through to PrimaryRemote.
+	DefaultRemote string `json:"default_remote"`
+	// DefaultBranch is the repo's trunk: what sync pulls and what a new attempt's
+	// base defaults to. Empty → the repo's current branch (a git concern the caller
+	// resolves), so there is no global default branch to fall through to.
+	DefaultBranch string `json:"default_branch"`
+	// DefaultTestRung is the top rung the pyramid must clear before Review for this
+	// repo. Empty → the file's own top rung (the builtin). The global
+	// default_test_level it would supersede is deferred (docs/test-pyramid.md), so
+	// there is no global value to fall through to today.
+	DefaultTestRung string `json:"default_test_rung"`
+}
+
+// Resolved is a repo's effective settings after global fallback is applied — what a
+// consumer actually reads. A field is empty only when neither the per-repo entry nor
+// the global default set it, signalling the caller to apply its builtin (the repo's
+// current branch, the pyramid file's top rung).
+type Resolved struct {
+	// Remote is DefaultRemote → PrimaryRemote → "".
+	Remote string
+	// Branch is DefaultBranch → "" (the repo's current branch is the builtin,
+	// resolved git-side by the caller — there is no global default branch).
+	Branch string
+	// TestRung is DefaultTestRung → "" (the pyramid file's top rung is the builtin;
+	// the global default_test_level is deferred, so nothing sits between them yet).
+	TestRung string
+}
+
+// RepoSettings resolves a repo's effective settings: per-repo entry → global
+// default → builtin, each key resolved independently so a per-repo entry that sets
+// only one key leaves the others falling through. An empty resolved field hands the
+// builtin back to the caller (the repo's current branch, the file's top rung). It is
+// total — a repo with no entry is a valid, common state, not an error.
+func (c Config) RepoSettings(repoPath string) Resolved {
+	rs := c.Repos[repoPath] // zero value when absent — every field empty, all fall through
+	r := Resolved{
+		Remote:   rs.DefaultRemote,
+		Branch:   rs.DefaultBranch,
+		TestRung: rs.DefaultTestRung,
+	}
+	if r.Remote == "" {
+		r.Remote = c.PrimaryRemote
+	}
+	return r
+}
+
+// RepoSettingsUpdate is a partial edit to one repo's stored settings: a nil field is
+// left untouched, a non-nil one is written (including to "" to clear a key). It is
+// the per-repo twin of repo.Provenance — the shape both the `config repo` verb and
+// the attempt page's repo-settings panel hand to SetRepoSettings.
+type RepoSettingsUpdate struct {
+	DefaultRemote   *string
+	DefaultBranch   *string
+	DefaultTestRung *string
+}
+
+// set reports whether the update touches any field — the "nothing to set" guard the
+// caller uses to leave the file untouched, mirroring SetProvenance's changed=false.
+func (u RepoSettingsUpdate) set() bool {
+	return u.DefaultRemote != nil || u.DefaultBranch != nil || u.DefaultTestRung != nil
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -124,17 +201,36 @@ func Default() Config {
 // (nil → take the default) from a key explicitly set to 0 (→ used verbatim, e.g.
 // context_limit: 0 to disable the auto-stop). A plain-int decode cannot make that
 // distinction, which is what makes "0 disables" expressible in the file at all.
+//
+// Every tag carries ,omitempty so the mirror also round-trips: SetRepoSettings
+// decodes the existing file into it, patches one repo, and re-marshals — and a nil
+// pointer / empty map / empty slice is dropped, so a key the operator never set
+// stays absent rather than being written back as a zero. (omitempty on a pointer
+// drops only nil, so a *bool set to false or a *int set to 0 is still written — the
+// explicit-zero semantics Load relies on survive the round-trip.)
 type file struct {
-	ContextWindow                      *int              `json:"context_window"`
-	ContextLimit                       *int              `json:"context_limit"`
-	PermissionsDefault                 *string           `json:"permissions_default"`
-	Permissions                        map[string]string `json:"permissions"`
-	ReviewLinkHosts                    []string          `json:"review_link_hosts"`
-	PrimaryRemote                      *string           `json:"primary_remote"`
-	ExcludeDynamicSystemPromptSections *bool             `json:"exclude_dynamic_system_prompt_sections"`
-	AppendSystemPromptFile             *string           `json:"append_system_prompt_file"`
-	DefaultSupervision                 *string           `json:"default_supervision"`
-	BDDArtefactKeep                    *int              `json:"bdd_artefact_keep"`
+	ContextWindow                      *int                 `json:"context_window,omitempty"`
+	ContextLimit                       *int                 `json:"context_limit,omitempty"`
+	PermissionsDefault                 *string              `json:"permissions_default,omitempty"`
+	Permissions                        map[string]string    `json:"permissions,omitempty"`
+	ReviewLinkHosts                    []string             `json:"review_link_hosts,omitempty"`
+	PrimaryRemote                      *string              `json:"primary_remote,omitempty"`
+	ExcludeDynamicSystemPromptSections *bool                `json:"exclude_dynamic_system_prompt_sections,omitempty"`
+	AppendSystemPromptFile             *string              `json:"append_system_prompt_file,omitempty"`
+	DefaultSupervision                 *string              `json:"default_supervision,omitempty"`
+	BDDArtefactKeep                    *int                 `json:"bdd_artefact_keep,omitempty"`
+	Repos                              map[string]*repoFile `json:"repos,omitempty"`
+}
+
+// repoFile is the pointer-mirror of RepoSettings: a nil field is an omitted key (not
+// written back), so the merging writer leaves keys it did not touch exactly as it
+// found them. An empty-string value is a key explicitly cleared to "" — distinct
+// from nil, and preserved on round-trip — mirroring the explicit-zero discipline the
+// top-level pointer fields carry.
+type repoFile struct {
+	DefaultRemote   *string `json:"default_remote,omitempty"`
+	DefaultBranch   *string `json:"default_branch,omitempty"`
+	DefaultTestRung *string `json:"default_test_rung,omitempty"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -210,5 +306,122 @@ func Load(flagVal string) (Config, error) {
 	if f.BDDArtefactKeep != nil {
 		c.BDDArtefactKeep = *f.BDDArtefactKeep
 	}
+	if f.Repos != nil {
+		c.Repos = make(map[string]RepoSettings, len(f.Repos))
+		for path, rf := range f.Repos {
+			c.Repos[path] = rf.resolve()
+		}
+	}
 	return c, nil
+}
+
+// SetRepoSettings merges a partial update to one repo's settings into the config
+// file at the resolved path and writes it atomically, preserving every other key —
+// other repos, that repo's unchanged keys, and all the global tunables — untouched.
+// It is the config twin of repo.SetProvenance's partial-update discipline: a nil
+// field in upd is left as the file has it, a non-nil one is written (including to ""
+// to clear a key). changed is false when upd sets nothing, and then nothing is
+// written, leaving the "nothing to set" framing to the caller.
+//
+// A missing file is not an error (it is opt-in, as Load treats it) — the write
+// creates it, and ~/.draiver along with it. The merge decodes the existing bytes
+// into the pointer-mirror so unknown-to-Default keys and the explicit-zero fields
+// survive the round-trip, patches the one repo, then re-marshals. The write is
+// atomic (temp file + rename) so a concurrent reader never sees a half-written file.
+func SetRepoSettings(flagVal, repoPath string, upd RepoSettingsUpdate) (changed bool, err error) {
+	if !upd.set() {
+		return false, nil
+	}
+	path, err := Path(flagVal)
+	if err != nil {
+		return false, err
+	}
+	var f file
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &f); err != nil {
+			return false, fmt.Errorf("parse config %s: %w", path, err)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// No file yet — start from an empty mirror; the write mints it.
+	default:
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	if f.Repos == nil {
+		f.Repos = map[string]*repoFile{}
+	}
+	rf := f.Repos[repoPath]
+	if rf == nil {
+		rf = &repoFile{}
+		f.Repos[repoPath] = rf
+	}
+	if upd.DefaultRemote != nil {
+		rf.DefaultRemote = upd.DefaultRemote
+	}
+	if upd.DefaultBranch != nil {
+		rf.DefaultBranch = upd.DefaultBranch
+	}
+	if upd.DefaultTestRung != nil {
+		rf.DefaultTestRung = upd.DefaultTestRung
+	}
+
+	out, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("encode config: %w", err)
+	}
+	out = append(out, '\n')
+	if err := atomicWrite(path, out); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// atomicWrite writes data to path via a temp file in the same directory and a
+// rename, creating the parent directory if it is missing (the common first-write
+// case for ~/.draiver). The temp file shares the target's directory so the rename is
+// a same-filesystem atomic swap, not a cross-device copy.
+func atomicWrite(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".config-*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace config %s: %w", path, err)
+	}
+	return nil
+}
+
+// resolve flattens a repoFile's pointers into a plain RepoSettings, treating an
+// omitted key as "" — the same empty-means-fall-through the resolver reads. A nil
+// receiver (a repos.<path> entry present but null) yields the zero value.
+func (rf *repoFile) resolve() RepoSettings {
+	if rf == nil {
+		return RepoSettings{}
+	}
+	var rs RepoSettings
+	if rf.DefaultRemote != nil {
+		rs.DefaultRemote = *rf.DefaultRemote
+	}
+	if rf.DefaultBranch != nil {
+		rs.DefaultBranch = *rf.DefaultBranch
+	}
+	if rf.DefaultTestRung != nil {
+		rs.DefaultTestRung = *rf.DefaultTestRung
+	}
+	return rs
 }

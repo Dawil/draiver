@@ -53,6 +53,12 @@ type pyramidVM struct {
 type pyramidRungVM struct {
 	Name    string
 	Reached bool // at or below the highest logged rung (green when !Stale, dimmed when Stale)
+	// Environment names the context the rung targets (drv-012), empty for the
+	// ambient context. It surfaces *where* green was proven, not just how high. The
+	// last healthcheck verdict is intentionally not shown: only green `run` results
+	// are logged, so no healthcheck outcome is cheaply available to this read-only
+	// projection without re-running probes — a deferred follow-up.
+	Environment string
 }
 
 // shortSHA trims a commit oid to a readable 12-char prefix for the badge tooltip.
@@ -102,7 +108,11 @@ func projectPyramid(p *pyramid.Pyramid, events []event.Event, head string, dirty
 
 	vm := &pyramidVM{Head: shortSHA(head)}
 	for _, lv := range p.Levels {
-		vm.Rungs = append(vm.Rungs, pyramidRungVM{Name: lv.Name})
+		env := ""
+		if e, ok := p.EnvironmentFor(lv); ok {
+			env = e.Name
+		}
+		vm.Rungs = append(vm.Rungs, pyramidRungVM{Name: lv.Name, Environment: env})
 	}
 
 	// Green-at-HEAD: the highest rung whose result names the current HEAD. Everything

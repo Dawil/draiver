@@ -4,8 +4,9 @@ package cmd
 // owns (create → work → **land** → reclaim): `ctl merge` lands an attempt's branch
 // into its base (fast-forward only) and records `done` on success, so Done comes
 // to mean *the code is in the target branch*, not *someone clicked Done*; `ctl
-// sync` back-merges the base into the branch additively. Both derive the base from
-// the attempt's recorded `base:` field, never a hardcoded trunk (drvctl-021).
+// sync` pulls the base from its remote and back-merges it into the branch
+// additively. Both derive the base from the attempt's recorded `base:` field,
+// never a hardcoded trunk (drvctl-021).
 //
 // Two orthogonal axes govern them:
 //   - direction/strategy: merge vs sync; and on a diverged merge, refuse (default)
@@ -95,14 +96,21 @@ var ctlMergeCmd = &cobra.Command{
 
 var ctlSyncCmd = &cobra.Command{
 	Use:   "sync <ticket[@attempt]>",
-	Short: "Back-merge the base into an attempt's branch (additive; no rebase)",
-	Long: "sync back-merges the attempt's recorded base branch into its per-attempt branch " +
-		"with a plain, additive `git merge` — existing commits keep their SHAs and at most " +
-		"one merge commit lands on top, so a resume re-attaches to the same durable branch " +
-		"and just continues on the updated tip. After a sync the branch becomes ff-landable, " +
-		"so it is both the fix for a diverged `ctl merge` and independently useful mid-attempt " +
-		"(pulling the base's changes in). It never rebases and never forces.\n\n" +
-		"It operates on the attempt's checkout (materializing one if the daemon already " +
+	Short: "Pull the remote's base into the local base, then back-merge it into the attempt's branch",
+	Long: "sync brings trunk down in two directions. First it refreshes the local base from its " +
+		"default remote — a read-only fetch then a best-effort fast-forward of the local base " +
+		"toward the remote tip, so a PR merged on the forge shows up as the local base moving " +
+		"forward. Then it back-merges that now-current base into the attempt's per-attempt branch " +
+		"with a plain, additive `git merge` — existing commits keep their SHAs and at most one " +
+		"merge commit lands on top, so a resume re-attaches to the same durable branch and just " +
+		"continues on the updated tip. After a sync the branch becomes ff-landable, so it is both " +
+		"the fix for a diverged `ctl merge` and independently useful mid-attempt. It never rebases " +
+		"and never forces.\n\n" +
+		"The remote refresh is best-effort: a repo with no remote skips it (a purely local " +
+		"back-merge), and a fetch or local-ff problem is reported as a warning rather than failing " +
+		"the sync. The default remote is the sole remote, or the config's primary_remote when " +
+		"there are several.\n\n" +
+		"The back-merge operates on the attempt's checkout (materializing one if the daemon already " +
 		"reclaimed it) and requires that checkout clean. On conflict it aborts the merge, " +
 		"restoring the pre-sync state, then escalates or errors per the failure-disposition " +
 		"flags (default by actor kind).",
@@ -241,14 +249,16 @@ func (lc *landContext) mergeRemote(cmd *cobra.Command) error {
 	return nil
 }
 
-// sync back-merges the base into the branch additively, through the shared
-// internal/land orchestration (the same Sync the webui's button calls in-process)
-// so the CLI verb and the webui share one write path — the note-recording lives in
-// land, not here. A resolution/bookkeeping problem is a plain error (*PlainError);
-// the sync's own failure (dirty checkout, conflict) takes the escalate/no-escalate
-// disposition.
+// sync refreshes the base from its remote and back-merges it into the branch
+// additively, through the shared internal/land orchestration (the same Sync the
+// webui's button calls in-process) so the CLI verb and the webui share one write
+// path — the note-recording lives in land, not here. The default remote is picked
+// from the repo's remotes / config primary_remote (no --remote flag; "" means
+// default). A resolution/bookkeeping problem is a plain error (*PlainError); the
+// back-merge's own failure (dirty checkout, conflict) takes the
+// escalate/no-escalate disposition.
 func (lc *landContext) sync(cmd *cobra.Command) error {
-	res, err := land.Sync(cmd.Context(), repo.New(lc.root, resolveActor()), lc.ticket, lc.attempt)
+	res, err := land.Sync(cmd.Context(), repo.New(lc.root, resolveActor()), lc.ticket, lc.attempt, "", ctlConfigPath)
 	if err != nil {
 		var pe *land.PlainError
 		if errors.As(err, &pe) {

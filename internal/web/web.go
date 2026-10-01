@@ -5,9 +5,10 @@
 // attempt detail page appends a typed log event (POST /ticket/{id}/{attempt}/log
 // — a note/gotcha/decision, or a Review action: Decision to reopen, Done to
 // close), answers an open escalation (POST /ticket/{id}/{attempt}/resolve — the
-// board affordance for `draiver resolve`), and closes a Review attempt landed by
-// an external PR while pulling its base (POST /ticket/{id}/{attempt}/merge-remote
-// — the "Merged elsewhere" action, `draiver ctl merge --remote`); the board's
+// board affordance for `draiver resolve`), and drives the attempt's local git
+// folder from the board (POST /ticket/{id}/{attempt}/git/push and .../git/sync —
+// the drv-013 Git controls: push the branch to its remote, or pull trunk down and
+// back-merge it, via `draiver ctl` over internal/land); the board's
 // green play button (POST /ticket/{id}/{attempt}/enable) opts a parked attempt
 // into daemon supervision; and the attempt's provenance panel (POST
 // /ticket/{id}/{attempt}/provenance) sets the repo/base that gate merge/sync, so a
@@ -16,8 +17,8 @@
 // board — a green tick to accept a Done card, a grey cross to abandon an active one.
 // Every write reaches the data folder through the same in-process gateway the CLI
 // verbs use (drv-008), not a subprocess: log/done/resolve/enable/archive and the
-// provenance/edges writes go through internal/repo, and `merge --remote` through
-// internal/land (which records its `done` through repo too). So there is exactly
+// provenance/edges writes go through internal/repo, and the git controls through
+// internal/land (which records its notes through repo too). So there is exactly
 // one code path per write — a function shared by the board and the terminal, not a
 // shelled binary — and the same live-session render (`ctl logs -f`) streams here
 // via internal/streamlog. The handlers own only transport concerns
@@ -45,6 +46,7 @@ import (
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/land"
 	"github.com/Dawil/draiver/internal/project"
@@ -428,6 +430,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"archiveAction": archiveAction,
 			"reviewLink":    reviewLink,
 			"provenance":    func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
+			"repoSettings":  s.repoSettingsPanel,
 			"cachePanel":    cachePanel,
 			"cohortRow":     cohortRow,
 			"sessionDot":    s.sessionDot,
@@ -452,14 +455,15 @@ func paletteVars() template.HTML {
 		Eucalypt, Wattle, GhostGum, Waratah))
 }
 
-// Handler returns the route mux. Every route is a GET but seven writes: POST
+// Handler returns the route mux. Every route is a GET but these writes: POST
 // .../log appends a composed log event, POST .../resolve answers an open
 // escalation, POST .../enable opts an attempt into daemon supervision, POST
 // .../archive takes an attempt off the board (an `archive` event, accepted or
-// abandoned), POST .../merge-remote closes a Review attempt landed by an external
-// PR and pulls its base (via `ctl merge --remote`), POST .../provenance sets the
-// repo/base that gate merge/sync (via `attempt set`), and POST .../supervision
-// sets a Capability's coordinator supervision mode (via `ctl supervision`).
+// abandoned), POST .../git/push and .../git/sync drive the attempt's local git
+// folder (push the branch to its remote; pull trunk down and back-merge it — the
+// drv-013 Git controls), POST .../provenance sets the repo/base that gate
+// merge/sync (via `attempt set`), and POST .../supervision sets a Capability's
+// coordinator supervision mode (via `ctl supervision`).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
@@ -475,10 +479,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
-	mux.HandleFunc("POST /ticket/{id}/{attempt}/merge-remote", s.handleMergeRemote)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/push", s.handleGitPush)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/sync", s.handleGitSync)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/repo-settings", s.handleRepoSettings)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 	return mux
@@ -733,6 +737,66 @@ func (s *Server) capability(a project.Attempt) (*capabilityVM, error) {
 type provenanceVM struct {
 	Attempt project.Attempt
 	Saved   bool
+}
+
+// repoSettingsVM drives the "repo-settings-panel" partial: the per-repo defaults
+// editor sitting immediately right of provenance on the attempt detail page
+// (drv-011). It mirrors provenanceVM's mechanics (inline inputs, post-on-change,
+// outerHTML swap, a Saved flash) but edits a DIFFERENT store with a BROADER scope:
+// provenance writes this one attempt's attempt.md, this writes the global
+// config.json's per-repo section, so every attempt on Repo reads the change. Repo is
+// the config key; HasRepo gates the whole panel (no repo recorded → nothing to key
+// on, so the panel renders a disabled hint instead of an editor). Remote/Branch/Rung
+// prefill from the repo's STORED entry (blank when unset, a deliberate "leave
+// unchanged" on save); the *Hint fields carry the fallback that applies while a field
+// is unset, surfaced as the input placeholder so the resolution chain is legible.
+type repoSettingsVM struct {
+	Attempt    project.Attempt
+	HasRepo    bool
+	Remote     string
+	Branch     string
+	Rung       string
+	RemoteHint string
+	BranchHint string
+	RungHint   string
+	Saved      bool
+}
+
+// repoSettingsPanel projects an attempt into the repo-settings editor view model,
+// reading the repo's stored entry and resolved fallback from the global config. It
+// is best-effort presentation like sessionDot/pyramidBadge: a config read error
+// yields a blank (but still editable) panel rather than failing the page render. An
+// attempt with no recorded repo yields HasRepo=false — the panel shows why it is
+// disabled rather than an editor keyed on nothing.
+func (s *Server) repoSettingsPanel(a project.Attempt) repoSettingsVM {
+	vm := repoSettingsVM{Attempt: a}
+	if a.Repo == "" {
+		return vm
+	}
+	vm.HasRepo = true
+	cfg, err := config.Load("")
+	if err != nil {
+		return vm // blank editor; the operator can still set values
+	}
+	stored := cfg.Repos[a.Repo]
+	vm.Remote, vm.Branch, vm.Rung = stored.DefaultRemote, stored.DefaultBranch, stored.DefaultTestRung
+	res := cfg.RepoSettings(a.Repo)
+	// Placeholder hints name the fallback in force while a field is unset, so the
+	// panel reads "blank, but inheriting X" rather than just blank.
+	if vm.Remote == "" {
+		if res.Remote != "" {
+			vm.RemoteHint = "inherits primary_remote: " + res.Remote
+		} else {
+			vm.RemoteHint = "unset — git falls back to the sole remote"
+		}
+	}
+	if vm.Branch == "" {
+		vm.BranchHint = "unset — defaults to the repo's current branch"
+	}
+	if vm.Rung == "" {
+		vm.RungHint = "unset — defaults to the pyramid's top rung"
+	}
+	return vm
 }
 
 // edgesVM drives the "edges-panel" partial: the dependency-edge editor on the
@@ -1444,62 +1508,6 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "board.html", vm)
 }
 
-// handleMergeRemote closes a Review attempt whose change landed via a PR merged
-// on the forge and refreshes the local base in one click (POST
-// /ticket/{id}/{attempt}/merge-remote). It calls the shared internal/land
-// orchestration in-process (land.MergeRemote — the same operation `draiver ctl
-// merge --remote` runs), which owns the fetch + containment check + `done` and the
-// best-effort local fast-forward; the web layer never touches git itself (the
-// package's write invariant). Unlike the other writes it surfaces the operation's
-// report on success too: it records `done` and only *best-effort* pulls, so a
-// success-with-warning ("left local main unchanged … pull manually") is a success
-// to report, not an error — the message rides back on an OOB banner beside the
-// re-rendered (now Done) log region. A failed containment/fetch is a real error,
-// surfaced via s.fail like the other writes.
-func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) {
-		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
-		return
-	}
-	id := r.PathValue("id")
-	att := r.PathValue("attempt")
-	if !s.root.AttemptExists(id, att) {
-		http.NotFound(w, r)
-		return
-	}
-	// Bare remote (""): the button offers no NAME field, so land picks the sole
-	// remote or the config's primary_remote. No config path — the default is used,
-	// exactly as the subprocess shell-out relied on before.
-	res, err := land.MergeRemote(r.Context(), s.gw, id, att, "", "")
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	msg := strings.Join(land.FormatRemoteReport(id, att, res), "\n")
-	vm, err := s.detail(id, att)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	live, err := s.executeLive(vm)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	// One response body carries both swaps: the attempt-live fragment (log region +
-	// OOB badge/count, flipped to Done) and the OOB result banner with the verb's
-	// combined message. Buffer both before writing so a template error still fails
-	// cleanly with a 500 rather than a half-written 200.
-	var buf bytes.Buffer
-	buf.Write(live)
-	if err := s.tmpl.ExecuteTemplate(&buf, "merge-remote-result", msg); err != nil {
-		s.fail(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(buf.Bytes())
-}
-
 // handleGitPush pushes the attempt's branch to its default remote (POST
 // /ticket/{id}/{attempt}/git/push) — the first of the drv-013 Git controls that
 // drive the attempt's local git folder from the board. Like every web write it
@@ -1520,16 +1528,20 @@ func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGitSync back-merges the attempt's base into its branch (POST
-// /ticket/{id}/{attempt}/git/sync) — the Sync of the drv-013 Git controls, over
-// the existing internal/land Sync (the same operation `draiver ctl sync` runs).
-// Sync requires a clean checkout (enforced down in worktree.Sync); on conflict it
-// aborts the merge and surfaces the error. On success it records a `note` (unless
-// already up to date) and returns the re-rendered log region plus an OOB result
-// banner. Non-terminal: the attempt stays in its current state.
+// handleGitSync pulls the remote's default branch into the local base and
+// back-merges it into the attempt's branch (POST /ticket/{id}/{attempt}/git/sync)
+// — the Sync of the drv-013 Git controls, over internal/land Sync (the same
+// operation `draiver ctl sync` runs). It fetches the base from the default remote
+// and fast-forwards the local base (best-effort), then back-merges that base into
+// the branch; the back-merge needs a clean checkout (enforced in worktree.Sync) and
+// on conflict aborts and surfaces the error. On success it records a `note` (unless
+// nothing moved) and returns the re-rendered log region plus an OOB result banner.
+// Non-terminal: the attempt stays in its current state.
 func (s *Server) handleGitSync(w http.ResponseWriter, r *http.Request) {
 	s.handleGitVerb(w, r, func(id, att string) ([]string, error) {
-		res, err := land.Sync(r.Context(), s.gw, id, att)
+		// Bare remote (""): land picks the sole remote or the config's primary_remote
+		// (the drv-011 default-remote stopgap); no config path uses the default.
+		res, err := land.Sync(r.Context(), s.gw, id, att, "", "")
 		if err != nil {
 			return nil, err
 		}
@@ -1541,9 +1553,9 @@ func (s *Server) handleGitSync(w http.ResponseWriter, r *http.Request) {
 // same-origin guard, the attempt-exists check, the in-process land call (run), and
 // the one-response-body double swap — the re-rendered attempt-live fragment (log
 // region + OOB badge/count) plus the OOB "git-result" banner carrying run's report
-// lines. It mirrors handleMergeRemote, minus the state flip (these verbs are not
-// terminal). run returns the report lines to display, or an error surfaced via
-// s.fail (500) exactly like the other writes.
+// lines. These verbs are non-terminal — the log region re-renders but the attempt's
+// state does not flip. run returns the report lines to display, or an error surfaced
+// via s.fail (500) exactly like the other writes.
 func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(id, att string) ([]string, error)) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -1638,6 +1650,83 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "provenance-panel", provenanceVM{Attempt: a, Saved: true})
+}
+
+// handleRepoSettings sets a repo's per-repo defaults from the detail page's
+// repo-settings panel (POST /ticket/{id}/{attempt}/repo-settings) — drv-011's write
+// half. Unlike handleProvenance (which edits ONE attempt's attempt.md), this edits
+// the global config.json keyed by the attempt's repo, so the change applies to every
+// attempt on that repo — the broader blast radius the panel copy makes explicit. It
+// writes through the in-process gateway (s.gw.SetRepoSettings), the same merging
+// atomic writer the `draiver config repo` verb calls; the web layer never pokes
+// config.json directly, the same invariant that keeps attempt.md behind SetProvenance.
+//
+// The panel prefills the stored values, so a blank input means "leave unchanged": a
+// blank field is sent as an empty value but only applied when it differs from the
+// stored one, so a no-op blur never clears a set key. A submit that changes nothing
+// (every field posting its prefill back, or an all-blank submit on a repo with
+// nothing stored) writes nothing and re-renders the panel without the Saved flash —
+// not an error. A missing repo (no key to write under) is a 400. On a change it
+// re-renders the panel in place (htmx outerHTML swap) with a flash.
+func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if a.Repo == "" {
+		http.Error(w, "draiver: this attempt records no repo, so there is nothing to key per-repo settings on", http.StatusBadRequest)
+		return
+	}
+	// Prefill-aware diffing: the form always posts all three fields (prefilled from the
+	// stored entry). To honour "blank = leave unchanged" while still allowing a
+	// deliberate clear, apply a field only when its submitted value differs from what is
+	// stored — so an untouched field (posting its prefill back) is a no-op, and clearing
+	// a set field (prefill "x" → submitted "") writes the empty string. This reads the
+	// stored entry once, through the config the gateway also writes.
+	stored := config.RepoSettings{}
+	if cfg, cerr := config.Load(""); cerr == nil {
+		stored = cfg.Repos[a.Repo]
+	}
+	remote := strings.TrimSpace(r.FormValue("remote"))
+	branch := strings.TrimSpace(r.FormValue("branch"))
+	rung := strings.TrimSpace(r.FormValue("rung"))
+	var upd config.RepoSettingsUpdate
+	if remote != stored.DefaultRemote {
+		upd.DefaultRemote = &remote
+	}
+	if branch != stored.DefaultBranch {
+		upd.DefaultBranch = &branch
+	}
+	if rung != stored.DefaultTestRung {
+		upd.DefaultTestRung = &rung
+	}
+	changed, err := s.gw.SetRepoSettings(a.Repo, upd)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Re-read the attempt so the swapped-in panel reflects the persisted values; Saved
+	// confirms the write only when something actually changed (a pure no-op submit
+	// still re-renders, just without the flash).
+	a, err = project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	vm := s.repoSettingsPanel(a)
+	vm.Saved = changed
+	s.render(w, "repo-settings-panel", vm)
 }
 
 // handleSupervision sets a Capability's coordinator supervision mode from the

@@ -13,8 +13,33 @@
 # `go test -tags=integration ./internal/e2e/integration/...`. The integration
 # rung needs a container runtime (Docker/Podman); it skips cleanly when none is
 # available. See docs/integration-testing.md.
+# environments (drv-012) factor *where* a rung runs out of *what* it runs. A rung
+# names one by `environment:`; unset = the implicit ambient context (the unit rung
+# below). Each env says how to bring it `up`, tear it `down`, and `healthcheck`
+# whether it is ready — a red healthcheck blocks the rung (dependency not ready), a
+# failed `up` is an infra fault (escalate), a failed `run` is a code fault.
+#
+# The integration rung targets `local`. We keep `up`/`down` omitted (the
+# Testcontainers suite owns its own containers) and the healthcheck a genuine, always
+# -green local precondition — the Go toolchain is present — so dogfooding drv-012 here
+# does NOT change this repo's gate: the integration suite already skips cleanly when
+# no container runtime is present, and we deliberately do not convert that clean-skip
+# into a block as a side effect of this ticket.
+#
+# The realistic production pattern — a `container-runtime` healthcheck
+# (`docker info || podman info`) that *blocks* the rung on a box with no runtime
+# rather than letting it false-green — is written up in docs/test-pyramid.md.
+environments:
+  - name: local
+    # up/down intentionally omitted: the integration suite stands up and tears down
+    # its own Testcontainers, so there is no ambient env for draiver to own here.
+    healthchecks:
+      - name: go-toolchain
+        script: go version
+
 levels:
   - name: unit
     run: go test ./...
   - name: integration
     run: go test -tags=integration ./internal/e2e/integration/...
+    environment: local
