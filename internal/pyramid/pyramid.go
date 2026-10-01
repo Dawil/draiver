@@ -49,7 +49,14 @@ type Level struct {
 	// storage) and drv-018 (HTML) build on. Blank is a plain rung: no report capture.
 	// draiver never hardcodes a runner; the Run invokes whatever BDD tool the repo
 	// configures (godog, cucumber-js, …), and only the emitted JSON is consumed.
+	// drv-017 captures this file as part of the rung's artefact set.
 	CucumberJSON string `yaml:"cucumber_json"`
+	// Artifacts are the optional additional output files/dirs this rung produces that
+	// `draiver test --log` captures into the attempt's artefacts/ store under a
+	// per-run key — alongside CucumberJSON: an embeddings/screenshots dir, and any
+	// script-output files (drv-017). Paths are relative to the worktree. Empty → the
+	// rung captures only its CucumberJSON (if any) and nothing else.
+	Artifacts []string `yaml:"artifacts,omitempty"`
 }
 
 // Healthcheck is one readiness probe of an Environment: a named shell command that
