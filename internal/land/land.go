@@ -171,6 +171,128 @@ func FormatRemoteReport(ticket, att string, res RemoteResult) []string {
 	return lines
 }
 
+// PushResult reports a successful push of the attempt branch to a remote: the
+// worktree outcome and the durable `note` recording it.
+type PushResult struct {
+	Push worktree.Pushed
+	Note event.Event
+}
+
+// Push sends ticket/att's per-attempt branch to its default remote and records a
+// `note` so a resumed agent sees the branch reached the forge. remote selects the
+// git remote exactly as MergeRemote does: "" picks the sole remote or the config's
+// primary_remote (with several, and none configured, it refuses); a NAME overrides
+// (verified). configPath is consulted only for primary_remote. gw carries the
+// acting identity the `note` is stamped with.
+//
+// It is GIT-ONLY — the Manager's plain `git push`, which never touches a forge
+// API — so it opens no pull request; that is a separate, forge-coupled concern
+// (see the drv-013 spec). A remote/config resolution problem or the post-push note
+// append is wrapped in *PlainError; the push itself (e.g. a rejected
+// non-fast-forward) is returned bare so a CLI caller can apply its disposition.
+func Push(ctx context.Context, gw *repo.Repo, ticket, att, remote, configPath string) (PushResult, error) {
+	h, err := Load(gw.Root(), ticket, att)
+	if err != nil {
+		return PushResult{}, plain(err)
+	}
+	resolved, err := h.resolveRemote(ctx, remote, configPath)
+	if err != nil {
+		return PushResult{}, plain(err)
+	}
+	pushed, err := h.WM.Push(ctx, h.Key, resolved)
+	if err != nil {
+		return PushResult{}, err
+	}
+	body := fmt.Sprintf("Pushed `%s` to `%s` (tip %s).", pushed.Branch, pushed.Remote, ShortSHA(pushed.Tip))
+	switch {
+	case pushed.UpToDate:
+		body = fmt.Sprintf("Pushed `%s` to `%s`: already up to date (tip %s); nothing sent.", pushed.Branch, pushed.Remote, ShortSHA(pushed.Tip))
+	case pushed.NewBranch:
+		body = fmt.Sprintf("Pushed `%s` to `%s` as a new remote branch (tip %s).", pushed.Branch, pushed.Remote, ShortSHA(pushed.Tip))
+	}
+	e, err := gw.AppendTyped(ticket, att, event.Event{Type: "note", Body: body})
+	if err != nil {
+		return PushResult{Push: pushed}, plain(err)
+	}
+	return PushResult{Push: pushed, Note: e}, nil
+}
+
+// FormatPushReport renders the human report lines for a push: the outcome
+// (created / fast-forwarded / already current) and the recorded note's seq. The
+// webui joins them into its result banner.
+func FormatPushReport(ticket, att string, res PushResult) []string {
+	p := res.Push
+	var head string
+	switch {
+	case p.UpToDate:
+		head = fmt.Sprintf("%s already up to date on %s (nothing to push)", p.Branch, p.Remote)
+	case p.NewBranch:
+		head = fmt.Sprintf("pushed %s to %s as a new remote branch (tip %s)", p.Branch, p.Remote, ShortSHA(p.Tip))
+	default:
+		head = fmt.Sprintf("pushed %s to %s (tip %s)", p.Branch, p.Remote, ShortSHA(p.Tip))
+	}
+	lines := []string{head}
+	if res.Note.Seq != 0 {
+		lines = append(lines, fmt.Sprintf("recorded a note (seq %d)", res.Note.Seq))
+	}
+	return lines
+}
+
+// SyncResult reports a successful back-merge of the base into the attempt branch:
+// the worktree outcome and, when a merge commit actually landed, the durable
+// `note` recording it (Recorded is false, and Note zero, when the branch was
+// already up to date — nothing to pull in, nothing to record).
+type SyncResult struct {
+	Synced   worktree.Synced
+	Note     event.Event
+	Recorded bool
+}
+
+// Sync back-merges ticket/att's recorded base into its per-attempt branch
+// additively (internal/worktree's Sync — existing SHAs preserved, at most one
+// merge commit on top) and, when that produced a merge commit, records a `note` so
+// a resume sees the tip moved and why. An already-up-to-date branch records
+// nothing. It is the shared write path behind both `ctl sync` and the webui's Sync
+// button. The sync op's failure (a dirty checkout, a conflict) is returned bare so
+// the CLI can apply its escalate/no-escalate disposition; a resolution or
+// post-sync bookkeeping error is wrapped in *PlainError.
+func Sync(ctx context.Context, gw *repo.Repo, ticket, att string) (SyncResult, error) {
+	h, err := Load(gw.Root(), ticket, att)
+	if err != nil {
+		return SyncResult{}, plain(err)
+	}
+	synced, err := h.WM.Sync(ctx, h.Key, h.Base)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	res := SyncResult{Synced: synced}
+	if synced.AlreadyUpToDate {
+		return res, nil
+	}
+	body := fmt.Sprintf("Synced `%s` into `%s` (merge commit, tip %s); the branch is now ff-landable.", synced.Base, synced.Branch, ShortSHA(synced.Tip))
+	e, err := gw.AppendTyped(ticket, att, event.Event{Type: "note", Body: body})
+	if err != nil {
+		return res, plain(err)
+	}
+	res.Note = e
+	res.Recorded = true
+	return res, nil
+}
+
+// FormatSyncReport renders the human report lines for a sync: the back-merge
+// outcome (or an already-up-to-date no-op) and the recorded note's seq.
+func FormatSyncReport(ticket, att string, res SyncResult) []string {
+	s := res.Synced
+	if s.AlreadyUpToDate {
+		return []string{fmt.Sprintf("%s/%s: already up to date with %s (nothing to sync)", ticket, att, s.Base)}
+	}
+	lines := []string{fmt.Sprintf("synced %s into %s (tip %s) — the branch is now ff-landable", s.Base, s.Branch, ShortSHA(s.Tip))}
+	if res.Recorded {
+		lines = append(lines, fmt.Sprintf("recorded a note (seq %d)", res.Note.Seq))
+	}
+	return lines
+}
+
 // resolveRemote picks the git remote to reconcile from, mirroring review's rule:
 // a NAME wins (verified against the repo's remotes); bare ("") uses the sole
 // remote regardless, else the config's primary_remote, and with several remotes

@@ -155,6 +155,36 @@
       {{end}}
       {{end}}
 
+      {{if and .Attempt.Base .Attempt.Repo (ne (printf "%s" .Attempt.State) "Done")}}
+      {{/* drv-013 Git controls: drive the attempt's local git folder from the board
+           without dropping to a terminal. Each button is a same-origin htmx POST to
+           /git/<verb> that re-renders the log region (the verb records a note) and
+           OOB-swaps the result banner with the land report — the merge-remote-result
+           pattern, reused. Both verbs are git-only and non-terminal (they never
+           change the attempt's state): Push sends the branch to the default remote;
+           Sync back-merges <base> in (clean checkout required). Shown while the
+           attempt records both a base and a repo and is not yet Done — without a
+           base/repo there is nothing to push or sync, and a Done attempt's checkout
+           may already be reclaimed. Create-PR / Merge-PR are deliberately absent:
+           they need a forge API (auth + per-forge adapters), split into their own
+           ticket per the spec. */}}
+      <section class="git-controls" data-testid="git-controls">
+        <h2 class="git-controls-title">Git</h2>
+        <p class="git-controls-hint">Drive this attempt's local git folder. Default branch <code>{{.Attempt.Base}}</code>.</p>
+        <div class="git-actions">
+          <button type="button" class="action-git-push" data-testid="action-git-push"
+            hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/push"
+            hx-confirm="Push branch draiver/{{.Attempt.Ticket}}/{{.Attempt.ID}} to the default remote?"
+            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Push to remote</button>
+          <button type="button" class="action-git-sync" data-testid="action-git-sync"
+            hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/sync"
+            hx-confirm="Sync: back-merge {{.Attempt.Base}} into this attempt's branch? Needs a clean checkout."
+            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull {{.Attempt.Base}} in</button>
+        </div>
+        <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
+      </section>
+      {{end}}
+
       <div class="log-region" data-testid="log-region" data-order="newest"
         {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
         {{template "attempt-log" .}}
@@ -499,3 +529,10 @@
      OOB-swaps the previously-hidden banner into a visible report. The message is
      plain CLI text, HTML-escaped by the template — never routed through markdown. */}}
 {{define "merge-remote-result"}}<div id="merge-remote-result" class="merge-remote-result" data-testid="merge-remote-result" hx-swap-oob="true">{{.}}</div>{{end}}
+
+{{/* git-result carries a drv-013 Git control's land report (push / sync) back onto
+     the page. The push/sync handlers pair it with the attempt-live fragment: the
+     log region re-renders with the new note and this OOB-swaps the previously-hidden
+     banner into a visible report. Plain CLI text, HTML-escaped by the template —
+     never routed through markdown. */}}
+{{define "git-result"}}<div id="git-result" class="git-result" data-testid="git-result" hx-swap-oob="true">{{.}}</div>{{end}}
