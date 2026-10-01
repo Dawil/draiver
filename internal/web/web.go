@@ -476,6 +476,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/merge-remote", s.handleMergeRemote)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/push", s.handleGitPush)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/sync", s.handleGitSync)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
@@ -1491,6 +1493,87 @@ func (s *Server) handleMergeRemote(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	buf.Write(live)
 	if err := s.tmpl.ExecuteTemplate(&buf, "merge-remote-result", msg); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(buf.Bytes())
+}
+
+// handleGitPush pushes the attempt's branch to its default remote (POST
+// /ticket/{id}/{attempt}/git/push) — the first of the drv-013 Git controls that
+// drive the attempt's local git folder from the board. Like every web write it
+// goes through internal/land in-process (land.Push — git only, no forge API, so it
+// opens no PR), honouring the package's invariant that the web layer never runs
+// git itself. Push records a durable `note`; the response carries the re-rendered
+// log region plus an OOB result banner with the push report. Non-terminal: it does
+// not change the attempt's state.
+func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
+	s.handleGitVerb(w, r, func(id, att string) ([]string, error) {
+		// Bare remote (""): the button offers no NAME field, so land picks the sole
+		// remote or the config's primary_remote (the drv-011 default-remote stopgap).
+		res, err := land.Push(r.Context(), s.gw, id, att, "", "")
+		if err != nil {
+			return nil, err
+		}
+		return land.FormatPushReport(id, att, res), nil
+	})
+}
+
+// handleGitSync back-merges the attempt's base into its branch (POST
+// /ticket/{id}/{attempt}/git/sync) — the Sync of the drv-013 Git controls, over
+// the existing internal/land Sync (the same operation `draiver ctl sync` runs).
+// Sync requires a clean checkout (enforced down in worktree.Sync); on conflict it
+// aborts the merge and surfaces the error. On success it records a `note` (unless
+// already up to date) and returns the re-rendered log region plus an OOB result
+// banner. Non-terminal: the attempt stays in its current state.
+func (s *Server) handleGitSync(w http.ResponseWriter, r *http.Request) {
+	s.handleGitVerb(w, r, func(id, att string) ([]string, error) {
+		res, err := land.Sync(r.Context(), s.gw, id, att)
+		if err != nil {
+			return nil, err
+		}
+		return land.FormatSyncReport(id, att, res), nil
+	})
+}
+
+// handleGitVerb is the shared machinery of the Git-control POSTs (push, sync): the
+// same-origin guard, the attempt-exists check, the in-process land call (run), and
+// the one-response-body double swap — the re-rendered attempt-live fragment (log
+// region + OOB badge/count) plus the OOB "git-result" banner carrying run's report
+// lines. It mirrors handleMergeRemote, minus the state flip (these verbs are not
+// terminal). run returns the report lines to display, or an error surfaced via
+// s.fail (500) exactly like the other writes.
+func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(id, att string) ([]string, error)) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	lines, err := run(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	msg := strings.Join(lines, "\n")
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	var buf bytes.Buffer
+	buf.Write(live)
+	if err := s.tmpl.ExecuteTemplate(&buf, "git-result", msg); err != nil {
 		s.fail(w, err)
 		return
 	}

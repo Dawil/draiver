@@ -200,3 +200,89 @@ func TestRemotesLists(t *testing.T) {
 		t.Errorf("Remotes = %v, want [origin upstream]", got)
 	}
 }
+
+// TestPushNewBranchSendsTip is the happy path: the attempt branch does not yet
+// exist on the remote, so Push creates it and reports NewBranch with the local tip.
+func TestPushNewBranchSendsTip(t *testing.T) {
+	m := landManager(t)
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+	bare := addBareRemote(t, m, "origin", "main")
+	writeCommit(t, wt.Path, "feat.txt", "work", "feature work")
+	tip := revParse(t, wt.Path, "HEAD")
+
+	p, err := m.Push(context.Background(), k, "origin")
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if !p.NewBranch || p.UpToDate {
+		t.Errorf("flags = {New:%v UpToDate:%v}, want a new branch", p.NewBranch, p.UpToDate)
+	}
+	if p.Tip != tip {
+		t.Errorf("Tip = %s, want local branch tip %s", p.Tip, tip)
+	}
+	// The branch really reached the remote at the branch tip.
+	if got := revParse(t, bare, k.branch()); got != tip {
+		t.Errorf("remote %s = %s, want %s", k.branch(), got, tip)
+	}
+}
+
+// TestPushUpToDateSendsNothing proves the no-op report: pushing the same tip twice
+// leaves the second push with UpToDate and no new branch.
+func TestPushUpToDateSendsNothing(t *testing.T) {
+	m := landManager(t)
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+	addBareRemote(t, m, "origin", "main")
+	writeCommit(t, wt.Path, "feat.txt", "work", "feature work")
+	if _, err := m.Push(context.Background(), k, "origin"); err != nil {
+		t.Fatalf("first Push: %v", err)
+	}
+
+	p, err := m.Push(context.Background(), k, "origin")
+	if err != nil {
+		t.Fatalf("second Push: %v", err)
+	}
+	if !p.UpToDate || p.NewBranch {
+		t.Errorf("flags = {New:%v UpToDate:%v}, want up to date", p.NewBranch, p.UpToDate)
+	}
+}
+
+// TestPushRejectsNonFastForward proves Push never forces: if the remote branch has
+// advanced independently, the plain push is rejected rather than overwriting it.
+func TestPushRejectsNonFastForward(t *testing.T) {
+	m := landManager(t)
+	k := Key{"PROJ-1", "0001"}
+	wt := mustCreate(t, m, k.Ticket, k.Attempt)
+	bare := addBareRemote(t, m, "origin", "main")
+	writeCommit(t, wt.Path, "feat.txt", "work", "feature work")
+	if _, err := m.Push(context.Background(), k, "origin"); err != nil {
+		t.Fatalf("first Push: %v", err)
+	}
+	// A second worktree pushes a different tip onto the same remote branch, so the
+	// local branch is now behind/diverged from the remote ref.
+	other := t.TempDir()
+	runGit(t, other, "clone", "-q", bare, ".")
+	gitCheckout(t, other, k.branch())
+	writeCommit(t, other, "other.txt", "x", "someone else's commit")
+	runGit(t, other, "push", "-q", "origin", k.branch())
+
+	_, err := m.Push(context.Background(), k, "origin")
+	if err == nil {
+		t.Fatal("Push onto a diverged remote branch should be rejected, not forced")
+	}
+	// The remote still holds the other party's commit — nothing was overwritten.
+	if got := revParse(t, bare, k.branch()); got == revParse(t, wt.Path, "HEAD") {
+		t.Errorf("remote branch was overwritten to the local tip; a non-ff push must be refused")
+	}
+}
+
+// TestPushMissingBranch returns ErrBranchNotFound for an attempt with no branch.
+func TestPushMissingBranch(t *testing.T) {
+	m := landManager(t)
+	addBareRemote(t, m, "origin", "main")
+	_, err := m.Push(context.Background(), Key{"PROJ-9", "0001"}, "origin")
+	if !errors.Is(err, ErrBranchNotFound) {
+		t.Fatalf("Push err = %v, want ErrBranchNotFound", err)
+	}
+}
