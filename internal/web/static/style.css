@@ -157,6 +157,7 @@ body {
 .pyramid .pyramid-sep { color: var(--muted); opacity: .5; }
 .pyramid .pyramid-flag { margin-left: 3px; text-transform: uppercase; letter-spacing: .06em;
            font-size: 9px; opacity: .8; }
+.pyramid .pyramid-env { margin-left: 2px; font-size: 9px; opacity: .7; letter-spacing: .02em; }
 /* control-state accents come from the parent column */
 .col-stuck .card { background: var(--alert-bg); border-color: var(--alert); }
 .col-running .card, .col-done .card { opacity: .9; }

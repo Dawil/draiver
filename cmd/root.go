@@ -26,6 +26,18 @@ const (
 	// prompt-cache prefix on at least one repo (drvctl-036). Distinct from a plain
 	// failure so a CI/cron loop can branch on "cache regressed" versus "errored".
 	ExitCanaryFired = 5
+	// ExitEnvUp signals a rung's environment `up` step failed while running the test
+	// pyramid (drv-012): the harness could not even stand the env up. It is an
+	// infrastructure fault, not the agent's code — the control outcome is escalate.
+	// Distinct from a plain failure (exit 1 = a code fault at a rung) so a loop can
+	// branch on "infra broke" versus "the code is wrong".
+	ExitEnvUp = 6
+	// ExitBlocked signals a rung's environment healthcheck came back red (drv-012): a
+	// dependency the env only observes is not ready. Not a code fault and not an
+	// infra fault of our own — the rung is blocked (the "pass the ball" signal). This
+	// ticket only emits the signal; wiring it to reverse-`wants:` activation stays
+	// deferred.
+	ExitBlocked = 7
 )
 
 var (

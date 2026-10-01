@@ -105,6 +105,91 @@ yourself"*): iterate with `draiver test`, commit, then `draiver test --log` befo
 integration rung stands up real dependencies via [Testcontainers](https://testcontainers.com/)
 — the first real consumer of the feature.
 
+## Environments (drv-012): named up/down/healthcheck contexts
+
+The deferred "fuller vocabulary" below (`up` / `down` / `healthcheck`) is now
+**realised, reorganised around named environments** rather than per-rung inline
+keys. A rung does not run in a vacuum — it runs *in a context* — so
+`.test-pyramid.yaml` gains a top-level `environments:` list, a sibling of `levels:`,
+and a level names the one it targets:
+
+```yaml
+environments:
+  - name: local
+    # up/down optional — a local env may need neither
+    healthchecks:
+      - name: postgres-up
+        script: pg_isready -h localhost
+  - name: staging
+    up:   ./scripts/staging-up.sh       # optional
+    down: ./scripts/staging-down.sh     # optional
+    healthchecks:
+      - name: api-reachable
+        script: curl -fsS https://staging.example.com/healthz
+
+levels:
+  - name: unit
+    run: go test ./...
+  - name: integration
+    run: go test -tags=integration ./...
+    environment: local                  # <-- rung names its context
+  - name: e2e
+    run: go test -tags=e2e ./...
+    environment: staging
+```
+
+- **Why a separate list, not per-rung inline keys?** One staging/QA context is
+  shared by several rungs (integration *and* e2e both hit staging) — define it once,
+  reference it by name. And it separates *what the code is* (a level's `run`) from
+  *where it runs* (an environment), the same own-it-vs-observe-it line the forge
+  coupling draws between `up` (an env draiver owns) and `healthcheck` (one it only
+  observes).
+- **Binding.** A `Level` gains an optional `environment:` naming one entry. **Unset
+  = the implicit ambient context** (today's behaviour), so existing files keep
+  working. A level naming an unknown environment is a validation error.
+- **Backward compatible.** A file with no `environments` behaves exactly as before;
+  the parser already ignores unknown keys, so old binaries tolerate new files and
+  new binaries tolerate old files.
+
+**Execution order** for a rung with an environment (`draiver test`): run the env's
+`up` → run its `healthcheck`s → run the level's `run` → **always** run `down`
+(unconditionally, pass or fail; a `down` failure is a best-effort warning, never a
+verdict change). Each failure maps to the control outcome the vocabulary settled,
+surfaced as a distinct process exit code so a supervising loop can branch on it:
+
+| Failure | Meaning | Control outcome | Exit |
+| --- | --- | --- | --- |
+| `up` non-zero | the harness could not stand the env up | infra fault, **not** your code → **escalate** | `6` |
+| `healthcheck` red | a dependency the env only observes isn't ready | **block** (the pass-the-ball signal) — not a code fault | `7` |
+| `run` non-zero | the code is wrong at this rung | code fault; the ceiling is below this rung | `1` |
+
+This ticket only *emits* the block signal; wiring a red `healthcheck` into the
+coordinator's reverse-`wants:` activation stays deferred (below).
+
+**The realistic dogfood pattern.** A `local` environment whose healthcheck is a
+container-runtime probe is the honest shape:
+
+```yaml
+environments:
+  - name: local
+    healthchecks:
+      - name: container-runtime
+        script: docker info >/dev/null 2>&1 || podman info >/dev/null 2>&1
+```
+
+On a box with no runtime this **blocks** the integration rung (dependency not
+ready) rather than letting a clean-skip report a false green. *This* repo's own
+`.test-pyramid.yaml` deliberately uses a weaker always-green precondition
+(`go version`) instead, because its integration suite already skips cleanly without
+a runtime and we do not convert that clean-skip into a gate-blocking block as a side
+effect of landing environments.
+
+**Deferred within environments.** Secret/credential injection for `up` /
+`healthcheck` (Resolved-forks #4 below) is out of scope — don't hand staging creds
+to every worktree; that is a follow-up. The webui surfaces *which* environment a
+rung targets, but not a live healthcheck verdict (only green `run` results are
+logged, so no probe outcome is cheaply available to the read-only board).
+
 ## Why this is on-thesis, not a bolt-on
 
 Three of the platform's core values (`coding-agent-platform.md` §"Core values")
@@ -174,6 +259,7 @@ Tier-2/Tier-3 (`draiverctl.md`): engine = `drvctl`, UI = `drvweb`.
 | **drvctl-048** | `draiver test [RUNG] [--log]` — the deterministic executor: climb base→RUNG in the worktree; bare runs on any tree, `--log` refuses on a dirty tree and on all-green writes one hash-chained `{rung, commit}` result event (failures log nothing, exit nonzero). | 047 |
 | **drvctl-049** | The **Review gate** — `draiver review` folds the log for the highest logged rung at HEAD and refuses a claim below the target rung; no file → no gate. | 047, 048 |
 | **drvweb-021** | Board/attempt view — render the attempt's cleared rung (a small pyramid badge), distinguishing green-at-HEAD from stale (result exists but `commit` ≠ tip). | 048 |
+| **drv-012** | **Environments** — a top-level `environments:` list (named `{up?, down?, healthchecks[]}` contexts) + an `environment:` binding on levels, parsed/validated in `internal/pyramid`; `draiver test` honours up → healthcheck → run → down with the control-outcome exit codes (up=6/escalate, healthcheck=7/block, run=1/code-fault); the badge surfaces the targeted env. The concrete realisation of the deferred vocabulary below. | 047, 048, drvweb-021 |
 
 Separately filed: **drv-010** — dogfood the pyramid on this repo with a
 Testcontainers integration rung (depends in spirit on drv-009).
@@ -193,6 +279,12 @@ with it — the parser should tolerate (or explicitly reject-with-a-note) the ex
 keys so they can be added without a schema break.
 
 ## The fuller vocabulary: `up` vs `run` vs `healthcheck`
+
+> **Realised by drv-012** — see *"Environments"* above. The control-outcome
+> semantics this section settled are the valuable, surviving part; drv-012 only
+> reorganises the three commands out of per-rung inline keys into **named,
+> reusable environments** a level references by name. The reverse-`wants:`
+> "pass the ball" wiring (next section) remains deferred.
 
 Beyond the single `run` command, a rung could carry three, each mapping a distinct
 failure to a distinct control outcome — because a red suite means three completely
