@@ -84,6 +84,18 @@ func (r Root) StatePath(id, attempt string) string {
 	return filepath.Join(r.AttemptDir(id, attempt), "state.md")
 }
 
+// ReviewEnvPath is an attempt's review-environment lifecycle record (drv-020): the
+// persistent, out-of-band state the controlplane tracks for a launched review env
+// between requests — down / starting / up+url / teardown-failed, plus the allocated
+// port, instance slug, reviewed commit, and review worktree path. Like
+// DesiredMarkerPath it is rebuildable runtime state, not part of the hash chain, and
+// lives at the attempt root (alongside state.md) so it survives a session flush that
+// clears the session/ dir but is reclaimed when the whole attempt is. A missing file
+// means "no review env has ever been launched for this attempt" (the Down state).
+func (r Root) ReviewEnvPath(id, attempt string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), "reviewenv.json")
+}
+
 // DesiredMarkerPath is an attempt's transient imperative desired-marker: the
 // stamped "the client asked the daemon to run this now" flag `ctl start` writes
 // and the reconcile loop unions into its desired set (drvctl-016). It is

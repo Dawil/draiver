@@ -31,6 +31,11 @@ const (
 	// routes straight to Needs-me and no coordinator wakes. Opting a fleet into
 	// pre-digest is a deliberate config choice, mirroring how enable is opt-in.
 	DefaultSupervision = "passthrough"
+
+	// DefaultReviewEnvMaxAgeMinutes is the builtin idle/max-age for the review-env
+	// reaper (drv-020) when the operator sets none: two hours of no interaction before
+	// a launched-but-forgotten review env is torn down.
+	DefaultReviewEnvMaxAgeMinutes = 120
 )
 
 // Config is the operator's resolved supervisor tunables. Every field carries a
@@ -109,6 +114,16 @@ type Config struct {
 	// pruned, newest kept. 0 (the default) keeps everything — no GC.
 	BDDArtefactKeep int `json:"bdd_artefact_keep"`
 
+	// ReviewEnvMaxAgeMinutes is the idle/max-age reaper knob for review environments
+	// (drv-020): the controlplane tears down a launched review env that has gone
+	// untouched (no launch/poll interaction) for longer than this, the safety net
+	// against a forgotten env leaking a worktree and a bound port. Each webui status
+	// poll bumps the env's last-active stamp, so an env a reviewer is actively driving
+	// stays up; one abandoned mid-review is reaped. Default 120 (two hours). 0 disables
+	// the reaper — teardown then happens only on the explicit button or when the ticket
+	// is marked Done.
+	ReviewEnvMaxAgeMinutes int `json:"review_env_max_age_minutes"`
+
 	// Repos holds per-repo setting overrides keyed by the repo path — the same
 	// string an attempt records as its `repo`/provenance Repo (drv-011). Some knobs
 	// are properties of a repo, not a single attempt (which remote is the forge,
@@ -136,6 +151,13 @@ type RepoSettings struct {
 	// default_test_level it would supersede is deferred (docs/test-pyramid.md), so
 	// there is no global value to fall through to today.
 	DefaultTestRung string `json:"default_test_rung"`
+	// ReviewEnvironment names the .test-pyramid.yaml environment the attempt page's
+	// review-environment panel launches at Review (drv-020). Empty → no review env is
+	// offered for this repo (the common case; it is opt-in). The named environment
+	// must be review-ready (up + down + ≥1 healthcheck, pyramid.Environment.ReviewReady)
+	// for the panel to appear — a validation the consuming web/controlplane layer runs,
+	// not this dependency-free package. There is no global default to fall through to.
+	ReviewEnvironment string `json:"review_environment"`
 }
 
 // Resolved is a repo's effective settings after global fallback is applied — what a
@@ -151,6 +173,9 @@ type Resolved struct {
 	// TestRung is DefaultTestRung → "" (the pyramid file's top rung is the builtin;
 	// the global default_test_level is deferred, so nothing sits between them yet).
 	TestRung string
+	// ReviewEnvironment is ReviewEnvironment → "" (there is no global default and no
+	// builtin: unset simply means this repo offers no review environment, drv-020).
+	ReviewEnvironment string
 }
 
 // RepoSettings resolves a repo's effective settings: per-repo entry → global
@@ -161,9 +186,10 @@ type Resolved struct {
 func (c Config) RepoSettings(repoPath string) Resolved {
 	rs := c.Repos[repoPath] // zero value when absent — every field empty, all fall through
 	r := Resolved{
-		Remote:   rs.DefaultRemote,
-		Branch:   rs.DefaultBranch,
-		TestRung: rs.DefaultTestRung,
+		Remote:            rs.DefaultRemote,
+		Branch:            rs.DefaultBranch,
+		TestRung:          rs.DefaultTestRung,
+		ReviewEnvironment: rs.ReviewEnvironment,
 	}
 	if r.Remote == "" {
 		r.Remote = c.PrimaryRemote
@@ -176,24 +202,27 @@ func (c Config) RepoSettings(repoPath string) Resolved {
 // the per-repo twin of repo.Provenance — the shape both the `config repo` verb and
 // the attempt page's repo-settings panel hand to SetRepoSettings.
 type RepoSettingsUpdate struct {
-	DefaultRemote   *string
-	DefaultBranch   *string
-	DefaultTestRung *string
+	DefaultRemote     *string
+	DefaultBranch     *string
+	DefaultTestRung   *string
+	ReviewEnvironment *string
 }
 
 // set reports whether the update touches any field — the "nothing to set" guard the
 // caller uses to leave the file untouched, mirroring SetProvenance's changed=false.
 func (u RepoSettingsUpdate) set() bool {
-	return u.DefaultRemote != nil || u.DefaultBranch != nil || u.DefaultTestRung != nil
+	return u.DefaultRemote != nil || u.DefaultBranch != nil || u.DefaultTestRung != nil ||
+		u.ReviewEnvironment != nil
 }
 
 // Default returns the built-in configuration used when no file is present and as
 // the fill-in for any field a file omits.
 func Default() Config {
 	return Config{
-		ContextWindow:      DefaultContextWindow,
-		ContextLimit:       DefaultContextLimit,
-		DefaultSupervision: DefaultSupervision,
+		ContextWindow:          DefaultContextWindow,
+		ContextLimit:           DefaultContextLimit,
+		DefaultSupervision:     DefaultSupervision,
+		ReviewEnvMaxAgeMinutes: DefaultReviewEnvMaxAgeMinutes,
 	}
 }
 
@@ -219,6 +248,7 @@ type file struct {
 	AppendSystemPromptFile             *string              `json:"append_system_prompt_file,omitempty"`
 	DefaultSupervision                 *string              `json:"default_supervision,omitempty"`
 	BDDArtefactKeep                    *int                 `json:"bdd_artefact_keep,omitempty"`
+	ReviewEnvMaxAgeMinutes             *int                 `json:"review_env_max_age_minutes,omitempty"`
 	Repos                              map[string]*repoFile `json:"repos,omitempty"`
 }
 
@@ -228,9 +258,10 @@ type file struct {
 // from nil, and preserved on round-trip — mirroring the explicit-zero discipline the
 // top-level pointer fields carry.
 type repoFile struct {
-	DefaultRemote   *string `json:"default_remote,omitempty"`
-	DefaultBranch   *string `json:"default_branch,omitempty"`
-	DefaultTestRung *string `json:"default_test_rung,omitempty"`
+	DefaultRemote     *string `json:"default_remote,omitempty"`
+	DefaultBranch     *string `json:"default_branch,omitempty"`
+	DefaultTestRung   *string `json:"default_test_rung,omitempty"`
+	ReviewEnvironment *string `json:"review_environment,omitempty"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -306,6 +337,9 @@ func Load(flagVal string) (Config, error) {
 	if f.BDDArtefactKeep != nil {
 		c.BDDArtefactKeep = *f.BDDArtefactKeep
 	}
+	if f.ReviewEnvMaxAgeMinutes != nil {
+		c.ReviewEnvMaxAgeMinutes = *f.ReviewEnvMaxAgeMinutes
+	}
 	if f.Repos != nil {
 		c.Repos = make(map[string]RepoSettings, len(f.Repos))
 		for path, rf := range f.Repos {
@@ -366,6 +400,9 @@ func SetRepoSettings(flagVal, repoPath string, upd RepoSettingsUpdate) (changed 
 	if upd.DefaultTestRung != nil {
 		rf.DefaultTestRung = upd.DefaultTestRung
 	}
+	if upd.ReviewEnvironment != nil {
+		rf.ReviewEnvironment = upd.ReviewEnvironment
+	}
 
 	out, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -422,6 +459,9 @@ func (rf *repoFile) resolve() RepoSettings {
 	}
 	if rf.DefaultTestRung != nil {
 		rs.DefaultTestRung = *rf.DefaultTestRung
+	}
+	if rf.ReviewEnvironment != nil {
+		rs.ReviewEnvironment = *rf.ReviewEnvironment
 	}
 	return rs
 }

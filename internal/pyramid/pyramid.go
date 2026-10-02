@@ -92,6 +92,32 @@ type Environment struct {
 	// Healthchecks are the readiness probes run after Up and before the rung's Run;
 	// a red probe blocks the rung (dependency not ready), it is not a code fault.
 	Healthchecks []Healthcheck `yaml:"healthchecks"`
+	// URL optionally declares how to reach a running instance of this environment,
+	// as a template the review-env launcher expands with the parameterisation vars it
+	// injects — `${DRAIVER_REVIEW_PORT}` / `$DRAIVER_REVIEW_INSTANCE` (and `${VAR}`
+	// for any Params default). It is the agent-authored surface for the review URL
+	// (drv-020): draiver never guesses the host:port; the repo says how to form it,
+	// and the launcher reveals the expanded link only once the healthchecks are green.
+	// Blank for a plain test environment that exposes nothing to click (drv-012).
+	URL string `yaml:"url"`
+	// Params optionally declares the non-secret parameterisation env vars this
+	// environment's scripts consume, with defaults — a repo-declared surface layered
+	// UNDER draiver's injected DRAIVER_REVIEW_* vars (which always win), so `${VAR}`
+	// in URL and the scripts' own `$VAR` reads resolve even when the operator sets
+	// nothing. Secret injection stays out of scope (drv-012's deferred question).
+	Params []Param `yaml:"params,omitempty"`
+}
+
+// Param is one repo-declared parameterisation variable an Environment's scripts
+// expect: a name and an optional default. It is the non-secret declaration surface
+// (drv-020) the launcher folds into the script environment beneath its own injected
+// DRAIVER_REVIEW_* vars. A blank default is a declared-but-unset var (documented,
+// resolves to empty) — still useful as the env-var contract the scripts read.
+type Param struct {
+	// Name is the non-blank env-var name (e.g. "DB_NAME").
+	Name string `yaml:"name"`
+	// Default is the value injected when the operator supplies none. May be blank.
+	Default string `yaml:"default"`
 }
 
 // Pyramid is a repo's parsed, validated test-pyramid declaration. Levels is an
@@ -121,6 +147,53 @@ func (p *Pyramid) EnvironmentFor(lv Level) (*Environment, bool) {
 		}
 	}
 	return nil, false
+}
+
+// EnvironmentByName resolves an environment by its name, independent of any level
+// binding — the accessor the review-environment selector (drv-020's per-repo
+// `reviewEnvironment`) needs, since it names an environment directly rather than via
+// a rung's level. ok is false for a blank name or one that matches nothing; on a
+// match it returns a pointer into the backing slice (like EnvironmentFor). It is the
+// by-name twin of EnvironmentFor, which resolves the env a *level* targets.
+func (p *Pyramid) EnvironmentByName(name string) (*Environment, bool) {
+	want := strings.TrimSpace(name)
+	if want == "" {
+		return nil, false
+	}
+	for i := range p.Environments {
+		if strings.TrimSpace(p.Environments[i].Name) == want {
+			return &p.Environments[i], true
+		}
+	}
+	return nil, false
+}
+
+// ReviewReady reports whether this environment is strong enough to back a review
+// environment (drv-020): it must define Up *and* Down *and* at least one healthcheck.
+// This is deliberately stricter than a generic drv-012 environment (where all three
+// are optional) — the controlplane can only *guarantee and verify* teardown (down →
+// confirm-down healthcheck → leak detection) when all three are present. It returns a
+// descriptive error naming what is missing, so a misconfigured `reviewEnvironment`
+// fails loudly at selection time rather than yielding a half-managed env. A nil
+// receiver (no such environment) is reported as not-ready.
+func (e *Environment) ReviewReady() error {
+	if e == nil {
+		return errors.New("no such environment")
+	}
+	var missing []string
+	if strings.TrimSpace(e.Up) == "" {
+		missing = append(missing, "up")
+	}
+	if strings.TrimSpace(e.Down) == "" {
+		missing = append(missing, "down")
+	}
+	if len(e.Healthchecks) == 0 {
+		missing = append(missing, "at least one healthcheck")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("environment %q is not review-ready: missing %s", e.Name, strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // Target returns the top (last) rung — the target the pyramid climbs toward. It is
