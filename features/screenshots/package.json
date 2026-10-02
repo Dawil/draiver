@@ -1,0 +1,9 @@
+{
+  "name": "draiver-webshot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright dependency for drv-019's acceptance screenshots (internal/webshot drives the browser via capture.js). Browsers come from $PLAYWRIGHT_BROWSERS_PATH, so only the npm package is installed here.",
+  "dependencies": {
+    "playwright": "1.48.0"
+  }
+}
