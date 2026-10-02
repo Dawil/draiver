@@ -43,53 +43,140 @@
          mode selected. Absent on an ordinary ticket (Capability is nil). */}}
     {{if .Capability}}{{template "capability-panel" .Capability}}{{end}}
 
-    {{/* Provenance: the repo/base a merge/sync gate on, as a quiet key/value table
-         above the spec. Always shown but visually light — the values read as plain
-         text until clicked, when each becomes an inline input; blurring (a native
-         change) shells `draiver attempt set` (drvctl-028) to persist it, with a
-         blank input leaving that field untouched. An (i) bubble per key explains
-         what the field gates. Prefilled from Attempt so it reads as "edit
-         provenance"; when a Review attempt records no base (the merge-blocking
-         state) the panel flags it. The POST re-renders this panel in place
-         (outerHTML on #provenance) with the saved values. */}}
-    {{/* Provenance and repo-settings sit side by side: the left panel edits THIS
-         attempt's attempt.md (repo/base), the right edits the repo's defaults in the
-         global config.json (drv-011) — one attempt vs every attempt on the repo. The
-         row wraps to stacked on a narrow viewport. */}}
-    <div class="panel-row" data-testid="panel-row">
-      {{template "provenance-panel" (provenance .Attempt)}}
-      {{template "repo-settings-panel" (repoSettings .Attempt)}}
-    </div>
+    {{/* Tabbed top section (drv-021): the former stack of full-width panels —
+         Provenance settings, Prompt-cache, Spec, Git controls, BDD report — folded
+         into ONE bordered card so only the active panel costs vertical space. The
+         whole card renders server-side exactly as the panels did today; a vanilla
+         script (below) toggles panel visibility client-side, so there is no new
+         route, no reload, and no server-rendered tab state. Spec is the default tab.
+         Each conditional tab is gated by its panel's EXISTING condition (Git:
+         base+repo & not Done; BDD: HasRuns), so the card never shows an empty tab,
+         and the data/routes/htmx posts inside each panel are untouched. Accessible
+         tabs: a role=tablist of role=tab buttons drive role=tabpanel panels via
+         aria-selected/aria-controls, with roving tabindex and arrow-key nav. */}}
+    <section class="attempt-tabs" data-testid="attempt-tabs">
+      <div class="tablist" role="tablist" aria-label="Attempt sections" data-testid="attempt-tablist">
+        <button type="button" role="tab" id="attempt-tab-spec" class="tab" data-testid="attempt-tab-spec"
+          aria-selected="true" aria-controls="attempt-tabpanel-spec" tabindex="0">Spec</button>
+        <button type="button" role="tab" id="attempt-tab-provenance" class="tab" data-testid="attempt-tab-provenance"
+          aria-selected="false" aria-controls="attempt-tabpanel-provenance" tabindex="-1">Provenance settings</button>
+        {{if and .Attempt.Base .Attempt.Repo (ne (printf "%s" .Attempt.State) "Done")}}
+        <button type="button" role="tab" id="attempt-tab-git" class="tab" data-testid="attempt-tab-git"
+          aria-selected="false" aria-controls="attempt-tabpanel-git" tabindex="-1">Git controls</button>
+        {{end}}
+        {{if .Report.HasRuns}}
+        <button type="button" role="tab" id="attempt-tab-bdd" class="tab" data-testid="attempt-tab-bdd"
+          aria-selected="false" aria-controls="attempt-tabpanel-bdd" tabindex="-1">BDD report</button>
+        {{end}}
+        <button type="button" role="tab" id="attempt-tab-cache" class="tab" data-testid="attempt-tab-cache"
+          aria-selected="false" aria-controls="attempt-tabpanel-cache" tabindex="-1">Cache details</button>
+      </div>
 
-    {{/* Prompt-cache panel: the attempt's caching telemetry (drvctl-031), folded
-         into attempt.md on retire. caching_active is the headline yes/no — the
-         "is caching even on?" signal — styled distinctly when off (the prefix
-         never cached). It leads with the business figures (drvweb-018): equivalent
-         API cost avoided ($ + share of prompt spend), the billed-vs-uncached dollar
-         bar, and the ">100%" reuse factor (reads per token written). The grid below
-         keeps the raw counts — read-vs-written, share served from cache, normalised
-         work, and billed-vs-uncached input-token equivalents. Until an attempt
-         retires with a metered session it has no metrics, so the panel shows a quiet
-         placeholder rather than a grid of zeros. Cross-attempt amortisation is
-         drvweb-013. */}}
-    {{template "cache-panel" (cachePanel .Attempt)}}
+      {{/* Spec — the default tab, rendered visible (no hidden attr) so the "more"
+           cap JS measures overflow correctly on load. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-spec" data-testid="attempt-tabpanel-spec" aria-labelledby="attempt-tab-spec">
+        <section class="spec" data-testid="spec">
+          <h2>Spec</h2>
+          <div class="prose" data-testid="spec-prose">{{.SpecHTML}}</div>
+          {{/* Presentational cap only: a long spec is clipped to a max-height with a
+               fade; the button toggles a class to reveal the rest. JS unhides it only
+               when the spec actually overflows, and nothing is remembered server-side. */}}
+          <button type="button" class="spec-toggle" data-testid="spec-toggle" aria-expanded="false" hidden>more</button>
+        </section>
+      </div>
 
-    <section class="spec" data-testid="spec">
-      <h2>Spec</h2>
-      <div class="prose" data-testid="spec-prose">{{.SpecHTML}}</div>
-      {{/* Presentational cap only: a long spec is clipped to a max-height with a
-           fade; the button toggles a class to reveal the rest. JS unhides it only
-           when the spec actually overflows, and nothing is remembered server-side. */}}
-      <button type="button" class="spec-toggle" data-testid="spec-toggle" aria-expanded="false" hidden>more</button>
+      {{/* Provenance + repo-settings sit side by side within the tab: the left panel
+           edits THIS attempt's attempt.md (repo/base), shelling `draiver attempt set`
+           (drvctl-028) on a blur that changed a value; the right edits the repo's
+           defaults in the global config.json (drv-011) — one attempt vs every attempt
+           on the repo. The row wraps to stacked on a narrow viewport. Each POST
+           re-renders its panel in place (outerHTML on #provenance / #repo-settings),
+           unchanged. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-provenance" data-testid="attempt-tabpanel-provenance" aria-labelledby="attempt-tab-provenance" hidden>
+        <div class="panel-row" data-testid="panel-row">
+          {{template "provenance-panel" (provenance .Attempt)}}
+          {{template "repo-settings-panel" (repoSettings .Attempt)}}
+        </div>
+      </div>
+
+      {{if and .Attempt.Base .Attempt.Repo (ne (printf "%s" .Attempt.State) "Done")}}
+      {{/* drv-013 Git controls: drive the attempt's local git folder from the board
+           without dropping to a terminal. Each button is a same-origin htmx POST to
+           /git/<verb> that re-renders the log region (the verb records a note) and
+           OOB-swaps the result banner with the land report. Both verbs are git-only
+           and non-terminal: Push sends the branch to the default remote; Sync pulls
+           the remote's <base> into the local <base> and back-merges it into the
+           branch (clean checkout required). Shown (tab + panel together) while the
+           attempt records both a base and a repo and is not yet Done. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-git" data-testid="attempt-tabpanel-git" aria-labelledby="attempt-tab-git" hidden>
+        <section class="git-controls" data-testid="git-controls">
+          <h2 class="git-controls-title">Git</h2>
+          <p class="git-controls-hint">Drive this attempt's local git folder. Default branch <code>{{.Attempt.Base}}</code>.</p>
+          <div class="git-actions">
+            <button type="button" class="action-git-push" data-testid="action-git-push"
+              hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/push"
+              hx-confirm="Push branch draiver/{{.Attempt.Ticket}}/{{.Attempt.ID}} to the default remote?"
+              hx-target="[data-testid=log-region]" hx-swap="innerHTML">Push to remote</button>
+            <button type="button" class="action-git-sync" data-testid="action-git-sync"
+              hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/sync"
+              hx-confirm="Sync: pull the remote's {{.Attempt.Base}} into your local {{.Attempt.Base}} and back-merge it into this attempt's branch? Needs a clean checkout."
+              hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull remote {{.Attempt.Base}} in</button>
+          </div>
+          <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
+        </section>
+      </div>
+      {{end}}
+
+      {{if .Report.HasRuns}}
+      {{/* BDD report (drv-018): the latest captured run rendered inline from the
+           artefact store, with a selector among the side-by-side regenerations
+           drv-017 stores. The iframe loads the report by-reference (inline=0) so its
+           screenshots stream from the asset route; "Open standalone" opens the
+           self-contained file. The iframe is sandboxed to allow-scripts only (the
+           report's own expand/collapse JS) with no same-origin access, since it
+           renders untrusted test output. Tab + panel shown only once a run has been
+           captured for the attempt. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-bdd" data-testid="attempt-tabpanel-bdd" aria-labelledby="attempt-tab-bdd" hidden>
+        <section class="bdd-report" data-testid="bdd-report">
+          <div class="bdd-report-head">
+            <h2 class="bdd-report-title">BDD report</h2>
+            <label class="bdd-run-select">Run
+              <select data-testid="bdd-run-select" onchange="var o=this.selectedOptions[0];var f=document.getElementById('bdd-report-frame');if(f)f.src=o.value;var a=document.getElementById('bdd-report-open');if(a)a.href=o.dataset.standalone;">
+                {{range .Report.Groups}}
+                <optgroup label="{{.Label}}">
+                  {{range .Runs}}<option value="{{.Src}}" data-standalone="{{.Standalone}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+                </optgroup>
+                {{end}}
+              </select>
+            </label>
+            <a id="bdd-report-open" class="bdd-report-open" data-testid="bdd-report-open"
+              href="{{.Report.StandaloneSrc}}" target="_blank" rel="noopener">Open standalone ↗</a>
+          </div>
+          <iframe id="bdd-report-frame" class="bdd-report-frame" data-testid="bdd-report-frame"
+            src="{{.Report.IframeSrc}}" sandbox="allow-scripts" title="BDD report" loading="lazy"></iframe>
+        </section>
+      </div>
+      {{end}}
+
+      {{/* Prompt-cache panel: the attempt's caching telemetry (drvctl-031), folded
+           into attempt.md on retire. caching_active is the headline yes/no, styled
+           distinctly when off. It leads with the business figures (drvweb-018):
+           equivalent API cost avoided, the billed-vs-uncached dollar bar, and the
+           ">100%" reuse factor; the grid below keeps the raw counts. Until an attempt
+           retires with a metered session it has no metrics, so the panel shows a quiet
+           placeholder rather than a grid of zeros. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-cache" data-testid="attempt-tabpanel-cache" aria-labelledby="attempt-tab-cache" hidden>
+        {{template "cache-panel" (cachePanel .Attempt)}}
+      </div>
     </section>
 
     {{/* Agent Logs: a collapsed-by-default window onto the attempt's live session
          stream — what the agent did, tool by tool, the same content `ctl logs -f`
-         prints (agent stream interleaved with session/ctl.jsonl health). Plain
-         text, no colour (deferred). The SSE opens only when the panel expands
-         (toggle listener below), so a collapsed panel costs no stream and no
-         subprocess. Lines are set via textContent, never HTML — the session is
-         untrusted content. */}}
+         prints. Now a bordered card (like the Spec card) whose whole header row is
+         the click target, so it is an easy, obvious hitbox to expand/collapse. The
+         SSE opens only when the panel expands (toggle listener below), so a collapsed
+         panel costs no stream and no subprocess. Lines are set via textContent, never
+         HTML — the session is untrusted content. */}}
     <section class="agent-logs" data-testid="agent-logs">
       <details class="agent-logs-details" data-testid="agent-logs-details"
         data-stream-url="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/agent-logs">
@@ -143,67 +230,6 @@
       </div>
       {{end}}
 
-      {{if and .Attempt.Base .Attempt.Repo (ne (printf "%s" .Attempt.State) "Done")}}
-      {{/* drv-013 Git controls: drive the attempt's local git folder from the board
-           without dropping to a terminal. Each button is a same-origin htmx POST to
-           /git/<verb> that re-renders the log region (the verb records a note) and
-           OOB-swaps the result banner with the land report. Both verbs are git-only
-           and non-terminal (they never change the attempt's state): Push sends the
-           branch to the default remote; Sync pulls the remote's <base> into the
-           local <base> and back-merges it into the branch (clean checkout required
-           for the back-merge). Shown while the
-           attempt records both a base and a repo and is not yet Done — without a
-           base/repo there is nothing to push or sync, and a Done attempt's checkout
-           may already be reclaimed. Create-PR / Merge-PR are deliberately absent:
-           they need a forge API (auth + per-forge adapters), split into their own
-           ticket per the spec. */}}
-      <section class="git-controls" data-testid="git-controls">
-        <h2 class="git-controls-title">Git</h2>
-        <p class="git-controls-hint">Drive this attempt's local git folder. Default branch <code>{{.Attempt.Base}}</code>.</p>
-        <div class="git-actions">
-          <button type="button" class="action-git-push" data-testid="action-git-push"
-            hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/push"
-            hx-confirm="Push branch draiver/{{.Attempt.Ticket}}/{{.Attempt.ID}} to the default remote?"
-            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Push to remote</button>
-          <button type="button" class="action-git-sync" data-testid="action-git-sync"
-            hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/sync"
-            hx-confirm="Sync: pull the remote's {{.Attempt.Base}} into your local {{.Attempt.Base}} and back-merge it into this attempt's branch? Needs a clean checkout."
-            hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull remote {{.Attempt.Base}} in</button>
-        </div>
-        <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
-      </section>
-      {{end}}
-
-      {{/* BDD report (drv-018): the latest captured run rendered inline from the
-           artefact store, with a selector among the side-by-side regenerations
-           drv-017 stores. The iframe loads the report by-reference (inline=0) so
-           its screenshots stream from the asset route rather than bloating this
-           page; "Open standalone" opens the self-contained file (every screenshot
-           inlined) that drv-019 will offer as a download. The iframe is sandboxed
-           to allow-scripts only (the report's own expand/collapse JS) with no
-           same-origin access, since it renders untrusted test output. Hidden until
-           a run has been captured for the attempt. */}}
-      {{if .Report.HasRuns}}
-      <section class="bdd-report" data-testid="bdd-report">
-        <div class="bdd-report-head">
-          <h2 class="bdd-report-title">BDD report</h2>
-          <label class="bdd-run-select">Run
-            <select data-testid="bdd-run-select" onchange="var o=this.selectedOptions[0];var f=document.getElementById('bdd-report-frame');if(f)f.src=o.value;var a=document.getElementById('bdd-report-open');if(a)a.href=o.dataset.standalone;">
-              {{range .Report.Groups}}
-              <optgroup label="{{.Label}}">
-                {{range .Runs}}<option value="{{.Src}}" data-standalone="{{.Standalone}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
-              </optgroup>
-              {{end}}
-            </select>
-          </label>
-          <a id="bdd-report-open" class="bdd-report-open" data-testid="bdd-report-open"
-            href="{{.Report.StandaloneSrc}}" target="_blank" rel="noopener">Open standalone ↗</a>
-        </div>
-        <iframe id="bdd-report-frame" class="bdd-report-frame" data-testid="bdd-report-frame"
-          src="{{.Report.IframeSrc}}" sandbox="allow-scripts" title="BDD report" loading="lazy"></iframe>
-      </section>
-      {{end}}
-
       <div class="log-region" data-testid="log-region" data-order="newest"
         {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
         {{template "attempt-log" .}}
@@ -212,6 +238,47 @@
   </main>
 
   <script>
+    (function () {
+      // Tabbed top section (drv-021): purely client-side panel switching — no route,
+      // no reload. The whole card is server-rendered with Spec pre-selected
+      // (aria-selected=true, tabindex=0, its panel visible) and the rest hidden, so a
+      // no-JS load still shows the Spec. This wires an accessible tablist: clicking or
+      // (with the tablist focused) arrow/Home/End keys move a roving tabindex, set
+      // aria-selected, and toggle each panel's [hidden]. Conditional tabs (Git, BDD)
+      // may be absent; we read whatever tabs the server rendered, so nav wraps over
+      // exactly the present set.
+      var tabsCard = document.querySelector('[data-testid="attempt-tabs"]');
+      if (!tabsCard) return;
+      var tabs = Array.prototype.slice.call(tabsCard.querySelectorAll('[role="tab"]'));
+      if (!tabs.length) return;
+      function panelFor(tab) {
+        return document.getElementById(tab.getAttribute('aria-controls'));
+      }
+      function select(tab, focus) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+          t.tabIndex = on ? 0 : -1;
+          var panel = panelFor(t);
+          if (panel) panel.hidden = !on;
+        });
+        if (focus) tab.focus();
+      }
+      tabs.forEach(function (tab, i) {
+        tab.addEventListener('click', function () { select(tab, false); });
+        tab.addEventListener('keydown', function (e) {
+          var next;
+          if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % tabs.length;
+          else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + tabs.length) % tabs.length;
+          else if (e.key === 'Home') next = 0;
+          else if (e.key === 'End') next = tabs.length - 1;
+          else return;
+          e.preventDefault();
+          select(tabs[next], true);
+        });
+      });
+    })();
+
     (function () {
       // The order toggle only flips VISUAL order: the DOM is always oldest-first
       // and CSS (flex-direction) reverses it. Order state lives on the log-region

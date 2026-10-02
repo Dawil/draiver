@@ -78,9 +78,9 @@ func TestProvenancePanelAlwaysRendersPrefilled(t *testing.T) {
 }
 
 // TestProvenanceInlineEditTable pins the redesigned panel: a quiet key/value
-// table above the spec, where each value is an inline input (no Save button) that
-// posts on change, and each key carries an (i) info bubble whose tooltip explains
-// the field.
+// table (in the Provenance tab of the drv-021 tabbed card), where each value is an
+// inline input (no Save button) that posts on change, and each key carries an (i)
+// info bubble whose tooltip explains the field.
 func TestProvenanceInlineEditTable(t *testing.T) {
 	root := seedBoard(t)
 	writeAttemptMeta(t, root, "PROJ-3", "0001", "/tmp/repo", "main")
@@ -115,9 +115,15 @@ func TestProvenanceInlineEditTable(t *testing.T) {
 		t.Errorf("info bubble tooltip / input aria-label missing")
 	}
 
-	// The provenance panel renders above the spec section.
-	if pi, si := strings.Index(body, `data-testid="provenance"`), strings.Index(body, `data-testid="spec"`); pi < 0 || si < 0 || pi > si {
-		t.Errorf("provenance panel should render above the spec (provenance@%d, spec@%d)", pi, si)
+	// drv-021: the provenance panel now lives in the Provenance tab of the tabbed
+	// top card, which follows the default Spec tab — so it renders after the spec
+	// section (DOM order), within its tabpanel.
+	pi, si := strings.Index(body, `data-testid="provenance"`), strings.Index(body, `data-testid="spec"`)
+	if pi < 0 || si < 0 || pi < si {
+		t.Errorf("provenance panel should render in its tab after the spec (provenance@%d, spec@%d)", pi, si)
+	}
+	if ti := strings.Index(body, `data-testid="attempt-tabpanel-provenance"`); ti < 0 || ti > pi {
+		t.Errorf("provenance panel should sit inside the provenance tabpanel (tabpanel@%d, provenance@%d)", ti, pi)
 	}
 }
 

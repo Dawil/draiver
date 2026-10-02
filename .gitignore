@@ -17,6 +17,9 @@ node_modules/
 /e2e/playwright/.cache/
 /e2e/.bin/
 /e2e/.fixture-data/
+# drv-021 attempt-tabs screenshots: generated UI evidence, attached to the review
+# as artefacts rather than version-controlled.
+/e2e/screenshots/
 # integration-rung harness builds the draiver binary here (runtime.go)
 /internal/e2e/integration/.bin/
 
