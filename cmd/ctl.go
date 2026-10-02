@@ -470,6 +470,7 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		Actor:              resolveActor(),
 		ContextLimit:       contextLimit,
 		DefaultSupervision: defaultSupervision,
+		ReviewEnvMaxAge:    time.Duration(cfg.ReviewEnvMaxAgeMinutes) * time.Minute,
 		PermPolicy:         permPolicy,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,

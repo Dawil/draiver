@@ -167,6 +167,15 @@ type Options struct {
 	// defaultResumeConfirm.
 	ResumeConfirm time.Duration
 
+	// ReviewEnvMaxAge is the idle/max-age reaper window for review environments
+	// (drv-020, config.ReviewEnvMaxAgeMinutes resolved to a duration). Each tick's
+	// best-effort review-env sweep tears down a launched review env whose attempt has
+	// gone Done or that has sat untouched past this window — the safety net against a
+	// forgotten env leaking a worktree and a bound port. Zero disables the idle reaper
+	// (teardown then only on the explicit button or ticket-Done, which the sweep still
+	// honours regardless of this value).
+	ReviewEnvMaxAge time.Duration
+
 	// Now sources the current time; defaults to time.Now.
 	Now func() time.Time
 
@@ -426,6 +435,12 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	// the daemon's view: close it out with an error-end rather than strand the record
 	// (and the webui red dot) on a lone error-start (drvctl-027).
 	r.sweepHealth(desired)
+
+	// Best-effort review-env reaper (drv-020): tear down a review env whose attempt
+	// went Done or that has idled past the max-age window. A leaked worktree/port is a
+	// controlplane-detectable fault, so the daemon — not a human — closes it. Errors
+	// are logged, never fatal to the tick (same posture as the health sweep).
+	r.sweepReviewEnvs(ctx)
 	return nil
 }
 

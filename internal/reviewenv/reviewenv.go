@@ -260,15 +260,32 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	if err := env.ReviewReady(); err != nil {
 		return Record{}, fmt.Errorf("reviewenv: %w", err)
 	}
+
+	// Persist Starting FIRST, before any slow git/network work, so an async launcher
+	// (the webui goroutine) and any status poll racing it both observe "starting" the
+	// instant the launch is accepted — and so a failure resolving the reviewed commit
+	// or allocating a port flows through fail() into a Failed record the panel shows,
+	// rather than a bare error the goroutine would swallow (leaving a stuck starting).
+	rec := Record{
+		State:       Starting,
+		Environment: env.Name,
+		Started:     m.now(),
+		LastActive:  m.now(),
+	}
+	rec, err := m.save(a.Ticket, a.ID, rec)
+	if err != nil {
+		return rec, err
+	}
+
 	commit, err := m.reviewedCommit(ctx, a)
 	if err != nil {
-		return Record{}, err
+		return m.fail(a, rec, fmt.Sprintf("could not resolve the reviewed commit: %v", err))
 	}
 
 	instance := slug(a.Ticket, a.ID)
 	port, err := allocatePort()
 	if err != nil {
-		return Record{}, fmt.Errorf("reviewenv: allocate port: %w", err)
+		return m.fail(a, rec, fmt.Sprintf("could not allocate a port: %v", err))
 	}
 	vars := map[string]string{
 		EnvInstance: instance,
@@ -286,19 +303,13 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	scriptEnv := envSlice(vars)
 	wtPath := m.worktreePath(a)
 
-	rec := Record{
-		State:        Starting,
-		Environment:  env.Name,
-		Instance:     instance,
-		Port:         port,
-		Commit:       commit,
-		Worktree:     wtPath,
-		Down:         env.Down,
-		Healthchecks: env.Healthchecks,
-		ScriptEnv:    scriptEnv,
-		Started:      m.now(),
-		LastActive:   m.now(),
-	}
+	rec.Instance = instance
+	rec.Port = port
+	rec.Commit = commit
+	rec.Worktree = wtPath
+	rec.Down = env.Down
+	rec.Healthchecks = env.Healthchecks
+	rec.ScriptEnv = scriptEnv
 	if rec, err = m.save(a.Ticket, a.ID, rec); err != nil {
 		return rec, err
 	}
@@ -340,6 +351,27 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	rec.URL = url
 	rec.Message = ""
 	rec.LastActive = m.now()
+	return m.save(a.Ticket, a.ID, rec)
+}
+
+// MarkStarting persists a Starting record synchronously — the race-closer for an
+// async launch. The webui runs the slow Launch (worktree + up + healthchecks) in a
+// goroutine, but a status poll between the click and the goroutine's first write
+// would otherwise see Down and bounce the panel back to the Up button. Writing
+// Starting here, synchronously, before the goroutine is spawned, guarantees the gap
+// reads "starting". It validates the env is review-ready (the same refusal Launch
+// makes) so a bad selection fails on the click, not silently in the goroutine. Launch
+// overwrites this with the full record (instance/port/commit/worktree).
+func (m *Manager) MarkStarting(a project.Attempt, env *pyramid.Environment) (Record, error) {
+	if err := env.ReviewReady(); err != nil {
+		return Record{}, fmt.Errorf("reviewenv: %w", err)
+	}
+	rec := Record{
+		State:       Starting,
+		Environment: env.Name,
+		Started:     m.now(),
+		LastActive:  m.now(),
+	}
 	return m.save(a.Ticket, a.ID, rec)
 }
 
