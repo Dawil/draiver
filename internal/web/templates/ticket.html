@@ -152,8 +152,15 @@
             <a id="bdd-report-open" class="bdd-report-open" data-testid="bdd-report-open"
               href="{{.Report.StandaloneSrc}}" target="_blank" rel="noopener">Open standalone ↗</a>
           </div>
+          {{/* The report is loaded on first reveal, not via loading="lazy": a lazy
+               iframe that starts inside a hidden (display:none) tabpanel is not
+               reliably (re)loaded when the panel is un-hidden across engines, so the
+               report could silently fail to "come through". The tab script promotes
+               data-src -> src the first time this panel is shown — genuinely lazy
+               (no fetch until the BDD tab is opened) but deterministic. The run
+               <select> above still drives src directly thereafter. */}}
           <iframe id="bdd-report-frame" class="bdd-report-frame" data-testid="bdd-report-frame"
-            src="{{.Report.IframeSrc}}" sandbox="allow-scripts" title="BDD report" loading="lazy"></iframe>
+            data-src="{{.Report.IframeSrc}}" sandbox="allow-scripts" title="BDD report"></iframe>
         </section>
       </div>
       {{end}}
@@ -254,13 +261,28 @@
       function panelFor(tab) {
         return document.getElementById(tab.getAttribute('aria-controls'));
       }
+      // Deterministic lazy-load for any iframe parked behind a tab (the BDD report):
+      // it ships with data-src instead of src, so it never relies on loading="lazy"
+      // firing when a hidden panel is un-hidden — a reveal that is unreliable across
+      // engines. The first time the panel is shown we promote data-src -> src, so the
+      // report is fetched exactly once, on demand, and is guaranteed to load.
+      function hydrate(panel) {
+        if (!panel) return;
+        panel.querySelectorAll('iframe[data-src]').forEach(function (f) {
+          f.src = f.getAttribute('data-src');
+          f.removeAttribute('data-src');
+        });
+      }
       function select(tab, focus) {
         tabs.forEach(function (t) {
           var on = t === tab;
           t.setAttribute('aria-selected', on ? 'true' : 'false');
           t.tabIndex = on ? 0 : -1;
           var panel = panelFor(t);
-          if (panel) panel.hidden = !on;
+          if (panel) {
+            panel.hidden = !on;
+            if (on) hydrate(panel);
+          }
         });
         if (focus) tab.focus();
       }

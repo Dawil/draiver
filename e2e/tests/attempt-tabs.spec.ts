@@ -96,6 +96,24 @@ test.describe("attempt page — tabbed top section", () => {
     await expect(page.getByTestId("attempt-tab-git")).toBeVisible();
   });
 
+  test("the BDD report iframe loads on first reveal of its tab (deferred, not eager)", async ({ page }) => {
+    // drv-021 resolution #10: the report iframe is parked behind a hidden tab. It
+    // must NOT rely on loading="lazy" firing when the panel un-hides (fragile across
+    // engines) — it ships with data-src and the tab script promotes it to src on
+    // first reveal. Before clicking it has no src (no report fetched); after, it
+    // navigates to the by-reference report and actually renders content.
+    await page.goto(RICH);
+    const frame = page.getByTestId("bdd-report-frame");
+    await expect(frame).toHaveAttribute("data-src", /\/report\?inline=0/);
+    expect(await frame.getAttribute("src")).toBeNull();
+
+    await page.getByTestId("attempt-tab-bdd").click();
+    await expect(frame).toHaveAttribute("src", /\/report\?inline=0/);
+    // The report document is reachable and rendered inside the iframe.
+    const inner = page.frameLocator("[data-testid=bdd-report-frame]");
+    await expect(inner.locator("body")).toContainText(/scenario/i);
+  });
+
   test("Agent Logs is a bordered card below the tabs, collapsed by default, header toggles it", async ({ page }) => {
     await page.goto(RICH);
     const details = page.getByTestId("agent-logs-details");
