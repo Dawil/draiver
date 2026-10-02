@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Dawil/draiver/internal/cucumber"
+	"github.com/Dawil/draiver/internal/webshot"
 )
 
 // repoFeaturesDir resolves the repo's real features/ dir from this test file's
@@ -21,6 +22,18 @@ func repoFeaturesDir(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "features")
 }
 
+// requireBrowser skips execution-based tests when no browser is available. The
+// steps now screenshot the live webui via Playwright (decision #23), so executing
+// them needs node + playwright + chromium — the hard precondition of the bdd-bound
+// acceptance rung. On a browserless box (e.g. the unit rung before `npm install`)
+// these skip, and the drift check below still guards the feature/registry contract.
+func requireBrowser(t *testing.T) {
+	t.Helper()
+	if !webshot.Available() {
+		t.Skip("acceptance suite needs a playwright browser; it runs for real under the bdd-bound `acceptance` rung")
+	}
+}
+
 // runSuite runs the real features into a temp outDir and returns the result.
 func runSuite(t *testing.T) Result {
 	t.Helper()
@@ -31,9 +44,33 @@ func runSuite(t *testing.T) Result {
 	return res
 }
 
+// TestFeaturesHaveStepDefinitions is the browser-free drift guard: every step in
+// every shipped feature must resolve to a registry definition. It runs always (no
+// browser needed), so a feature step that drifts from the registry fails fast even
+// on the unit rung.
+func TestFeaturesHaveStepDefinitions(t *testing.T) {
+	features, err := ParseFeaturesDir(repoFeaturesDir(t))
+	if err != nil {
+		t.Fatalf("parse features: %v", err)
+	}
+	if len(features) < 2 {
+		t.Fatalf("expected at least the download + rerun features, got %d", len(features))
+	}
+	for _, f := range features {
+		for _, sc := range f.Scenarios {
+			for _, st := range sc.Steps {
+				if _, ok := registry[st.Text]; !ok {
+					t.Errorf("feature %q scenario %q: no registry step for %q", f.Name, sc.Name, st.Text)
+				}
+			}
+		}
+	}
+}
+
 // The acceptance suite must pass clean: a failing/undefined step here means a
 // feature step drifted from the registry, or drv-019's behaviour regressed.
 func TestAcceptanceSuitePasses(t *testing.T) {
+	requireBrowser(t)
 	res := runSuite(t)
 	if res.ScenariosFailed != 0 {
 		t.Fatalf("%d scenario(s) failed:\n%s", res.ScenariosFailed, res.Report.Summary())
@@ -46,6 +83,7 @@ func TestAcceptanceSuitePasses(t *testing.T) {
 // AC #4 / deliverable: every scenario in the report has at least one step carrying
 // an artefact (embedding) — the property the board's report page relies on.
 func TestEveryScenarioHasAnArtifact(t *testing.T) {
+	requireBrowser(t)
 	res := runSuite(t)
 	sum := res.Report.Summary()
 	if sum.Scenarios == 0 {
@@ -76,6 +114,7 @@ func elementHasEmbedding(el cucumber.Element) bool {
 // capture, the report renderer): a re-parse of the marshalled report round-trips to
 // a valid, green cucumber document with the embeddings intact.
 func TestEmittedJSONIsConsumableCucumber(t *testing.T) {
+	requireBrowser(t)
 	res := runSuite(t)
 	sum := res.Report.Summary()
 	if sum.Embeddings == 0 {

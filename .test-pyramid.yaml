@@ -38,16 +38,20 @@ environments:
         script: go version
 
   # bdd is the test environment the acceptance rung requires (drv-019 AC): `up`
-  # prepares the artefact output dir the runner writes into, and the healthcheck
-  # proves the one dependency the rung needs (the Go toolchain to build+run the
-  # runner) is ready — a red probe blocks the rung / the board rerun rather than
-  # producing a bogus report (drv-012). It is deliberately a genuine, always-green
-  # local precondition so dogfooding does not change this repo's gate.
+  # installs the Playwright node package (browsers come from the shared
+  # $PLAYWRIGHT_BROWSERS_PATH cache, so this only adds the npm package) and prepares
+  # the artefact output dir the runner writes into. The healthchecks prove every
+  # dependency the rung needs — the Go toolchain, a resolvable `playwright`, and a
+  # chromium binary on disk — so a box without a browser BLOCKS the rung / the board
+  # rerun ("pass the ball") rather than emitting bogus or empty screenshots (drv-012,
+  # decision #23). The steps capture real Playwright screenshots of the live webui.
   - name: bdd
-    up: mkdir -p features/_artifacts/screenshots
+    up: npm install --prefix features/screenshots --no-audit --no-fund --silent && mkdir -p features/_artifacts/screenshots
     healthchecks:
       - name: go-toolchain
         script: go version
+      - name: playwright-browser
+        script: NODE_PATH=features/screenshots/node_modules node -e "require('playwright')" && ls ${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}/chromium-*/chrome-linux/chrome >/dev/null 2>&1
 
 levels:
   - name: unit
