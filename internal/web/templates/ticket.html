@@ -191,26 +191,11 @@
            to allow-scripts only (the report's own expand/collapse JS) with no
            same-origin access, since it renders untrusted test output. Hidden until
            a run has been captured for the attempt. */}}
-      {{if .Report.HasRuns}}
-      <section class="bdd-report" data-testid="bdd-report">
-        <div class="bdd-report-head">
-          <h2 class="bdd-report-title">BDD report</h2>
-          <label class="bdd-run-select">Run
-            <select data-testid="bdd-run-select" onchange="var o=this.selectedOptions[0];var f=document.getElementById('bdd-report-frame');if(f)f.src=o.value;var a=document.getElementById('bdd-report-open');if(a)a.href=o.dataset.standalone;">
-              {{range .Report.Groups}}
-              <optgroup label="{{.Label}}">
-                {{range .Runs}}<option value="{{.Src}}" data-standalone="{{.Standalone}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
-              </optgroup>
-              {{end}}
-            </select>
-          </label>
-          <a id="bdd-report-open" class="bdd-report-open" data-testid="bdd-report-open"
-            href="{{.Report.StandaloneSrc}}" target="_blank" rel="noopener">Open standalone ↗</a>
-        </div>
-        <iframe id="bdd-report-frame" class="bdd-report-frame" data-testid="bdd-report-frame"
-          src="{{.Report.IframeSrc}}" sandbox="allow-scripts" title="BDD report" loading="lazy"></iframe>
-      </section>
-      {{end}}
+      {{/* The slot always exists so the drv-019 rerun can refresh the report panel
+           out-of-band (hx-swap-oob by #bdd-report-slot) even on the first run — the
+           bdd-report section itself still renders only once a run is captured, so
+           the empty state carries no data-testid="bdd-report". */}}
+      <div id="bdd-report-slot">{{template "bdd-report-body" .Report}}</div>
 
       <div class="log-region" data-testid="log-region" data-order="newest"
         {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
@@ -643,3 +628,45 @@
   </div>
   {{end}}
 </section>{{else}}<section id="review-env" data-testid="review-env" hidden></section>{{end}}{{end}}
+
+{{/* bdd-report-slot wraps the report panel so a drv-019 rerun can refresh it
+     out-of-band (matched by #bdd-report-slot) once a fresh run is captured —
+     including the first run, when the empty slot held no section. */}}
+{{define "bdd-report-slot"}}<div id="bdd-report-slot" hx-swap-oob="true">{{template "bdd-report-body" .}}</div>{{end}}
+
+{{/* bdd-report-body is the embedded report panel (drv-018) plus drv-019's
+     act-from-the-board affordances: Download the self-contained file, and Rerun the
+     bound BDD rung. It carries no data-testid="bdd-report" until a run exists, so
+     the empty state stays hidden. Takes a *reportPanelVM. */}}
+{{define "bdd-report-body"}}{{if .HasRuns}}
+<section class="bdd-report" data-testid="bdd-report">
+  <div class="bdd-report-head">
+    <h2 class="bdd-report-title">BDD report</h2>
+    <label class="bdd-run-select">Run
+      <select data-testid="bdd-run-select" onchange="var o=this.selectedOptions[0];var f=document.getElementById('bdd-report-frame');if(f)f.src=o.value;var a=document.getElementById('bdd-report-open');if(a)a.href=o.dataset.standalone;var d=document.getElementById('bdd-report-download');if(d)d.href=o.dataset.download;">
+        {{range .Groups}}
+        <optgroup label="{{.Label}}">
+          {{range .Runs}}<option value="{{.Src}}" data-standalone="{{.Standalone}}" data-download="{{.Download}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+        </optgroup>
+        {{end}}
+      </select>
+    </label>
+    <a id="bdd-report-open" class="bdd-report-open" data-testid="bdd-report-open"
+      href="{{.StandaloneSrc}}" target="_blank" rel="noopener">Open standalone ↗</a>
+    <a id="bdd-report-download" class="bdd-report-download" data-testid="bdd-report-download"
+      href="{{.DownloadSrc}}">Download ⤓</a>
+    {{if .CanRerun}}<button class="bdd-rerun" data-testid="bdd-rerun" type="button"
+      hx-post="{{.RerunSrc}}" hx-target="[data-testid=log-region]" hx-swap="innerHTML"
+      hx-confirm="Rerun the bound BDD rung? This brings the environment up, runs the healthcheck, and re-executes the scenarios to capture a fresh report.">Rerun ↻</button>{{end}}
+    <div id="rerun-result" class="rerun-result" data-testid="rerun-result" hidden></div>
+  </div>
+  <iframe id="bdd-report-frame" class="bdd-report-frame" data-testid="bdd-report-frame"
+    src="{{.IframeSrc}}" sandbox="allow-scripts" title="BDD report" loading="lazy"></iframe>
+</section>
+{{end}}{{end}}
+
+{{/* rerun-result carries the drv-019 rerun outcome back onto the page (OOB), paired
+     with the attempt-live fragment and, on a captured run, a refreshed
+     bdd-report-slot. Plain executor text, HTML-escaped — never markdown.
+     data-status exposes the verdict for tests/styling. */}}
+{{define "rerun-result"}}<div id="rerun-result" class="rerun-result rerun-{{.Class}}" data-testid="rerun-result" data-status="{{.Status}}" hx-swap-oob="true">{{.Message}}</div>{{end}}

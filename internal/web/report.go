@@ -1,12 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"encoding/base64"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/Dawil/draiver/internal/bddexec"
+	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/report"
 )
 
@@ -36,7 +39,15 @@ type reportPanelVM struct {
 	// StandaloneSrc is the self-contained report URL for the selected run (the file
 	// drv-019 will download).
 	StandaloneSrc string
-	Groups        []reportGroupVM
+	// DownloadSrc is the download URL for the selected run — the same self-contained
+	// file served as an attachment (Content-Disposition) so the browser saves it.
+	DownloadSrc string
+	// CanRerun is true when the attempt's pyramid exposes a BDD rung to re-execute,
+	// so the rerun affordance renders. False hides the button (nothing to rerun).
+	CanRerun bool
+	// RerunSrc is the POST URL of the rerun action for this attempt.
+	RerunSrc string
+	Groups   []reportGroupVM
 }
 
 // reportGroupVM is one regeneration group in the run selector: runs sharing
@@ -53,6 +64,7 @@ type reportRunOptVM struct {
 	Label      string
 	Src        string
 	Standalone string
+	Download   string
 	Selected   bool
 }
 
@@ -71,6 +83,9 @@ func (s *Server) reportPanel(id, att string) (*reportPanelVM, error) {
 	selected := runs[0].ID()
 	vm.IframeSrc = reportURL(id, att, selected, false)
 	vm.StandaloneSrc = reportURL(id, att, selected, true)
+	vm.DownloadSrc = downloadURL(id, att, selected)
+	vm.CanRerun = s.attemptHasBDDRung(id, att)
+	vm.RerunSrc = "/ticket/" + url.PathEscape(id) + "/" + url.PathEscape(att) + "/report/rerun"
 	for _, g := range report.GroupRuns(runs) {
 		gvm := reportGroupVM{Label: g.Rung + " · " + g.Env + " · " + shortCommit(g.Commit)}
 		for _, run := range g.Runs {
@@ -79,12 +94,26 @@ func (s *Server) reportPanel(id, att string) (*reportPanelVM, error) {
 				Label:      run.Runstamp,
 				Src:        reportURL(id, att, run.ID(), false),
 				Standalone: reportURL(id, att, run.ID(), true),
+				Download:   downloadURL(id, att, run.ID()),
 				Selected:   run.ID() == selected,
 			})
 		}
 		vm.Groups = append(vm.Groups, gvm)
 	}
 	return vm, nil
+}
+
+// attemptHasBDDRung reports whether the attempt's worktree carries a pyramid with
+// a BDD rung to re-execute (drv-019 rerun). It is best-effort and never an error:
+// a missing attempt/worktree/pyramid simply means "nothing to rerun" so the panel
+// hides the button rather than failing the whole detail render.
+func (s *Server) attemptHasBDDRung(id, att string) bool {
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil || strings.TrimSpace(a.Repo) == "" {
+		return false
+	}
+	_, _, ok, err := bddexec.BoundBDDRung(a.Repo)
+	return err == nil && ok
 }
 
 func shortCommit(c string) string {
@@ -104,6 +133,14 @@ func reportURL(id, att, runID string, inline bool) string {
 		q.Set("inline", "0")
 	}
 	return "/ticket/" + url.PathEscape(id) + "/" + url.PathEscape(att) + "/report?" + q.Encode()
+}
+
+// downloadURL builds the download route URL for a run — the self-contained
+// standalone report served as an attachment.
+func downloadURL(id, att, runID string) string {
+	q := url.Values{}
+	q.Set("run", runID)
+	return "/ticket/" + url.PathEscape(id) + "/" + url.PathEscape(att) + "/report/download?" + q.Encode()
 }
 
 // handleReport serves the rendered HTML report for a run (GET
@@ -147,6 +184,76 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Write(html)
+}
+
+// handleReportDownload serves a run's standalone report as a file download (GET
+// /ticket/{id}/{attempt}/report/download) — drv-019 deliverable #1. It renders the
+// same fully self-contained document handleReport serves without ?inline=0 (every
+// screenshot base64-inlined, so it opens offline), but attaches a
+// Content-Disposition so the browser saves it under a descriptive filename rather
+// than rendering it in place. ?run selects a run; absent, the latest is used.
+func (s *Server) handleReportDownload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	run, ok, err := s.resolveRun(id, att, r.URL.Query().Get("run"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	rep, err := run.LoadReport()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// No Resolve hook → fully self-contained, exactly like the standalone view.
+	opts := report.Options{Title: id + " / " + att + " — " + run.Rung + " @ " + run.ShortCommit()}
+	html, err := report.Render(rep, opts)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+downloadFilename(id, att, run)+"\"")
+	w.Write(html)
+}
+
+// downloadFilename builds a safe, descriptive filename for a downloaded report:
+// bdd-report-<id>-<att>-<rung>-<shortcommit>-<runstamp>.html, with every segment
+// sanitized to a conservative filename-safe set so a crafted rung/commit cannot
+// break out of the Content-Disposition value.
+func downloadFilename(id, att string, run report.Run) string {
+	parts := []string{"bdd-report", id, att, run.Rung, run.ShortCommit(), run.Runstamp}
+	for i, p := range parts {
+		parts[i] = sanitizeFilenameSegment(p)
+	}
+	return strings.Join(parts, "-") + ".html"
+}
+
+// sanitizeFilenameSegment reduces a segment to [A-Za-z0-9._-], collapsing any
+// other rune to '-', and never yields an empty segment.
+func sanitizeFilenameSegment(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "none"
+	}
+	return b.String()
 }
 
 // assetURL builds the asset-route URL addressing one embedding within a run.
@@ -263,6 +370,97 @@ func locateEmbedding(rep *report.Report, q url.Values) (report.Embedding, bool) 
 func atoiOK(s string) (int, bool) {
 	n, err := strconv.Atoi(s)
 	return n, err == nil
+}
+
+// rerunResultVM drives the OOB "rerun-result" banner. Status is the executor's
+// verdict (ok/blocked/env-fault/run-failed/no-bdd-rung); Class maps it to a styling
+// hook; Message is the joined, human-readable report lines.
+type rerunResultVM struct {
+	Status  string
+	Class   string
+	Message string
+}
+
+// handleReportRerun re-executes the attempt's bound BDD rung from the board (POST
+// /ticket/{id}/{attempt}/report/rerun) — drv-019 deliverable #2. It mirrors the
+// drv-013 git-control seam (handleGitVerb): a same-origin guard, an attempt-exists
+// check, an in-process delegate (here s.rerun → internal/bddexec, never the BDD
+// tooling in the handler), and a one-body double swap — the re-rendered live
+// fragment plus an OOB result banner. When the rerun captured a new run it also
+// refreshes the embedded report panel out-of-band, so the fresh side-by-side
+// appears without a full reload.
+//
+// The healthcheck precondition is enforced by the executor, not here: a red
+// environment yields StatusBlocked and the "pass the ball" banner rather than a
+// bogus report. This action is non-terminal — it produces evidence and never flips
+// the Review gate (the gate note), exactly like push/sync.
+func (s *Server) handleReportRerun(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	outcome, err := s.rerun(r.Context(), a)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	var buf bytes.Buffer
+	buf.Write(live)
+	// A captured run means the report changed — refresh the panel OOB. Blocked / env
+	// fault / no-rung outcomes produce no run, so the panel is left untouched.
+	if outcome.RunKey != "" {
+		if err := s.tmpl.ExecuteTemplate(&buf, "bdd-report-slot", vm.Report); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+	banner := rerunResultVM{
+		Status:  string(outcome.Status),
+		Class:   rerunClass(outcome.Status),
+		Message: strings.Join(outcome.Lines, "\n"),
+	}
+	if err := s.tmpl.ExecuteTemplate(&buf, "rerun-result", banner); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(buf.Bytes())
+}
+
+// rerunClass maps an executor status to a banner styling hook: a captured green run
+// is "ok", a red healthcheck or missing rung is a neutral "warn" (the ball is back
+// with the human, not a crash), and an env/run fault is "bad".
+func rerunClass(st bddexec.Status) string {
+	switch st {
+	case bddexec.StatusOK:
+		return "ok"
+	case bddexec.StatusBlocked, bddexec.StatusNoRung:
+		return "warn"
+	default:
+		return "bad"
+	}
 }
 
 // safeContentType maps an embedding's declared MIME type to a Content-Type safe to
