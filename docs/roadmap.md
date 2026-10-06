@@ -10,3 +10,5 @@
 * compress and fork an attempt
 * stop/pause button (and obvious mechanics around resuming after new entries added)
 * reproducible artifacts (with cucumber html test report and environments in test pyramid)
+* click to trigger "resolve conflicts"
+* live message to the agent (not a log message) (integrates well with stop/interrupt)
