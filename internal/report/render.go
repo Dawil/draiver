@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html/template"
+	"path"
+	"sort"
 	"strings"
 	"time"
 )
@@ -55,7 +57,8 @@ type renderModel struct {
 	Stats       []stat
 	Verdict     string // "ok" | "bad" | ""
 	VerdictText string
-	Features    []featureVM
+	Groups      []groupVM // folder-grouped capability sections (default paint)
+	Facets      []facetVM // tag facet bar, every effective tag in the run
 	Empty       bool
 	CSS         template.CSS
 	JS          template.JS
@@ -74,23 +77,62 @@ type segment struct {
 	Class   string // seg-passed etc. for the bar / status-passed for dots
 }
 
+// groupVM is one capability section — a set of features sharing a group key (a
+// folder, in the default folder grouping) with its own status roll-up.
+type groupVM struct {
+	Label       string
+	Status      Status
+	StatusClass string
+	Duration    string
+	Scenarios   int
+	Features    []featureVM
+}
+
+// facetVM is one tag chip in the facet bar: the tag and how many scenarios carry
+// it (by effective, inherited tags).
+type facetVM struct {
+	Name  string
+	Count int
+}
+
 type featureVM struct {
 	Keyword     string
 	Name        string
 	URI         string
+	Folder      string
+	Description string
+	Tags        []string
+	Status      Status
+	StatusClass string
+	Duration    string
+	Blocks      []blockVM // ordered mix of Rule sub-groups and bare-scenario groups
+}
+
+// blockVM is a run of consecutive scenarios within a feature. IsRule blocks carry
+// a Gherkin `Rule:` header and their own roll-up; non-rule blocks render their
+// scenarios flat, directly under the feature (today's layout).
+type blockVM struct {
+	IsRule      bool
+	Keyword     string
+	Name        string
 	Description string
 	Tags        []string
 	Status      Status
 	StatusClass string
 	Duration    string
 	Scenarios   []scenarioVM
+
+	dur   time.Duration // accumulators for the roll-up, not rendered
+	worst Status
 }
 
 type scenarioVM struct {
 	Keyword     string
 	Name        string
 	Description string
-	Tags        []string
+	Tags        []string // the scenario's own tags, rendered as chips
+	DataTags    string   // space-joined effective (inherited) tags, for filtering
+	Key         string   // composite subsequence key, lowercased
 	Status      Status
 	StatusClass string
 	Duration    string
@@ -176,22 +218,36 @@ func Render(r *Report, opts Options) ([]byte, error) {
 		model.Verdict, model.VerdictText = "bad", fmt.Sprintf("%d failed", sum.ScenariosByStatus[StatusFailed])
 	}
 
+	var features []featureVM
+	facets := map[string]int{}
 	for fi, f := range r.Features {
 		fvm := featureVM{
 			Keyword:     orDefault(f.Keyword, "Feature"),
 			Name:        f.Name,
 			URI:         f.URI,
+			Folder:      folderOf(f.URI),
 			Description: strings.TrimSpace(f.Description),
 			Tags:        tagNames(f.Tags),
 		}
 		var fdur time.Duration
 		worst := Status("")
+		curKey := ""
 		for ei, el := range f.Elements {
+			effTags := effectiveTags(f.Tags, el.Rule, el.Tags)
+			for _, t := range effTags {
+				facets[t]++
+			}
+			ruleName := ""
+			if el.Rule != nil {
+				ruleName = el.Rule.Name
+			}
 			svm := scenarioVM{
 				Keyword:     orDefault(el.Keyword, "Scenario"),
 				Name:        el.Name,
 				Description: strings.TrimSpace(el.Description),
 				Tags:        tagNames(el.Tags),
+				DataTags:    strings.Join(effTags, " "),
+				Key:         subsequenceKey(f.URI, f.Name, ruleName, el.Name, effTags),
 				Status:      el.Status(),
 				StatusClass: classOf(el.Status()),
 				Duration:    formatDuration(el.Duration()),
@@ -209,7 +265,37 @@ func Render(r *Report, opts Options) ([]byte, error) {
 			for hi, h := range el.After {
 				svm.Steps = append(svm.Steps, hookStep(fi, ei, "after", hi, h, opts))
 			}
-			fvm.Scenarios = append(fvm.Scenarios, svm)
+
+			// Open a new block when the rule changes (nil→rule, rule→rule', rule→nil).
+			k := el.Rule.key()
+			if len(fvm.Blocks) == 0 || k != curKey {
+				b := blockVM{}
+				if el.Rule != nil {
+					b.IsRule = true
+					b.Keyword = orDefault(el.Rule.Keyword, "Rule")
+					b.Name = el.Rule.Name
+					b.Description = strings.TrimSpace(el.Rule.Description)
+					b.Tags = tagNames(el.Rule.Tags)
+				}
+				fvm.Blocks = append(fvm.Blocks, b)
+				curKey = k
+			}
+			bp := &fvm.Blocks[len(fvm.Blocks)-1]
+			bp.Scenarios = append(bp.Scenarios, svm)
+			bp.dur += el.Duration()
+			if el.Status().severity() > bp.worst.severity() {
+				bp.worst = el.Status()
+			}
+		}
+		for bi := range fvm.Blocks {
+			b := &fvm.Blocks[bi]
+			bw := b.worst
+			if bw == "" {
+				bw = StatusSkipped
+			}
+			b.Status = bw
+			b.StatusClass = classOf(bw)
+			b.Duration = formatDuration(b.dur)
 		}
 		if worst == "" {
 			worst = StatusSkipped
@@ -217,8 +303,10 @@ func Render(r *Report, opts Options) ([]byte, error) {
 		fvm.Status = worst
 		fvm.StatusClass = classOf(worst)
 		fvm.Duration = formatDuration(fdur)
-		model.Features = append(model.Features, fvm)
+		features = append(features, fvm)
 	}
+	model.Groups = groupByFolder(features)
+	model.Facets = facetList(facets)
 
 	t, err := template.New("report.html.tmpl").Funcs(template.FuncMap{
 		"durationText": func() string { return formatDuration(sum.Duration) },
@@ -348,6 +436,131 @@ func label(s Status) string {
 		return "unknown"
 	}
 	return string(s)
+}
+
+// folderOf derives a feature's capability folder from its URI directory path, so
+// features group by where they live in the tree. A URI with no directory (a bare
+// filename or empty) yields "" — the ungrouped bucket.
+func folderOf(uri string) string {
+	u := strings.ReplaceAll(strings.TrimSpace(uri), "\\", "/")
+	if u == "" {
+		return ""
+	}
+	dir := path.Dir(u)
+	if dir == "." || dir == "/" {
+		return ""
+	}
+	return strings.TrimPrefix(dir, "./")
+}
+
+// groupLabel is the display label for a group key; the empty folder reads as
+// "(ungrouped)" rather than a blank header.
+func groupLabel(folder string) string {
+	if strings.TrimSpace(folder) == "" {
+		return "(ungrouped)"
+	}
+	return folder
+}
+
+// effectiveTags returns a scenario's inherited tag set — feature, then rule, then
+// the scenario's own — de-duplicated in that order. Gherkin tags inherit down, so
+// the OR filter and facet counts treat a feature-level @auth as present on every
+// scenario beneath it.
+func effectiveTags(featureTags []Tag, rule *Rule, elTags []Tag) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(tags []Tag) {
+		for _, t := range tags {
+			if t.Name == "" || seen[t.Name] {
+				continue
+			}
+			seen[t.Name] = true
+			out = append(out, t.Name)
+		}
+	}
+	add(featureTags)
+	if rule != nil {
+		add(rule.Tags)
+	}
+	add(elTags)
+	return out
+}
+
+// subsequenceKey builds the per-scenario composite key the free-text filter runs a
+// subsequence match over: the feature URI (so folder segments are matchable),
+// then feature name, rule, scenario name, and effective tags — all lowercased.
+func subsequenceKey(uri, feature, rule, scenario string, tags []string) string {
+	parts := make([]string, 0, 4+len(tags))
+	for _, p := range []string{uri, feature, rule, scenario} {
+		if strings.TrimSpace(p) != "" {
+			parts = append(parts, p)
+		}
+	}
+	parts = append(parts, tags...)
+	return strings.ToLower(strings.Join(parts, " "))
+}
+
+// groupByFolder buckets features by their folder into capability sections,
+// preserving feature order within a group and sorting groups by label (the
+// ungrouped bucket sorts last). Each section carries a status/duration roll-up.
+func groupByFolder(features []featureVM) []groupVM {
+	order := []string{}
+	byFolder := map[string]*groupVM{}
+	for _, f := range features {
+		g, ok := byFolder[f.Folder]
+		if !ok {
+			g = &groupVM{Label: groupLabel(f.Folder)}
+			byFolder[f.Folder] = g
+			order = append(order, f.Folder)
+		}
+		g.Features = append(g.Features, f)
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		// Ungrouped (empty folder) sorts last; otherwise alphabetical.
+		if (order[i] == "") != (order[j] == "") {
+			return order[j] == ""
+		}
+		return order[i] < order[j]
+	})
+	out := make([]groupVM, 0, len(order))
+	for _, folder := range order {
+		g := byFolder[folder]
+		worst := Status("")
+		var dur time.Duration
+		for _, f := range g.Features {
+			if f.Status.severity() > worst.severity() {
+				worst = f.Status
+			}
+			for _, b := range f.Blocks {
+				g.Scenarios += len(b.Scenarios)
+				dur += b.dur
+			}
+		}
+		if worst == "" {
+			worst = StatusSkipped
+		}
+		g.Status = worst
+		g.StatusClass = classOf(worst)
+		g.Duration = formatDuration(dur)
+		out = append(out, *g)
+	}
+	return out
+}
+
+// facetList turns the tag→count map into a sorted facet bar: most-used first, ties
+// broken by name so the order is stable.
+func facetList(counts map[string]int) []facetVM {
+	out := make([]facetVM, 0, len(counts))
+	for name, n := range counts {
+		out = append(out, facetVM{Name: name, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 func tagNames(tags []Tag) []string {
