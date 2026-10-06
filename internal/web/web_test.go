@@ -198,6 +198,67 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	}
 }
 
+// TestAttemptTabsStructure pins the drv-021 tabbed top card: an accessible
+// tablist/tab/tabpanel with Spec selected by default (roving tabindex), its panel
+// shown while the others are [hidden], the always-present Provenance and Cache tabs,
+// and the conditional Git tab following its existing base+repo+not-Done gate.
+func TestAttemptTabsStructure(t *testing.T) {
+	root := seedBoard(t)
+	// PROJ-3/0001 is Running; giving it a repo+base lights the Git tab.
+	writeAttemptMeta(t, root, "PROJ-3", "0001", "/tmp/repo", "main")
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	body := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+
+	for _, want := range []string{
+		`data-testid="attempt-tabs"`,
+		`role="tablist"`,
+		`data-testid="attempt-tablist"`,
+		// Spec is selected on load, focusable (roving tabindex 0), and drives its panel.
+		`aria-selected="true" aria-controls="attempt-tabpanel-spec" tabindex="0"`,
+		// The non-default tabs are unselected and removed from the tab sequence (-1).
+		`aria-selected="false" aria-controls="attempt-tabpanel-provenance" tabindex="-1"`,
+		`aria-selected="false" aria-controls="attempt-tabpanel-cache" tabindex="-1"`,
+		`aria-selected="false" aria-controls="attempt-tabpanel-git" tabindex="-1"`,
+		// The Spec tabpanel is visible (no hidden attr); the others are hidden on load.
+		`role="tabpanel" id="attempt-tabpanel-spec" data-testid="attempt-tabpanel-spec" aria-labelledby="attempt-tab-spec">`,
+		`id="attempt-tabpanel-provenance" data-testid="attempt-tabpanel-provenance" aria-labelledby="attempt-tab-provenance" hidden>`,
+		`id="attempt-tabpanel-cache" data-testid="attempt-tabpanel-cache" aria-labelledby="attempt-tab-cache" hidden>`,
+		// The moved panels keep their testids, resolved inside their tabpanels.
+		`data-testid="spec"`,
+		`data-testid="panel-row"`,
+		`data-testid="cache-panel"`,
+		`data-testid="git-controls"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("tabbed card missing %q", want)
+		}
+	}
+	// No captured BDD runs → no BDD tab (the card never shows an empty tab).
+	if strings.Contains(body, `data-testid="attempt-tab-bdd"`) {
+		t.Errorf("BDD tab must be absent without captured runs")
+	}
+
+	// Gating parity: PROJ-2/0001 (Review, no base/repo) keeps the always-on tabs but
+	// drops the Git tab, exactly as the old standalone Git section was gated.
+	noMeta := get(t, h, "/ticket/PROJ-2/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="attempt-tab-spec"`,
+		`data-testid="attempt-tab-provenance"`,
+		`data-testid="attempt-tab-cache"`,
+	} {
+		if !strings.Contains(noMeta, want) {
+			t.Errorf("always-on tab missing without base/repo: %q", want)
+		}
+	}
+	if strings.Contains(noMeta, `data-testid="attempt-tab-git"`) {
+		t.Errorf("Git tab must be absent without a base/repo")
+	}
+}
+
 // TestTimelineShowsRelativeTimestamps pins the timestamp contract (drvweb-002):
 // each log entry renders a relative age instead of the raw minute-precision
 // stamp, carries the machine-readable datetime the client script reads to keep
@@ -1715,7 +1776,8 @@ func seedAttemptWithMetrics(t *testing.T, id, att string, m agent.Metrics, model
 // TestCachePanelRendersMetrics pins the acceptance: an attempt with folded-in
 // drvctl-031 metrics renders the cache panel on its detail view — the caching_active
 // yes/no headline plus read-vs-written, hit ratio, normalised work, and the
-// billed-vs-uncached input-equivalent saving. The panel sits above the spec.
+// billed-vs-uncached input-equivalent saving. The panel is the Cache details tab
+// of the drv-021 tabbed top card (rendered after the default Spec tab).
 func TestCachePanelRendersMetrics(t *testing.T) {
 	// Clean numbers: hit ratio 8000/10000 = 80.0%; normalised work = 10,200;
 	// billed = 1000 + 1.25*1000 + 0.1*8000 = 3,050; uncached = 10,000; saved 69.5%.
@@ -1743,11 +1805,16 @@ func TestCachePanelRendersMetrics(t *testing.T) {
 			t.Errorf("cache panel missing %q", want)
 		}
 	}
-	// The panel is a diagnosis-first summary: it sits above the spec.
+	// drv-021: the cache panel is now the "Cache details" tab of the tabbed top
+	// card (last tab), so it renders after the default Spec tab, inside its
+	// tabpanel. It still renders in full — only its placement moved.
 	iCache := strings.Index(body, `data-testid="cache-panel"`)
 	iSpec := strings.Index(body, `data-testid="spec"`)
-	if !(iCache >= 0 && iCache < iSpec) {
-		t.Errorf("cache panel should sit above the spec (cache=%d spec=%d)", iCache, iSpec)
+	if !(iCache >= 0 && iSpec >= 0 && iCache > iSpec) {
+		t.Errorf("cache panel should render in its tab after the spec (cache=%d spec=%d)", iCache, iSpec)
+	}
+	if iPanel := strings.Index(body, `data-testid="attempt-tabpanel-cache"`); iPanel < 0 || iPanel > iCache {
+		t.Errorf("cache panel should sit inside the cache tabpanel (tabpanel=%d cache=%d)", iPanel, iCache)
 	}
 }
 

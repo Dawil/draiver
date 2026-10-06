@@ -88,10 +88,25 @@ func TestAttemptPageEmbedsReportAndSelector(t *testing.T) {
 	// The embed loads by-reference (inline=0), newest run selected by default. The
 	// run id is a slash-bearing path, so url.Values.Encode percent-encodes its
 	// slashes (%2F) — the handler decodes them back via Query().Get, so this is the
-	// robust stdlib form, not a bug.
+	// robust stdlib form, not a bug. It rides on data-src (not src): the iframe is
+	// parked in a hidden tab and the page script promotes data-src -> src on first
+	// reveal, so a lazy-in-display:none iframe can't silently fail to load (drv-021
+	// resolution #10). The report URL must still be the one the iframe will fetch.
 	unescaped := html.UnescapeString(body)
-	if !strings.Contains(unescaped, "/ticket/BDD-1/0001/report?inline=0&run=bdd%2Fintegration%2Fci%2Fabc12345%2F20260101T120000Z") {
-		t.Errorf("iframe src not the newest by-reference report; body:\n%s", unescaped)
+	if !strings.Contains(unescaped, `data-src="/ticket/BDD-1/0001/report?inline=0&run=bdd%2Fintegration%2Fci%2Fabc12345%2F20260101T120000Z"`) {
+		t.Errorf("iframe data-src not the newest by-reference report; body:\n%s", unescaped)
+	}
+	// And it must NOT ship an eager src (which would defeat the on-demand load) nor
+	// rely on loading="lazy" inside the hidden panel.
+	if strings.Contains(body, `id="bdd-report-frame"`) && strings.Contains(unescaped, `<iframe id="bdd-report-frame"`) {
+		frameTag := unescaped[strings.Index(unescaped, `<iframe id="bdd-report-frame"`):]
+		frameTag = frameTag[:strings.Index(frameTag, ">")+1]
+		if strings.Contains(frameTag, " src=") {
+			t.Errorf("iframe ships an eager src; should defer via data-src: %s", frameTag)
+		}
+		if strings.Contains(frameTag, "loading=") {
+			t.Errorf("iframe relies on loading= inside a hidden panel; should defer via data-src: %s", frameTag)
+		}
 	}
 	// Selector: 2 optgroups (two commits), 3 run options (three runstamps). Count
 	// run options by their unique data-standalone attribute — a page-wide "<option"

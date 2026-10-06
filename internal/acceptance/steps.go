@@ -187,8 +187,10 @@ func currentBoard(w *World) (*board, error) {
 
 // shoot captures a Playwright screenshot of a live webui page and attaches it as the
 // step's artefact — the real webui image that replaced the old green/red squares
-// (decision #22/#23).
-func shoot(w *World, sr *StepRun, path, name string, full bool, waitSel string) error {
+// (decision #22/#23). clickSel, when set, is clicked before the shot: the drv-021
+// tabbed layout folds the report panel into a hidden BDD tabpanel, so a board
+// screenshot must first select that tab to reveal the report / rerun affordance.
+func shoot(w *World, sr *StepRun, path, name string, full bool, waitSel, clickSel string) error {
 	b, err := currentBoard(w)
 	if err != nil {
 		return err
@@ -196,7 +198,7 @@ func shoot(w *World, sr *StepRun, path, name string, full bool, waitSel string) 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	png, err := webshot.Capture(ctx, b.url(path), webshot.Options{
-		Width: 1280, Height: 900, FullPage: full, WaitSelector: waitSel,
+		Width: 1280, Height: 900, FullPage: full, WaitSelector: waitSel, ClickSelector: clickSel,
 	})
 	if err != nil {
 		return err
@@ -262,7 +264,7 @@ func thenSelfContained(w *World, sr *StepRun) error {
 		return errors.New("downloaded report references the asset route (not self-contained)")
 	}
 	// Screenshot the live report page the webui renders — the actual evidence surface.
-	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt+"/report", "report-page", true, "")
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt+"/report", "report-page", true, "", "")
 }
 
 func thenScreenshotInlined(w *World, sr *StepRun) error {
@@ -271,7 +273,8 @@ func thenScreenshotInlined(w *World, sr *StepRun) error {
 		return errors.New("downloaded report did not inline its screenshot as a data: URI")
 	}
 	// Screenshot the board attempt page carrying the report panel + download affordance.
-	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "board-download-affordance", true, `[data-testid="bdd-report"]`)
+	// The panel lives in the hidden BDD tab now, so select it first.
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "board-download-affordance", true, `[data-testid="attempt-tab-bdd"]`, `[data-testid="attempt-tab-bdd"]`)
 }
 
 // ---- rerun steps: exercise the real in-process executor bddexec.Rerun (what the
@@ -350,7 +353,8 @@ func thenRerunGreen(w *World, sr *StepRun) error {
 		return errors.New("green rerun captured no artefact run")
 	}
 	// Screenshot the refreshed board: the panel now carries the regenerated run.
-	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "rerun-green-board", true, `[data-testid="bdd-report"]`)
+	// Select the BDD tab first — the panel is folded into it (drv-021 layout).
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "rerun-green-board", true, `[data-testid="attempt-tab-bdd"]`, `[data-testid="attempt-tab-bdd"]`)
 }
 
 func thenRerunBlocked(w *World, sr *StepRun) error {
@@ -362,8 +366,8 @@ func thenRerunBlocked(w *World, sr *StepRun) error {
 		return fmt.Errorf("blocked rerun must capture nothing, got %q", out.RunKey)
 	}
 	// Screenshot the board: the rerun affordance is present — the surface a human
-	// clicks and is told to pass the ball.
-	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "rerun-blocked-board", true, `[data-testid="bdd-rerun"]`)
+	// clicks and is told to pass the ball. It lives in the BDD tab, so select it first.
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "rerun-blocked-board", true, `[data-testid="attempt-tab-bdd"]`, `[data-testid="attempt-tab-bdd"]`)
 }
 
 func thenBlockExplains(w *World, sr *StepRun) error {
@@ -374,5 +378,5 @@ func thenBlockExplains(w *World, sr *StepRun) error {
 	}
 	// Screenshot the rendered report page — the evidence that is NOT refreshed by a
 	// block (the prior run still stands).
-	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt+"/report", "blocked-report-unchanged", true, "")
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt+"/report", "blocked-report-unchanged", true, "", "")
 }
