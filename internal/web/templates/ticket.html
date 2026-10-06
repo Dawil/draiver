@@ -714,9 +714,17 @@
   {{if .Port}}<p class="review-env-meta" data-testid="review-env-meta">instance <code>{{.Instance}}</code> · port <code>{{.Port}}</code></p>{{end}}
   {{if .Message}}<pre class="review-env-message" data-testid="review-env-message">{{.Message}}</pre>{{end}}
   <div class="review-env-actions">
-    {{if .CanUp}}<button type="button" class="action-review-env-up" data-testid="action-review-env-up"
-      hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/up"
-      hx-target="#review-env" hx-swap="outerHTML">Launch</button>{{end}}
+    {{if .CanUp}}<div class="review-env-up-form" data-testid="review-env-up-form">
+      {{range .Params}}<label class="review-env-param" data-testid="review-env-param-{{.Name}}">
+        <span class="review-env-param-name"><code>{{.Name}}</code></span>
+        <input type="text" class="review-env-param-input" name="param:{{.Name}}" value="{{.Value}}"
+          data-testid="review-env-param-input-{{.Name}}" autocomplete="off">
+      </label>{{end}}
+      <button type="button" class="action-review-env-up" data-testid="action-review-env-up"
+        hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/up"
+        hx-include="closest .review-env-up-form"
+        hx-target="#review-env" hx-swap="outerHTML">Launch</button>
+    </div>{{end}}
     {{if .CanDown}}<button type="button" class="action-review-env-down" data-testid="action-review-env-down"
       hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/down"
       hx-confirm="Tear down the review environment? This runs the env's down script and confirms it is gone."

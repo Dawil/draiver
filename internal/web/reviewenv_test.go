@@ -39,6 +39,24 @@ func reviewReadyPyramid(markerDir string) *pyramid.Pyramid {
 	}
 }
 
+// reviewReadyParamPyramid is a review-ready "review" env that ALSO declares a settable
+// ENV_NAME param (default "review"), backed by a marker file named by the resolved
+// ENV_NAME — so a launch with a custom value writes a differently-named marker, proving
+// the web-settable override (resolution #45) reached the scripts.
+func reviewReadyParamPyramid(markerDir string) *pyramid.Pyramid {
+	marker := filepath.Join(markerDir, "$ENV_NAME")
+	return &pyramid.Pyramid{
+		Environments: []pyramid.Environment{{
+			Name:         "review",
+			Up:           "touch " + marker,
+			Down:         "rm -f " + marker,
+			Healthchecks: []pyramid.Healthcheck{{Name: "marker", Script: "test -f " + marker}},
+			URL:          "http://127.0.0.1:${" + reviewenv.EnvPort + "}/",
+			Params:       []pyramid.Param{{Name: "ENV_NAME", Default: "review"}},
+		}},
+	}
+}
+
 // weakPyramid carries an environment named "review" that is NOT review-ready (no down,
 // no healthcheck) — the misconfiguration the panel must flag loudly.
 func weakPyramid() *pyramid.Pyramid {
@@ -149,6 +167,69 @@ func TestReviewEnvVisibilityGate(t *testing.T) {
 			t.Error("a reviewEnvironment naming no declared env should render the misconfiguration note")
 		}
 	})
+}
+
+// TestReviewEnvLaunchFormRendersParamInputs pins the resolution-#45 launch-form surface:
+// a review env that declares an ENV_NAME param renders it as an editable input, pre-filled
+// with the declared default, inside the launch form the Launch button includes.
+func TestReviewEnvLaunchFormRendersParamInputs(t *testing.T) {
+	ready := mockGit(reviewReadyParamPyramid(t.TempDir()), "deadbeef", false, true)
+	s := serverWithReviewEnv(t, "/mock/repo", "review", ready, project.Review)
+	body := get(t, s.Handler(), "/ticket/PROJ-9/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="review-env-up-form"`,
+		`data-testid="review-env-param-input-ENV_NAME"`,
+		`name="param:ENV_NAME" value="review"`, // declared default pre-fills the input
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("launch form missing %q", want)
+		}
+	}
+}
+
+// TestReviewEnvUpThreadsParamOverride drives the whole web seam for a custom param: a
+// POST /review-env/up carrying param:ENV_NAME=<custom> threads that value into the async
+// Launch, and the up script (a marker named by the resolved ENV_NAME) proves the custom
+// value reached the scripts — not the declared default.
+func TestReviewEnvUpThreadsParamOverride(t *testing.T) {
+	markers := t.TempDir()
+	s, _, _ := seedReviewRepo(t, reviewReadyParamPyramid(markers))
+	h := s.Handler()
+
+	form := "param:ENV_NAME=custom-value"
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-9/0001/review-env/up", strings.NewReader(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("POST up = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Poll status until the async launch goes up (URL revealed) or fails.
+	var last string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		last = getReviewEnvStatus(t, h).Body.String()
+		if strings.Contains(last, `data-testid="review-env-url"`) {
+			break
+		}
+		if strings.Contains(last, "launch failed") {
+			t.Fatalf("launch failed:\n%s", last)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(last, `data-testid="review-env-url"`) {
+		t.Fatalf("review env never came up; last panel:\n%s", last)
+	}
+
+	// The up script created the marker named by the custom ENV_NAME — not the default.
+	if _, err := os.Stat(filepath.Join(markers, "custom-value")); err != nil {
+		t.Fatalf("custom ENV_NAME did not reach the up script: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(markers, "review")); !os.IsNotExist(err) {
+		t.Errorf("the default ENV_NAME marker must not exist when the operator overrode it")
+	}
+	postReviewEnv(t, h, "down") // best-effort cleanup
 }
 
 // TestRepoSettingsReviewEnvFieldPersists pins the drv-020 repo-settings panel field:

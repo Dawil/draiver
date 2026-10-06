@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Dawil/draiver/internal/config"
@@ -54,6 +55,21 @@ type reviewEnvVM struct {
 	CanUp   bool
 	CanDown bool
 	Poll    bool
+	// Params are the env's repo-declared parameterisation vars, rendered as editable
+	// inputs in the launch form so the reviewer can set e.g. ENV_NAME before Up
+	// (drv-020, resolution #45). Populated only while the launch form is shown (CanUp).
+	Params []reviewEnvParam
+}
+
+// reviewEnvParam is one repo-declared parameterisation var surfaced as an editable
+// launch-form input (drv-020, resolution #45): the reviewer sets its value before
+// spinning the env up, and the launcher injects it beneath the always-winning
+// DRAIVER_REVIEW_* vars. Value is pre-filled with the value the last launch used (read
+// back from the record's captured ScriptEnv) when one exists, else the repo-declared
+// default — so a relaunch after a failure keeps what the operator typed.
+type reviewEnvParam struct {
+	Name  string
+	Value string
 }
 
 // stateLabel maps a lifecycle state to its panel summary.
@@ -134,7 +150,44 @@ func projectReviewEnv(a project.Attempt, envName string, p *pyramid.Pyramid, rec
 	case reviewenv.Starting, reviewenv.Up, reviewenv.Unhealthy, reviewenv.TeardownFailed:
 		vm.CanDown = true
 	}
+	// The launch form's editable param inputs are only shown at rest (when CanUp), so
+	// the reviewer sets e.g. ENV_NAME before spinning the env up.
+	if vm.CanUp {
+		vm.Params = reviewEnvParams(env, rec, hasRec)
+	}
 	return vm
+}
+
+// reviewEnvParams renders the env's repo-declared params as launch-form inputs,
+// pre-filled with the value the last launch used (parsed from the record's captured
+// ScriptEnv) when one exists, else the repo-declared default — so a relaunch after a
+// failure keeps the operator's typed value. The injected DRAIVER_REVIEW_* vars are not
+// repo params and never appear here.
+func reviewEnvParams(env *pyramid.Environment, rec reviewenv.Record, hasRec bool) []reviewEnvParam {
+	if env == nil || len(env.Params) == 0 {
+		return nil
+	}
+	last := map[string]string{}
+	if hasRec {
+		for _, kv := range rec.ScriptEnv {
+			if i := strings.IndexByte(kv, '='); i >= 0 {
+				last[kv[:i]] = kv[i+1:]
+			}
+		}
+	}
+	out := make([]reviewEnvParam, 0, len(env.Params))
+	for _, p := range env.Params {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			continue
+		}
+		val := p.Default
+		if v, ok := last[name]; ok {
+			val = v
+		}
+		out = append(out, reviewEnvParam{Name: name, Value: val})
+	}
+	return out
 }
 
 // reviewEnvManager builds the lifecycle Manager for a web request. It reads config
@@ -246,6 +299,9 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 		s.renderReviewEnvPanel(w, r.Context(), a)
 		return
 	}
+	// Read the launch form's per-param values BEFORE spawning the goroutine — the
+	// request (and its parsed form) must not be touched once the handler returns.
+	overrides := reviewEnvOverrides(r, env)
 	if _, err := mgr.MarkStarting(a, env); err != nil {
 		s.fail(w, err)
 		return
@@ -253,8 +309,36 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	// Launch on a background context so tearing down the request does not cancel the
 	// bring-up mid-`up`. The goroutine persists the outcome (up+url / failed); the
 	// panel's status poll surfaces it.
-	go mgr.Launch(context.Background(), a, env)
+	go mgr.Launch(context.Background(), a, env, overrides)
 	s.renderReviewEnvPanel(w, r.Context(), a)
+}
+
+// reviewEnvOverrides reads the launch form's per-param inputs (field name
+// "param:<NAME>") for the env's DECLARED params only, returning the operator-supplied
+// values (drv-020, resolution #45). A param with no field submitted is omitted (Launch
+// falls back to its declared default); a submitted field for an undeclared name is
+// ignored, so the web form can never inject an arbitrary env var into the scripts.
+func reviewEnvOverrides(r *http.Request, env *pyramid.Environment) map[string]string {
+	if env == nil || len(env.Params) == 0 {
+		return nil
+	}
+	if err := r.ParseForm(); err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, p := range env.Params {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			continue
+		}
+		if vals, ok := r.PostForm["param:"+name]; ok && len(vals) > 0 {
+			out[name] = vals[0]
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // handleReviewEnvDown tears a review environment down (POST

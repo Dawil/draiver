@@ -27,3 +27,13 @@ Feature: Launch a review environment from the attempt page
     Given a Review attempt whose reviewEnvironment names an incomplete environment
     When I open the attempt page
     Then the panel shows a misconfiguration note and offers no launch
+
+  Scenario: The launch form lets the reviewer set a custom ENV_NAME
+    Given a Review attempt whose review environment declares a settable ENV_NAME
+    When I open the attempt page
+    Then the launch form offers an editable ENV_NAME input
+
+  Scenario: A custom ENV_NAME parameterises the running instance
+    Given a Review attempt whose review environment declares a settable ENV_NAME
+    When I launch the review environment with ENV_NAME set to a custom value
+    Then the running instance is parameterised by the chosen ENV_NAME

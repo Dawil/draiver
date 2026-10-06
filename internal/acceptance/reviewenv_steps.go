@@ -38,11 +38,15 @@ func init() {
 		"a running review environment":                                             givenRunningEnv,
 		"a running review environment whose teardown does not stop it":             givenLeakingEnv,
 		"a Review attempt whose reviewEnvironment names an incomplete environment": givenIncompleteEnv,
+		"a Review attempt whose review environment declares a settable ENV_NAME":   givenParamEnv,
 		"I open the attempt page":                                                  whenOpenAttemptPage,
 		"I launch the review environment":                                          whenLaunchReviewEnv,
+		"I launch the review environment with ENV_NAME set to a custom value":      whenLaunchWithEnvName,
 		"I tear the review environment down":                                       whenTearReviewEnvDown,
 		"the review-environment panel offers to launch it":                         thenPanelOffersLaunch,
 		"the environment comes up and the attempt page reveals a clickable URL":    thenUpRevealsURL,
+		"the launch form offers an editable ENV_NAME input":                        thenParamInputOffered,
+		"the running instance is parameterised by the chosen ENV_NAME":             thenInstanceReflectsEnvName,
 		"the confirm-down healthcheck is red and the panel returns to rest":        thenTornDownToRest,
 		"the panel warns of a leak rather than reporting the environment gone":     thenLeakWarned,
 		"the panel shows a misconfiguration note and offers no launch":             thenMisconfigNote,
@@ -71,10 +75,12 @@ var reviewScripts = map[string]string{
 const fs = require('fs');
 const port = process.env.DRAIVER_REVIEW_PORT;
 const instance = process.env.DRAIVER_REVIEW_INSTANCE || 'unknown';
+const envName = process.env.ENV_NAME || 'unset';
 const srv = http.createServer(function (req, res) {
   res.writeHead(200, { 'content-type': 'text/html' });
   res.end('<!doctype html><title>Review env</title><h1>Review environment is up</h1>' +
-    '<p>instance ' + instance + ' on port ' + port + '</p>');
+    '<p>instance ' + instance + ' on port ' + port + '</p>' +
+    '<p data-testid="env-name">ENV_NAME: ' + envName + '</p>');
 });
 srv.listen(port, '127.0.0.1', function () {
   fs.writeFileSync('server.pid', String(process.pid));
@@ -158,6 +164,26 @@ const leakPyramid = `environments:
       - name: http-ready
         script: sh healthcheck.sh
     url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+levels:
+  - name: check
+    run: "true"
+`
+
+// The param pyramid is review-ready AND declares a settable ENV_NAME parameter
+// (default "review") — the drv-020 resolution-#45 surface: the launch form exposes it
+// as an editable input and the server echoes whatever value the operator sets, so a
+// custom ENV_NAME demonstrably parameterises the running instance.
+const paramPyramid = `environments:
+  - name: review
+    up: sh up.sh
+    down: sh down.sh
+    healthchecks:
+      - name: http-ready
+        script: sh healthcheck.sh
+    url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+    params:
+      - name: ENV_NAME
+        default: review
 levels:
   - name: check
     run: "true"
@@ -314,8 +340,9 @@ func seedReviewBoard(w *World, pyramidYAML string) (*reviewBoard, error) {
 // review worktree at the reviewed commit, runs up (a real server), confirms the
 // healthcheck green, and reveals the URL. It registers a force-kill cleanup so no
 // node server or port leaks across the single-process suite, whatever the scenario
-// asserts.
-func launchReviewEnv(w *World) error {
+// asserts. overrides carries the operator's launch-time param values (e.g. ENV_NAME),
+// nil for a default launch.
+func launchReviewEnv(w *World, overrides map[string]string) error {
 	rb, err := currentReviewBoard(w)
 	if err != nil {
 		return err
@@ -329,7 +356,7 @@ func launchReviewEnv(w *World) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	rec, err := rb.mgr.Launch(ctx, rb.att, rb.env)
+	rec, err := rb.mgr.Launch(ctx, rb.att, rb.env, overrides)
 	if err != nil {
 		return fmt.Errorf("launch errored: %w", err)
 	}
@@ -372,18 +399,28 @@ func givenRunningEnv(w *World, sr *StepRun) error {
 	if _, err := seedReviewBoard(w, reviewReadyPyramid); err != nil {
 		return err
 	}
-	return launchReviewEnv(w)
+	return launchReviewEnv(w, nil)
 }
 
 func givenLeakingEnv(w *World, sr *StepRun) error {
 	if _, err := seedReviewBoard(w, leakPyramid); err != nil {
 		return err
 	}
-	return launchReviewEnv(w)
+	return launchReviewEnv(w, nil)
 }
 
 func givenIncompleteEnv(w *World, sr *StepRun) error {
 	_, err := seedReviewBoard(w, incompletePyramid)
+	return err
+}
+
+// chosenEnvName is the distinctive value the resolution-#45 scenarios set through the
+// launch form, so the running instance echoing it is unambiguous evidence the custom
+// ENV_NAME took effect (not the "review" default).
+const chosenEnvName = "staging-demo"
+
+func givenParamEnv(w *World, sr *StepRun) error {
+	_, err := seedReviewBoard(w, paramPyramid)
 	return err
 }
 
@@ -411,7 +448,14 @@ func whenOpenAttemptPage(w *World, sr *StepRun) error {
 }
 
 func whenLaunchReviewEnv(w *World, sr *StepRun) error {
-	return launchReviewEnv(w)
+	return launchReviewEnv(w, nil)
+}
+
+// whenLaunchWithEnvName launches the review environment with the operator's custom
+// ENV_NAME — the value the launch form's editable input carries — threaded through the
+// lifecycle exactly as handleReviewEnvUp threads it from the POST.
+func whenLaunchWithEnvName(w *World, sr *StepRun) error {
+	return launchReviewEnv(w, map[string]string{"ENV_NAME": chosenEnvName})
 }
 
 func whenTearReviewEnvDown(w *World, sr *StepRun) error {
@@ -466,6 +510,39 @@ func thenUpRevealsURL(w *World, sr *StepRun) error {
 		return fmt.Errorf("panel does not carry the revealed URL %q", rec.URL)
 	}
 	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-up-url", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
+}
+
+// thenParamInputOffered proves the launch form exposes ENV_NAME as an editable input
+// (drv-020 #45) — the "settable by the web UI" surface — and screenshots it.
+func thenParamInputOffered(w *World, sr *StepRun) error {
+	html, _ := w.get("page").(string)
+	if !strings.Contains(html, `data-testid="review-env-up-form"`) {
+		return errors.New("review-env panel has no launch form")
+	}
+	if !strings.Contains(html, `data-testid="review-env-param-input-ENV_NAME"`) {
+		return errors.New("launch form offers no editable ENV_NAME input")
+	}
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-param-input", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
+}
+
+// thenInstanceReflectsEnvName fetches the live review URL and asserts the running
+// server echoes the custom ENV_NAME the launch set — end-to-end proof the web-settable
+// param reached the env's scripts — then screenshots the up panel.
+func thenInstanceReflectsEnvName(w *World, sr *StepRun) error {
+	rec, _ := w.get("revrec").(reviewenv.Record)
+	if rec.State != reviewenv.Up || rec.URL == "" {
+		return fmt.Errorf("record not up-with-url: state=%q url=%q", rec.State, rec.URL)
+	}
+	resp, err := http.Get(rec.URL)
+	if err != nil {
+		return fmt.Errorf("GET review url %q: %w", rec.URL, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "ENV_NAME: "+chosenEnvName) {
+		return fmt.Errorf("running instance does not reflect the chosen ENV_NAME %q; body:\n%s", chosenEnvName, body)
+	}
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-param-applied", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }
 
 func thenTornDownToRest(w *World, sr *StepRun) error {

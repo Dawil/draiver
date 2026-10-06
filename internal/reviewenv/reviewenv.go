@@ -253,7 +253,13 @@ func (m *Manager) save(id, attempt string, rec Record) (Record, error) {
 // Launch is self-healing against a stale prior attempt: any existing review worktree
 // for this attempt is force-removed first, so a relaunch after a Failed/TeardownFailed
 // record starts from a clean slate.
-func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.Environment) (Record, error) {
+//
+// overrides carries launch-time values the operator supplied for the env's declared
+// params (the web UI's per-param inputs, e.g. ENV_NAME). An override is applied only to
+// a DECLARED param — an entry for an undeclared name is ignored, so a caller can never
+// inject an arbitrary env var into the scripts — and still never shadows an injected
+// DRAIVER_REVIEW_* var. A nil map falls back to every param's declared default.
+func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.Environment, overrides map[string]string) (Record, error) {
 	if a.Repo == "" {
 		return Record{}, fmt.Errorf("reviewenv: attempt %s/%s records no repo", a.Ticket, a.ID)
 	}
@@ -292,13 +298,22 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		EnvPort:     fmt.Sprintf("%d", port),
 	}
 	// Repo-declared params fill in UNDER the injected DRAIVER_REVIEW_* vars: a param
-	// may not shadow an injected one (the injected values always win).
+	// may not shadow an injected one (the injected values always win). Each resolves to
+	// the operator's launch-time override when one was supplied for that declared name,
+	// else the repo-declared default.
 	for _, p := range env.Params {
-		if name := strings.TrimSpace(p.Name); name != "" {
-			if _, injected := vars[name]; !injected {
-				vars[name] = p.Default
-			}
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			continue
 		}
+		if _, injected := vars[name]; injected {
+			continue
+		}
+		val := p.Default
+		if ov, ok := overrides[name]; ok {
+			val = ov
+		}
+		vars[name] = val
 	}
 	scriptEnv := envSlice(vars)
 	wtPath := m.worktreePath(a)

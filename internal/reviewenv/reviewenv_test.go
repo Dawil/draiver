@@ -121,7 +121,7 @@ func TestLaunchRevealsURLOnGreen(t *testing.T) {
 	markers := t.TempDir()
 
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	rec, err := m.Launch(context.Background(), a, markerEnv(markers))
+	rec, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestLaunchFailsOnRedHealthcheck(t *testing.T) {
 		URL:          "http://localhost:${" + reviewenv.EnvPort + "}/",
 	}
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	rec, err := m.Launch(context.Background(), a, env)
+	rec, err := m.Launch(context.Background(), a, env, nil)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -191,11 +191,11 @@ func TestConcurrentEnvsGetDistinctPorts(t *testing.T) {
 	markers := t.TempDir()
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
 
-	r1, err := m.Launch(context.Background(), a1, markerEnv(markers))
+	r1, err := m.Launch(context.Background(), a1, markerEnv(markers), nil)
 	if err != nil || r1.State != reviewenv.Up {
 		t.Fatalf("launch a1: state=%q err=%v msg=%q", r1.State, err, r1.Message)
 	}
-	r2, err := m.Launch(context.Background(), a2, markerEnv(markers))
+	r2, err := m.Launch(context.Background(), a2, markerEnv(markers), nil)
 	if err != nil || r2.State != reviewenv.Up {
 		t.Fatalf("launch a2: state=%q err=%v msg=%q", r2.State, err, r2.Message)
 	}
@@ -224,7 +224,7 @@ func TestTeardownConfirmedDown(t *testing.T) {
 	markers := t.TempDir()
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
 
-	up, err := m.Launch(context.Background(), a, markerEnv(markers))
+	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -252,7 +252,7 @@ func TestTeardownLeakDetection(t *testing.T) {
 	env.Down = "true" // a down that does NOT actually tear the service down
 
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	up, err := m.Launch(context.Background(), a, env)
+	up, err := m.Launch(context.Background(), a, env, nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -286,7 +286,7 @@ func TestReaperTripsOnIdle(t *testing.T) {
 		MaxAge: 30 * time.Minute,
 		Now:    clk.now,
 	})
-	up, err := m.Launch(context.Background(), a, markerEnv(markers))
+	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -321,7 +321,7 @@ func TestProbeFlipsToUnhealthy(t *testing.T) {
 	markers := t.TempDir()
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
 
-	up, err := m.Launch(context.Background(), a, markerEnv(markers))
+	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -339,6 +339,69 @@ func TestProbeFlipsToUnhealthy(t *testing.T) {
 	}
 }
 
+// TestLaunchParamOverride pins the resolution-#45 parameterisation contract: a declared
+// param resolves to the operator's launch-time override, the injected DRAIVER_REVIEW_*
+// vars still win over both a param default and an override attempt, an override for an
+// undeclared name is ignored, and the resolved value is captured in ScriptEnv for
+// teardown replay.
+func TestLaunchParamOverride(t *testing.T) {
+	repo := newRepo(t)
+	root := store.Root{Dir: t.TempDir()}
+	a := seedAttempt(t, root, repo, "DRV-1", "0001")
+	dir := t.TempDir()
+	out := filepath.Join(dir, "params.txt")
+
+	env := &pyramid.Environment{
+		Name:         "review",
+		Up:           "printf '%s\\n%s\\n' \"$ENV_NAME\" \"$" + reviewenv.EnvInstance + "\" > " + out,
+		Down:         "true",
+		Healthchecks: []pyramid.Healthcheck{{Name: "ok", Script: "test -f " + out}},
+		URL:          "http://localhost:${" + reviewenv.EnvPort + "}/",
+		Params: []pyramid.Param{
+			{Name: "ENV_NAME", Default: "review"},
+			{Name: reviewenv.EnvInstance, Default: "SHOULD-BE-IGNORED"}, // cannot shadow the injected var
+		},
+	}
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
+	rec, err := m.Launch(context.Background(), a, env, map[string]string{
+		"ENV_NAME":            "staging",
+		reviewenv.EnvInstance: "HACK", // override of an injected var: must be ignored
+		"UNDECLARED":          "x",     // not a declared param: must be ignored
+	})
+	if err != nil || rec.State != reviewenv.Up {
+		t.Fatalf("launch: state=%q err=%v msg=%q", rec.State, err, rec.Message)
+	}
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read params: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("params file = %q, want two lines", string(data))
+	}
+	if lines[0] != "staging" {
+		t.Errorf("ENV_NAME override = %q, want %q", lines[0], "staging")
+	}
+	// The injected instance won over both its param default and the override attempt.
+	if lines[1] != rec.Instance {
+		t.Errorf("injected %s = %q, want %q (not overridable)", reviewenv.EnvInstance, lines[1], rec.Instance)
+	}
+	// The resolved override is captured in ScriptEnv so teardown replays the same value.
+	found := false
+	for _, kv := range rec.ScriptEnv {
+		if kv == "ENV_NAME=staging" {
+			found = true
+		}
+		if kv == "UNDECLARED=x" {
+			t.Errorf("an undeclared override leaked into the script env: %v", rec.ScriptEnv)
+		}
+	}
+	if !found {
+		t.Errorf("ScriptEnv did not capture ENV_NAME=staging: %v", rec.ScriptEnv)
+	}
+}
+
 func TestLaunchRejectsNonReviewReadyEnv(t *testing.T) {
 	repo := newRepo(t)
 	root := store.Root{Dir: t.TempDir()}
@@ -347,7 +410,7 @@ func TestLaunchRejectsNonReviewReadyEnv(t *testing.T) {
 	// Missing down + healthcheck: a generic drv-012 env, not review-ready.
 	env := &pyramid.Environment{Name: "weak", Up: "true"}
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	if _, err := m.Launch(context.Background(), a, env); err == nil {
+	if _, err := m.Launch(context.Background(), a, env, nil); err == nil {
 		t.Fatal("expected Launch to refuse a non-review-ready env")
 	}
 }
