@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -58,6 +59,39 @@ func DirtyAt(ctx context.Context, path string) (bool, error) {
 		return false, fmt.Errorf("worktree: status %s: %w", path, err)
 	}
 	return strings.TrimSpace(out) != "", nil
+}
+
+// AheadBehind reports how many commits the local branch is ahead of and behind its
+// counterpart on remote — the tracking ref refs/remotes/<remote>/<branch> — using a
+// purely local rev-list (it never fetches, so it reflects the last-known remote
+// state, the same best-effort read the Git-controls position indicator wants).
+//
+// ok is false — the caller shows "unknown" / omits the count — when the comparison
+// can't be made: the tracking ref is missing (the branch was never pushed, "no
+// upstream"), or any git error. It is the path-addressed sibling of HeadSHA/DirtyAt,
+// read live behind the web layer's injectable git reader.
+func AheadBehind(ctx context.Context, path, remote, branch string) (ahead, behind int, ok bool) {
+	ref := remote + "/" + branch
+	// The tracking ref must exist, or there is no upstream to compare against.
+	if _, err := gitOutput(ctx, path, "rev-parse", "--verify", "--quiet", "refs/remotes/"+ref); err != nil {
+		return 0, 0, false
+	}
+	// `--left-right --count A...B` prints "<left>\t<right>": left = commits reachable
+	// from the tracking ref but not the branch (behind), right = the reverse (ahead).
+	out, err := gitOutput(ctx, path, "rev-list", "--left-right", "--count", ref+"..."+branch)
+	if err != nil {
+		return 0, 0, false
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return 0, 0, false
+	}
+	b, berr := strconv.Atoi(fields[0])
+	a, aerr := strconv.Atoi(fields[1])
+	if berr != nil || aerr != nil {
+		return 0, 0, false
+	}
+	return a, b, true
 }
 
 // gitOutput runs `git -C dir args...` and returns trimmed-nothing stdout, folding

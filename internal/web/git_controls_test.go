@@ -3,7 +3,9 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -194,6 +196,70 @@ func TestGitSyncButtonPullsRemoteIntoLocalBase(t *testing.T) {
 	notes := notesOf(t, root, "PROJ-1", "0001")
 	if len(notes) != 1 || !strings.Contains(notes[0].Body, "Pulled") {
 		t.Errorf("want one `note` recording the pull, got %+v", notes)
+	}
+}
+
+// TestGitSyncNoopRendersBanner is drv-022's no-op outcome: nothing to pull and
+// nothing to back-merge records no note, but Sync still renders an explicit
+// "already up to date" success banner (kind noop) rather than a blank/edgeless
+// panel — the fix for the empty-report case.
+func TestGitSyncNoopRendersBanner(t *testing.T) {
+	root, _, _, _ := remoteReviewAttempt(t, false) // origin/main == local main; branch already contains main
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := post(t, s.Handler(), "/ticket/PROJ-1/0001/git/sync")
+	if rr.Code != 200 {
+		t.Fatalf("POST git/sync = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `data-testid="git-result"`) || !strings.Contains(body, `data-kind="noop"`) {
+		t.Errorf("no-op should render a kind=noop banner\n%s", body)
+	}
+	if !strings.Contains(body, "Already up to date") {
+		t.Errorf("no-op banner should state 'Already up to date'\n%s", body)
+	}
+	// A no-op moves nothing, so it records no note.
+	if notes := notesOf(t, root, "PROJ-1", "0001"); len(notes) != 0 {
+		t.Errorf("a no-op sync recorded %d note(s), want 0", len(notes))
+	}
+}
+
+// TestGitSyncFailureRendersBanner is drv-022's core fix: a failing sync (here a
+// dirty checkout, which the back-merge refuses) renders a failure banner carrying
+// the error at HTTP 200 — swapped into the panel via htmx — instead of the old bare
+// 500 from s.fail that left the panel blank. The attempt stays non-terminal and
+// nothing is recorded.
+func TestGitSyncFailureRendersBanner(t *testing.T) {
+	root, _, checkout, _ := remoteReviewAttempt(t, false)
+	// Dirty the attempt's checkout so worktree.Sync refuses the back-merge
+	// (ErrCheckoutDirty) — a realistic operational failure of the Sync control.
+	if err := os.WriteFile(filepath.Join(checkout, "scratch.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := post(t, s.Handler(), "/ticket/PROJ-1/0001/git/sync")
+	if rr.Code != 200 {
+		t.Fatalf("POST git/sync = %d, want 200 (the failure must be a banner, not a 500)\n%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `data-testid="git-result"`) || !strings.Contains(body, `data-kind="fail"`) {
+		t.Errorf("a failing sync should render a kind=fail banner\n%s", body)
+	}
+	if !strings.Contains(body, "Sync failed") || !strings.Contains(body, "uncommitted changes") {
+		t.Errorf("failure banner should carry the error text\n%s", body)
+	}
+	// Non-terminal and non-recording: a failed sync leaves the attempt as it was.
+	if got := stateOfWeb(t, root); got != project.Review {
+		t.Errorf("after a failed sync, state = %q, want Review", got)
+	}
+	if notes := notesOf(t, root, "PROJ-1", "0001"); len(notes) != 0 {
+		t.Errorf("a failed sync recorded %d note(s), want 0", len(notes))
 	}
 }
 

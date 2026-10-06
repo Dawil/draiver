@@ -249,7 +249,20 @@ body {
 .git-actions { display: flex; gap: 8px; }
 .action-git-push, .action-git-sync { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
 .action-git-push:hover, .action-git-sync:hover { border-color: var(--accent); color: var(--accent); }
+/* drv-022 position indicator: the current checked-out branch + ahead/behind the
+   primary remote, above the action pills. Quiet by default; the "unknown" fallbacks
+   dim further so a degraded read reads as absence of data, not an error. */
+.git-position { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+.git-position .git-branch { color: var(--ink); }
+.git-position .git-branch-unknown, .git-position .git-aheadbehind-unknown { color: var(--muted); font-style: italic; }
+/* drv-022: the Sync banner always reports an outcome, styled by kind so success, a
+   no-op, and a failure are distinct at a glance (not colour alone — the report text
+   names the outcome). ok = green, noop = neutral, fail = the alert red/-bg the Stuck
+   column and provenance callout already use. */
 .git-result { font-size: 13px; margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
+.git-result-ok { border-color: color-mix(in srgb, var(--done) 55%, var(--line)); background: color-mix(in srgb, var(--done) 12%, transparent); }
+.git-result-noop { border-style: dashed; color: var(--muted); }
+.git-result-fail { border-color: var(--alert); background: var(--alert-bg); color: var(--ink); }
 
 /* review-environment panel (drv-020): launch/teardown of a live, clickable instance
    of the feature under review. Mirrors the git-controls card; the state chip colours

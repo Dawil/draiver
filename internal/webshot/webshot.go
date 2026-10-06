@@ -44,6 +44,19 @@ type Options struct {
 	// target is not fatal, since the screenshot of the unchanged page is still useful
 	// evidence rather than a failed capture.
 	ClickSelector string
+	// ClickSelector2, when set, is clicked after ClickSelector — so a caller can drive
+	// a two-step affordance (select a tab, then press a button inside its now-visible
+	// panel). Same best-effort contract as ClickSelector.
+	ClickSelector2 string
+	// AfterClickWaitSelector, when set, is awaited *after* the clicks (unlike
+	// WaitSelector, which gates before them) — so a caller can wait for the result of
+	// a click to land (an htmx swap) before shooting. Best-effort: a timeout does not
+	// fail the capture.
+	AfterClickWaitSelector string
+	// AcceptDialogs auto-accepts any JS dialog (window.confirm/alert) the page raises
+	// — needed to drive a control guarded by an hx-confirm, which Playwright otherwise
+	// auto-dismisses (cancelling the action).
+	AcceptDialogs bool
 }
 
 // Capture screenshots url and returns the PNG bytes. It is an error — not an empty
@@ -96,6 +109,9 @@ func Capture(ctx context.Context, url string, opts Options) ([]byte, error) {
 		"WEBSHOT_FULL="+full,
 		"WEBSHOT_WAIT_SELECTOR="+opts.WaitSelector,
 		"WEBSHOT_CLICK_SELECTOR="+opts.ClickSelector,
+		"WEBSHOT_CLICK_SELECTOR2="+opts.ClickSelector2,
+		"WEBSHOT_AFTER_CLICK_WAIT_SELECTOR="+opts.AfterClickWaitSelector,
+		"WEBSHOT_ACCEPT_DIALOGS="+boolEnv(opts.AcceptDialogs),
 		"PLAYWRIGHT_EXECUTABLE="+chrome,
 		// capture.js is in a temp dir, so `require('playwright')` can only resolve via
 		// NODE_PATH (verified: a temp-located script finds the dep this way).
@@ -107,6 +123,14 @@ func Capture(ctx context.Context, url string, opts Options) ([]byte, error) {
 		return nil, fmt.Errorf("webshot: capture of %s failed: %w\n%s", url, err, strings.TrimSpace(stderr.String()))
 	}
 	return os.ReadFile(out)
+}
+
+// boolEnv renders a bool as the "1"/"" env flag capture.js reads.
+func boolEnv(b bool) string {
+	if b {
+		return "1"
+	}
+	return ""
 }
 
 // Available reports whether a real capture can be made right now: node on PATH, a
