@@ -14,6 +14,9 @@
 //   WEBSHOT_FULL           "1" → full-page screenshot
 //   WEBSHOT_WAIT_SELECTOR  wait for this selector before shooting
 //   WEBSHOT_CLICK_SELECTOR click this selector once after load, before shooting
+//   WEBSHOT_CLICK_SELECTOR2 click this selector after the first (two-step affordance)
+//   WEBSHOT_AFTER_CLICK_WAIT_SELECTOR wait for this selector AFTER the clicks (an htmx swap)
+//   WEBSHOT_ACCEPT_DIALOGS "1" → auto-accept window.confirm/alert (drive an hx-confirm)
 //   WEBSHOT_SETTLE_MS      extra settle after load/selector (default 600)
 //   PLAYWRIGHT_EXECUTABLE  chromium binary to launch
 const { chromium } = require('playwright');
@@ -30,6 +33,9 @@ const { chromium } = require('playwright');
   const full = process.env.WEBSHOT_FULL === '1';
   const waitSel = process.env.WEBSHOT_WAIT_SELECTOR || '';
   const clickSel = process.env.WEBSHOT_CLICK_SELECTOR || '';
+  const clickSel2 = process.env.WEBSHOT_CLICK_SELECTOR2 || '';
+  const afterClickWaitSel = process.env.WEBSHOT_AFTER_CLICK_WAIT_SELECTOR || '';
+  const acceptDialogs = process.env.WEBSHOT_ACCEPT_DIALOGS === '1';
   const settle = parseInt(process.env.WEBSHOT_SETTLE_MS || '600', 10);
   const exe = process.env.PLAYWRIGHT_EXECUTABLE || undefined;
 
@@ -39,6 +45,11 @@ const { chromium } = require('playwright');
   });
   try {
     const page = await browser.newPage({ viewport: { width, height } });
+    // Auto-accept JS dialogs when asked, so a control guarded by an hx-confirm
+    // proceeds instead of being cancelled by Playwright's default dismiss.
+    if (acceptDialogs) {
+      page.on('dialog', (d) => d.accept().catch(() => {}));
+    }
     const resp = await page.goto(url, { waitUntil: 'load', timeout: 30000 });
     if (resp && resp.status() >= 400) {
       console.error('webshot: navigation to', url, 'returned', resp.status());
@@ -47,13 +58,21 @@ const { chromium } = require('playwright');
     if (waitSel) {
       await page.waitForSelector(waitSel, { timeout: 15000 });
     }
-    // Optionally drive one client-side affordance (select a tab, expand a disclosure)
-    // before shooting, so the capture shows the resulting state. Best-effort: a
-    // missing/undriveable target must not fail the capture — the page as-loaded is
-    // still useful evidence.
-    if (clickSel) {
+    // Optionally drive one or two client-side affordances (select a tab, then press a
+    // button inside its now-visible panel) before shooting, so the capture shows the
+    // resulting state. Best-effort: a missing/undriveable target must not fail the
+    // capture — the page as-loaded is still useful evidence.
+    for (const sel of [clickSel, clickSel2]) {
+      if (!sel) continue;
       try {
-        await page.click(clickSel, { timeout: 5000 });
+        await page.click(sel, { timeout: 5000 });
+      } catch (_) {}
+    }
+    // Wait for the result of the click(s) to land (e.g. an htmx OOB swap) before
+    // shooting. Best-effort: a timeout must not fail the capture.
+    if (afterClickWaitSel) {
+      try {
+        await page.waitForSelector(afterClickWaitSel, { timeout: 15000 });
       } catch (_) {}
     }
     // The board embeds the report in a loading="lazy" iframe; scroll it into view to

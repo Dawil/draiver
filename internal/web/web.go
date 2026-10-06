@@ -79,6 +79,13 @@ type Server struct {
 	// state without a real repo (drvweb-021 #32). ok is false when there is nothing
 	// to project (no repo, no checkout/branch, no pyramid, or a git error).
 	pyramidGit func(ctx context.Context, a project.Attempt) (pyramidState, bool)
+	// gitPos gathers the live git position the Git-controls panel shows (drv-022): the
+	// attempt's current local branch and its ahead/behind counts versus the primary
+	// remote. It defaults to gatherGitPosition (the real git reads) and, exactly like
+	// pyramidGit, is swapped for a deterministic stub in tests so the panel render can
+	// be exercised off canned state without a real repo. Every field is best-effort —
+	// an unset one degrades to "unknown" / an omitted count.
+	gitPos func(ctx context.Context, a project.Attempt) gitPositionState
 	// actor is the identity stamped on both web writes — a composed log event and
 	// a board enable. The board has no CLI actor context, so it is configured at
 	// construction (see WithActor); it defaults to human:webui.
@@ -421,6 +428,9 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	// gatherPyramidState is a method, so bind it once s exists; tests overwrite the
 	// field with a stub, exactly as they do s.alive.
 	s.pyramidGit = s.gatherPyramidState
+	// gatherGitPosition is a method too; bind it once s exists, mirroring pyramidGit.
+	// Tests overwrite the field with a stub returning canned position state.
+	s.gitPos = s.gatherGitPosition
 	// Default the rerun executor to the real in-process controlplane; tests override.
 	s.rerun = func(ctx context.Context, a project.Attempt) (bddexec.Outcome, error) {
 		return bddexec.Rerun(ctx, s.root, a.Repo, a.Ticket, a.ID)
@@ -447,6 +457,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"cohortRow":     cohortRow,
 			"sessionDot":    s.sessionDot,
 			"pyramidBadge":  s.pyramidBadge,
+			"gitPosition":   s.gitPosition,
 			"paletteVars":   paletteVars,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
@@ -1543,14 +1554,17 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 // log region plus an OOB result banner with the push report. Non-terminal: it does
 // not change the attempt's state.
 func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
-	s.handleGitVerb(w, r, func(id, att string) ([]string, error) {
+	s.handleGitVerb(w, r, func(id, att string) (gitResultVM, error) {
 		// Bare remote (""): the button offers no NAME field, so land picks the sole
 		// remote or the config's primary_remote (the drv-011 default-remote stopgap).
 		res, err := land.Push(r.Context(), s.gw, id, att, "", "")
 		if err != nil {
-			return nil, err
+			// Push keeps its existing behaviour (drv-022 hardens Sync, not Push): a
+			// failure is a server fault surfaced via s.fail, so return the error rather
+			// than a banner.
+			return gitResultVM{}, err
 		}
-		return land.FormatPushReport(id, att, res), nil
+		return gitResultVM{Kind: "ok", Message: strings.Join(land.FormatPushReport(id, att, res), "\n")}, nil
 	})
 }
 
@@ -1564,25 +1578,58 @@ func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
 // nothing moved) and returns the re-rendered log region plus an OOB result banner.
 // Non-terminal: the attempt stays in its current state.
 func (s *Server) handleGitSync(w http.ResponseWriter, r *http.Request) {
-	s.handleGitVerb(w, r, func(id, att string) ([]string, error) {
+	s.handleGitVerb(w, r, func(id, att string) (gitResultVM, error) {
 		// Bare remote (""): land picks the sole remote or the config's primary_remote
 		// (the drv-011 default-remote stopgap); no config path uses the default.
 		res, err := land.Sync(r.Context(), s.gw, id, att, "", "")
 		if err != nil {
-			return nil, err
+			// drv-022: a failing sync (dirty checkout, merge conflict, bookkeeping) is an
+			// expected *outcome* of the control, not a server fault — map it into the same
+			// git-result banner, styled as a failure carrying the error, at HTTP 200 so
+			// the htmx swap lands. This is the fix for the old s.fail(500) that left the
+			// panel blank. Returning no error keeps s.fail for genuine faults only.
+			return gitResultVM{Kind: "fail", Message: "Sync failed — " + cleanGitErr(err)}, nil
 		}
-		return land.FormatSyncReport(id, att, res), nil
+		// A pure no-op (nothing pulled, nothing back-merged) records no note; show an
+		// explicit "already up to date" success rather than the technical report lines,
+		// so the banner reads as a deliberate outcome, never "nothing happened".
+		if !res.Recorded {
+			return gitResultVM{Kind: "noop", Message: "Already up to date — nothing to pull or back-merge."}, nil
+		}
+		return gitResultVM{Kind: "ok", Message: strings.Join(land.FormatSyncReport(id, att, res), "\n")}, nil
 	})
+}
+
+// cleanGitErr renders a land/worktree error for the failure banner: it trims the
+// internal "worktree: " / "land: " prefixes so the user-facing message leads with
+// the cause (a dirty checkout, a conflict) rather than package plumbing.
+func cleanGitErr(err error) string {
+	msg := err.Error()
+	for _, p := range []string{"worktree: ", "land: "} {
+		msg = strings.TrimPrefix(msg, p)
+	}
+	return msg
+}
+
+// gitResultVM drives the "git-result" banner a Git-control POST swaps onto the
+// panel (drv-022). Kind — "ok" (a real action completed), "noop" (nothing to do),
+// or "fail" (the control errored) — styles the banner so success, a no-op, and a
+// failure are visually distinct; Message is the plain CLI report text, HTML-escaped
+// by the template and never routed through markdown.
+type gitResultVM struct {
+	Kind    string
+	Message string
 }
 
 // handleGitVerb is the shared machinery of the Git-control POSTs (push, sync): the
 // same-origin guard, the attempt-exists check, the in-process land call (run), and
 // the one-response-body double swap — the re-rendered attempt-live fragment (log
-// region + OOB badge/count) plus the OOB "git-result" banner carrying run's report
-// lines. These verbs are non-terminal — the log region re-renders but the attempt's
-// state does not flip. run returns the report lines to display, or an error surfaced
-// via s.fail (500) exactly like the other writes.
-func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(id, att string) ([]string, error)) {
+// region + OOB badge/count) plus the OOB "git-result" banner carrying run's result.
+// These verbs are non-terminal — the log region re-renders but the attempt's state
+// does not flip. run returns the banner to display (success, no-op, OR a handled
+// failure — see handleGitSync), or an error reserved for a genuine server fault,
+// surfaced via s.fail (500) exactly like the other writes.
+func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(id, att string) (gitResultVM, error)) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
 		return
@@ -1593,12 +1640,11 @@ func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(
 		http.NotFound(w, r)
 		return
 	}
-	lines, err := run(id, att)
+	result, err := run(id, att)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	msg := strings.Join(lines, "\n")
 	vm, err := s.detail(id, att)
 	if err != nil {
 		s.fail(w, err)
@@ -1611,7 +1657,7 @@ func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(
 	}
 	var buf bytes.Buffer
 	buf.Write(live)
-	if err := s.tmpl.ExecuteTemplate(&buf, "git-result", msg); err != nil {
+	if err := s.tmpl.ExecuteTemplate(&buf, "git-result", result); err != nil {
 		s.fail(w, err)
 		return
 	}

@@ -112,6 +112,17 @@
         <section class="git-controls" data-testid="git-controls">
           <h2 class="git-controls-title">Git</h2>
           <p class="git-controls-hint">Drive this attempt's local git folder. Default branch <code>{{.Attempt.Base}}</code>.</p>
+          {{/* drv-022 position indicator: the branch actually checked out in the
+               attempt's worktree/repo (distinct from the attempt base above), and how
+               far ahead/behind the primary remote it is. A live, best-effort git read
+               behind the injectable reader — a detached HEAD / no upstream / no remote
+               degrades to "unknown" / omits the count, never breaking the panel. */}}
+          {{$pos := gitPosition .Attempt}}
+          <p class="git-position" data-testid="git-position">on branch
+            <code class="git-branch{{if not $pos.HasBranch}} git-branch-unknown{{end}}" data-testid="git-branch">{{$pos.Branch}}</code>
+            {{if $pos.HasCount}}<span class="git-aheadbehind" data-testid="git-aheadbehind">· {{$pos.Summary}} vs the primary remote</span>
+            {{else}}<span class="git-aheadbehind git-aheadbehind-unknown" data-testid="git-aheadbehind">· position vs remote unknown</span>{{end}}
+          </p>
           <div class="git-actions">
             <button type="button" class="action-git-push" data-testid="action-git-push"
               hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/push"
@@ -665,7 +676,7 @@
      log region re-renders with the new note and this OOB-swaps the previously-hidden
      banner into a visible report. Plain CLI text, HTML-escaped by the template —
      never routed through markdown. */}}
-{{define "git-result"}}<div id="git-result" class="git-result" data-testid="git-result" hx-swap-oob="true">{{.}}</div>{{end}}
+{{define "git-result"}}<div id="git-result" class="git-result git-result-{{.Kind}}" data-testid="git-result" data-kind="{{.Kind}}" role="status" hx-swap-oob="true">{{.Message}}</div>{{end}}
 
 {{/* bdd-report-slot wraps the report panel so a drv-019 rerun can refresh it
      out-of-band (matched by #bdd-report-slot) once a fresh run is captured —
