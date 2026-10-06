@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { rmSync, mkdirSync } from "node:fs";
+import { rmSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -62,4 +62,37 @@ export default async function globalSetup() {
   draiver("new", "PROJ-104", "--title", "End-to-end suite", "--repo", repo);
   draiver("depends", "PROJ-104", "--after", "PROJ-103");
   draiver("ctl", "enable", "PROJ-104");
+
+  // PROJ-102 (Review, with repo + a base) already lights the drv-021 Git controls
+  // tab. Seed it a captured BDD run so the BDD report tab lights too — then its
+  // detail page surfaces every tab at once (Spec / Provenance / Git / BDD / Cache),
+  // the fixture the attempt-tabs tests + screenshots drive. Attaching to an existing
+  // ticket (rather than adding a new one) keeps the board's control-state counts
+  // unchanged, so board.spec stays green. A BDD run is just files under the attempt's
+  // artefact store — artefacts/bdd/<rung>/<env>/<commit>/<runstamp>/cucumber.json,
+  // the drv-017 layout internal/report discovers — with a minimal valid cucumber-JSON
+  // (a top-level array) so the report parses and the panel reports HasRuns=true.
+  const runDir = path.join(
+    fixtureDir, "PROJ-102", "attempts", "0001", "artefacts",
+    "bdd", "unit", "local", "abc1234de", "20260101T120000Z",
+  );
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    path.join(runDir, "cucumber.json"),
+    JSON.stringify([
+      {
+        uri: "features/attempt_tabs.feature",
+        keyword: "Feature",
+        name: "Attempt page tabbed top section",
+        elements: [
+          {
+            keyword: "Scenario",
+            name: "Spec is the default tab",
+            type: "scenario",
+            steps: [{ keyword: "Given ", name: "the attempt page", result: { status: "passed" } }],
+          },
+        ],
+      },
+    ]),
+  );
 }

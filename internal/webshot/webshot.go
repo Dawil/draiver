@@ -38,6 +38,12 @@ type Options struct {
 	Width, Height int    // viewport; 0 → 1280x800
 	FullPage      bool   // capture the full scrollable page, not just the viewport
 	WaitSelector  string // wait for this CSS selector to appear before shooting
+	// ClickSelector, when set, is clicked once after the page loads and before the
+	// screenshot — so a caller can drive a client-side affordance (select a tab,
+	// expand a disclosure) and capture the resulting state. Best-effort: a missing
+	// target is not fatal, since the screenshot of the unchanged page is still useful
+	// evidence rather than a failed capture.
+	ClickSelector string
 }
 
 // Capture screenshots url and returns the PNG bytes. It is an error — not an empty
@@ -89,6 +95,7 @@ func Capture(ctx context.Context, url string, opts Options) ([]byte, error) {
 		"WEBSHOT_HEIGHT="+strconv.Itoa(height),
 		"WEBSHOT_FULL="+full,
 		"WEBSHOT_WAIT_SELECTOR="+opts.WaitSelector,
+		"WEBSHOT_CLICK_SELECTOR="+opts.ClickSelector,
 		"PLAYWRIGHT_EXECUTABLE="+chrome,
 		// capture.js is in a temp dir, so `require('playwright')` can only resolve via
 		// NODE_PATH (verified: a temp-located script finds the dep this way).

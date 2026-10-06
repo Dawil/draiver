@@ -439,7 +439,7 @@ func thenPanelOffersLaunch(w *World, sr *StepRun) error {
 	if !strings.Contains(html, `data-testid="action-review-env-up"`) {
 		return errors.New("review-env panel offers no Launch button")
 	}
-	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-offered", true, `[data-testid="review-env"]`)
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-offered", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }
 
 func thenUpRevealsURL(w *World, sr *StepRun) error {
@@ -465,7 +465,7 @@ func thenUpRevealsURL(w *World, sr *StepRun) error {
 	if !strings.Contains(html, rec.URL) {
 		return fmt.Errorf("panel does not carry the revealed URL %q", rec.URL)
 	}
-	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-up-url", true, `[data-testid="review-env-url"]`)
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-up-url", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }
 
 func thenTornDownToRest(w *World, sr *StepRun) error {
@@ -473,7 +473,7 @@ func thenTornDownToRest(w *World, sr *StepRun) error {
 	if rec.State != reviewenv.Down {
 		return fmt.Errorf("teardown state = %q, want down (message: %s)", rec.State, rec.Message)
 	}
-	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-torn-down", true, `[data-testid="review-env"]`)
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-torn-down", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }
 
 func thenLeakWarned(w *World, sr *StepRun) error {
@@ -484,7 +484,7 @@ func thenLeakWarned(w *World, sr *StepRun) error {
 	if !strings.Contains(strings.ToLower(rec.Message), "leak") {
 		return fmt.Errorf("leak message does not explain the leak: %q", rec.Message)
 	}
-	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-leak", true, `[data-testid="review-env"]`)
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-leak", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }
 
 func thenMisconfigNote(w *World, sr *StepRun) error {
@@ -495,5 +495,5 @@ func thenMisconfigNote(w *World, sr *StepRun) error {
 	if strings.Contains(html, `data-testid="action-review-env-up"`) {
 		return errors.New("a misconfigured review env must offer no Launch button")
 	}
-	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-misconfigured", true, `[data-testid="review-env-misconfigured"]`)
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-misconfigured", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }

@@ -13,6 +13,7 @@
 //   WEBSHOT_WIDTH/HEIGHT   viewport (default 1280x800)
 //   WEBSHOT_FULL           "1" → full-page screenshot
 //   WEBSHOT_WAIT_SELECTOR  wait for this selector before shooting
+//   WEBSHOT_CLICK_SELECTOR click this selector once after load, before shooting
 //   WEBSHOT_SETTLE_MS      extra settle after load/selector (default 600)
 //   PLAYWRIGHT_EXECUTABLE  chromium binary to launch
 const { chromium } = require('playwright');
@@ -28,6 +29,7 @@ const { chromium } = require('playwright');
   const height = parseInt(process.env.WEBSHOT_HEIGHT || '800', 10);
   const full = process.env.WEBSHOT_FULL === '1';
   const waitSel = process.env.WEBSHOT_WAIT_SELECTOR || '';
+  const clickSel = process.env.WEBSHOT_CLICK_SELECTOR || '';
   const settle = parseInt(process.env.WEBSHOT_SETTLE_MS || '600', 10);
   const exe = process.env.PLAYWRIGHT_EXECUTABLE || undefined;
 
@@ -44,6 +46,15 @@ const { chromium } = require('playwright');
     }
     if (waitSel) {
       await page.waitForSelector(waitSel, { timeout: 15000 });
+    }
+    // Optionally drive one client-side affordance (select a tab, expand a disclosure)
+    // before shooting, so the capture shows the resulting state. Best-effort: a
+    // missing/undriveable target must not fail the capture — the page as-loaded is
+    // still useful evidence.
+    if (clickSel) {
+      try {
+        await page.click(clickSel, { timeout: 5000 });
+      } catch (_) {}
     }
     // The board embeds the report in a loading="lazy" iframe; scroll it into view to
     // trigger the load and wait for every frame to finish, so the screenshot shows
