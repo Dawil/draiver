@@ -166,6 +166,66 @@ func TestReportRouteByReferenceUsesAssetRoute(t *testing.T) {
 	}
 }
 
+// navCukeJSON carries two folders, inherited + scenario tags, and a Rule block so
+// the webui-embedded render can be asserted to ship the drv-023 navigation.
+const navCukeJSON = `[
+  {"uri":"features/auth/login.feature","keyword":"Feature","name":"Login","tags":[{"name":"@auth"}],
+   "elements":[
+     {"keyword":"Scenario","name":"Happy path","type":"scenario","tags":[{"name":"@smoke"}],
+      "steps":[{"keyword":"Given ","name":"a user","result":{"status":"passed","duration":1000000}}]}]},
+  {"uri":"features/glossary/ordered.feature","keyword":"Feature","name":"Glossary",
+   "elements":[
+     {"keyword":"Scenario","name":"sorts ascending","type":"scenario",
+      "rule":{"keyword":"Rule","name":"Alphabetical","id":"g;a"},
+      "steps":[{"keyword":"Then ","name":"ascending","result":{"status":"passed","duration":1000000}}]}]}
+]`
+
+func seedBDDRunJSON(t *testing.T, root store.Root, rung, env, commit, stamp, body string) {
+	t.Helper()
+	dir := filepath.Join(root.ArtefactsDir("BDD-1", "0001"), report.BDDArtefactSubdir, rung, env, commit, stamp)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cucumber.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReportRouteShipsNavigation asserts the drv-023 navigation (tag facet bar,
+// group-by control, subsequence filter box, Rule sub-group, folder grouping) is
+// present in BOTH the webui-embedded by-reference render and the standalone
+// download — the renderer is shared, so one assertion guards both paths.
+func TestReportRouteShipsNavigation(t *testing.T) {
+	root := seedReportRoot(t)
+	seedBDDRunJSON(t, root, "unit", "local", "c0ffee12", "20260101T100000Z", navCukeJSON)
+	h := newServerOver(t, root)
+
+	for _, path := range []string{
+		"/ticket/BDD-1/0001/report?inline=0", // webui-embedded iframe
+		"/ticket/BDD-1/0001/report/download", // standalone download
+	} {
+		rr := get(t, h, path)
+		if rr.Code != 200 {
+			t.Fatalf("GET %s = %d", path, rr.Code)
+		}
+		doc := rr.Body.String()
+		for _, want := range []string{
+			`data-groupby="folder"`,
+			`data-act="groupby"`,
+			`data-act="filter"`,
+			`data-tag="@auth"`,
+			`data-tag="@smoke"`,
+			`<details class="rule"`,
+			`<span class="title">Rule: Alphabetical</span>`,
+			`<span class="title">features/auth</span>`,
+		} {
+			if !strings.Contains(doc, want) {
+				t.Errorf("%s render missing navigation markup %q", path, want)
+			}
+		}
+	}
+}
+
 func TestReportAssetRouteServesImageBytes(t *testing.T) {
 	root := seedReportRoot(t)
 	seedBDDRun(t, root, "unit", "local", "c0ffee12", "20260101T100000Z")

@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -83,9 +84,36 @@ type Element struct {
 	Line        int    `json:"line"`
 	Type        string `json:"type"` // "scenario" | "background" | ...
 	Tags        []Tag  `json:"tags"`
+	Rule        *Rule  `json:"rule"` // optional Gherkin Rule this element belongs to
 	Before      []Hook `json:"before"`
 	Steps       []Step `json:"steps"`
 	After       []Hook `json:"after"`
+}
+
+// Rule is a Gherkin `Rule:` an element belongs to (drv-023). Classic cucumber-JSON
+// carries no first-class rule grouping, so draiver targets a lenient per-element
+// reference: an element names its owning rule and the renderer groups consecutive
+// same-rule elements into a sub-group. Elements with no rule fall back to the flat
+// feature→scenario tree (no regression for runners that emit none).
+type Rule struct {
+	ID          string `json:"id"`
+	Keyword     string `json:"keyword"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Line        int    `json:"line"`
+	Tags        []Tag  `json:"tags"`
+}
+
+// key identifies a rule for grouping: its id if present, else keyword+name+line so
+// two distinct unnamed rules don't merge.
+func (r *Rule) key() string {
+	if r == nil {
+		return ""
+	}
+	if strings.TrimSpace(r.ID) != "" {
+		return "id:" + r.ID
+	}
+	return fmt.Sprintf("kn:%s/%s/%d", r.Keyword, r.Name, r.Line)
 }
 
 // Tag is a gherkin tag (e.g. @smoke).
