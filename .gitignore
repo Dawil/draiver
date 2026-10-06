@@ -28,10 +28,11 @@ node_modules/
 # board rerun, so a committed copy would just make the tree dirty.
 /features/_artifacts/
 
-# review env (drv-020): the review server's runtime pid file. Normally it lives in the
-# ephemeral review worktree (removed on teardown); ignored so a local run of the scripts
-# in the checkout never dirties the tree. (*.log below already covers server.log.)
-/review-env/server.pid
+# review env (drv-020, resolution #51): the per-instance work area up.sh builds the webui,
+# dummy data root, and runtime pid/log into. Normally it lives in the ephemeral review
+# worktree (removed on teardown); ignored so a local run of the scripts in the checkout
+# never dirties the tree.
+/.review-env-run/
 
 # misc
 .DS_Store

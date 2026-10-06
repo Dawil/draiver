@@ -58,11 +58,19 @@ environments:
   # teardown. It is referenced only by the per-repo `reviewEnvironment` setting (set it in
   # the attempt page's repo-settings panel to `review`), NOT by any level — so it never
   # runs during `draiver test`; it is launched on demand from an attempt page in Review.
-  # review-env/up.sh stands up a tiny node server bound to the injected DRAIVER_REVIEW_PORT
-  # that greets with ENV_NAME — a repo-declared parameterisation var (resolution #45) the
-  # launch form exposes as an editable input, defaulting to "review". down.sh stops it and
-  # the healthcheck probes it (green = up on confirm-up, red = gone on confirm-down). The
-  # url template draiver expands with the injected port is what the reviewer clicks.
+  #
+  # review-env/up.sh spins up the REAL draiver webui (resolution #51) — built from this
+  # detached review worktree (the reviewed commit), so the instance a reviewer drives IS
+  # the UI change under review — bound to the injected DRAIVER_REVIEW_PORT. It must NOT
+  # clash with the operator's own running draiver, so it exports DRAIVER_DATA/DRAIVER_CONFIG
+  # at a throwaway per-instance .review-env-run/ work area inside the worktree (every board
+  # write lands in dummy data, never ~/.draiver) and seeds a few dummy tickets across the
+  # board states. ENV_NAME — a repo-declared parameterisation var (resolution #45) the
+  # launch form exposes as an editable input, defaulting to "review" — titles those seeded
+  # tickets, so the web-UI-set value visibly parameterises the running instance. down.sh
+  # stops the webui and the healthcheck probes the port (green = up on confirm-up, red =
+  # gone on confirm-down). The url template draiver expands with the injected port is what
+  # the reviewer clicks.
   - name: review
     up: sh review-env/up.sh
     down: sh review-env/down.sh
