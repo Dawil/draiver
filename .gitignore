@@ -20,6 +20,11 @@ node_modules/
 # integration-rung harness builds the draiver binary here (runtime.go)
 /internal/e2e/integration/.bin/
 
+# BDD acceptance rung output (drv-019): reproducible evidence, not versioned —
+# the runner regenerates cucumber.json + screenshots on every `draiver test` /
+# board rerun, so a committed copy would just make the tree dirty.
+/features/_artifacts/
+
 # misc
 .DS_Store
 *.log
