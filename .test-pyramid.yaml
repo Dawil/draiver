@@ -37,9 +37,37 @@ environments:
       - name: go-toolchain
         script: go version
 
+  # bdd is the test environment the acceptance rung requires (drv-019 AC): `up`
+  # installs the Playwright node package (browsers come from the shared
+  # $PLAYWRIGHT_BROWSERS_PATH cache, so this only adds the npm package) and prepares
+  # the artefact output dir the runner writes into. The healthchecks prove every
+  # dependency the rung needs — the Go toolchain, a resolvable `playwright`, and a
+  # chromium binary on disk — so a box without a browser BLOCKS the rung / the board
+  # rerun ("pass the ball") rather than emitting bogus or empty screenshots (drv-012,
+  # decision #23). The steps capture real Playwright screenshots of the live webui.
+  - name: bdd
+    up: npm install --prefix features/screenshots --no-audit --no-fund --silent && mkdir -p features/_artifacts/screenshots
+    healthchecks:
+      - name: go-toolchain
+        script: go version
+      - name: playwright-browser
+        script: NODE_PATH=features/screenshots/node_modules node -e "require('playwright')" && ls ${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}/chromium-*/chrome-linux/chrome >/dev/null 2>&1
+
 levels:
   - name: unit
     run: go test ./...
+  # acceptance is drv-019's BDD rung: it runs the Gherkin under features/ via the
+  # runner-agnostic Go runner (internal/acceptance), which emits standard
+  # cucumber-JSON plus PNG screenshot artefacts. cucumber_json marks it a BDD rung
+  # (drv-016) so draiver captures the report; artifacts captures the screenshots
+  # side by side (drv-017). It binds the `bdd` environment, and is the rung the
+  # board's "rerun" regenerates (drv-019).
+  - name: acceptance
+    run: go run ./features/acceptance
+    environment: bdd
+    cucumber_json: features/_artifacts/cucumber.json
+    artifacts:
+      - features/_artifacts/screenshots
   - name: integration
     run: go test -tags=integration ./internal/e2e/integration/...
     environment: local

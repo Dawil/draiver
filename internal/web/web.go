@@ -46,6 +46,7 @@ import (
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 
+	"github.com/Dawil/draiver/internal/bddexec"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/land"
@@ -93,6 +94,13 @@ type Server struct {
 	// defaults to the passthrough floor so a zero-config New still resolves a
 	// concrete mode.
 	supDefault project.Supervision
+	// rerun delegates a BDD report rerun to the in-process controlplane executor
+	// (drv-019): it brings the attempt's bound environment up, runs the healthcheck
+	// guard, re-executes the BDD rung, and captures a fresh side-by-side artefact
+	// set. It defaults to internal/bddexec.Rerun (the real executor); tests inject a
+	// deterministic stub so the handler's outcome-mapping and report refresh can be
+	// exercised without a real repo, exactly as they do for alive/pyramidGit.
+	rerun func(ctx context.Context, a project.Attempt) (bddexec.Outcome, error)
 }
 
 // Option configures a Server at construction. It keeps New's zero-config form
@@ -413,6 +421,10 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	// gatherPyramidState is a method, so bind it once s exists; tests overwrite the
 	// field with a stub, exactly as they do s.alive.
 	s.pyramidGit = s.gatherPyramidState
+	// Default the rerun executor to the real in-process controlplane; tests override.
+	s.rerun = func(ctx context.Context, a project.Attempt) (bddexec.Outcome, error) {
+		return bddexec.Rerun(ctx, s.root, a.Repo, a.Ticket, a.ID)
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -477,6 +489,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/agent-logs", s.handleAgentLogs)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/report", s.handleReport)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/report/asset", s.handleReportAsset)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/report/download", s.handleReportDownload)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/report/rerun", s.handleReportRerun)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
