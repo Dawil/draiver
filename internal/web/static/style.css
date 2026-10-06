@@ -251,6 +251,25 @@ body {
 .action-git-push:hover, .action-git-sync:hover { border-color: var(--accent); color: var(--accent); }
 .git-result { font-size: 13px; margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
 
+/* review-environment panel (drv-020): launch/teardown of a live, clickable instance
+   of the feature under review. Mirrors the git-controls card; the state chip colours
+   track the six lifecycle states. */
+.review-env { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.review-env-head { display: flex; align-items: center; gap: 6px; }
+.review-env-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 4px; }
+.review-env-env, .review-env-status, .review-env-meta { font-size: 12px; color: var(--muted); margin: 2px 0; }
+.review-env-note { font-size: 13px; margin: 6px 0 10px; padding: 8px 10px; border: 1px solid var(--waratah, #b00); border-radius: 8px; background: var(--panel-2); color: var(--ink); }
+.review-env-state { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+.review-env-state-up { color: var(--eucalypt, #2a7); border-color: currentColor; }
+.review-env-state-starting { color: var(--accent); border-color: currentColor; }
+.review-env-state-unhealthy, .review-env-state-failed, .review-env-state-teardown-failed { color: var(--waratah, #b00); border-color: currentColor; }
+.review-env-url-line { margin: 8px 0; }
+.review-env-url { font-size: 14px; font-weight: 600; color: var(--accent); }
+.review-env-message { font-size: 12px; margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; max-height: 10em; overflow: auto; }
+.review-env-actions { display: flex; gap: 8px; margin-top: 10px; }
+.action-review-env-up, .action-review-env-down { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.action-review-env-up:hover, .action-review-env-down:hover { border-color: var(--accent); color: var(--accent); }
+
 /* BDD report embed (drv-018): the captured cucumber run rendered inline from the
    artefact store, with a run selector and an open-standalone link. The report
    itself lives inside a sandboxed iframe with its own styles. */

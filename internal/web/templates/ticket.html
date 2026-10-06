@@ -64,6 +64,10 @@
         <button type="button" role="tab" id="attempt-tab-git" class="tab" data-testid="attempt-tab-git"
           aria-selected="false" aria-controls="attempt-tabpanel-git" tabindex="-1">Git controls</button>
         {{end}}
+        {{if .ReviewEnv}}
+        <button type="button" role="tab" id="attempt-tab-review-env" class="tab" data-testid="attempt-tab-review-env"
+          aria-selected="false" aria-controls="attempt-tabpanel-review-env" tabindex="-1">Review environment</button>
+        {{end}}
         {{if .Report.HasRuns}}
         <button type="button" role="tab" id="attempt-tab-bdd" class="tab" data-testid="attempt-tab-bdd"
           aria-selected="false" aria-controls="attempt-tabpanel-bdd" tabindex="-1">BDD report</button>
@@ -124,6 +128,18 @@
           </div>
           <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
         </section>
+      </div>
+      {{end}}
+
+      {{if .ReviewEnv}}
+      {{/* Review-environment panel (drv-020): launch a real, running instance of the
+           feature under review and hand the reviewer a clickable URL. Offered only
+           when the attempt is in Review, the repo names a reviewEnvironment, and that
+           environment is review-ready (up+down+≥1 healthcheck) — so .ReviewEnv is nil
+           (and the tab + panel absent) on every other attempt. The panel self-swaps on
+           the up/down POSTs and self-polls the status route while the env is in motion. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-review-env" data-testid="attempt-tabpanel-review-env" aria-labelledby="attempt-tab-review-env" hidden>
+        {{template "review-env-panel" .ReviewEnv}}
       </div>
       {{end}}
 
@@ -557,6 +573,13 @@
       <input type="text" name="rung" class="provenance-input" data-testid="repo-settings-rung"
         value="{{.Rung}}" placeholder="{{if .RungHint}}{{.RungHint}}{{else}}set a rung…{{end}}" aria-label="default test rung" autocomplete="off" spellcheck="false">
     </div>
+    <div class="provenance-row">
+      <span class="provenance-key">review env<span class="repo-settings-info" tabindex="0" role="note"
+        aria-label="The .test-pyramid.yaml environment the attempt page launches at Review (drv-020). Must be review-ready: up + down + at least one healthcheck. Unset offers no review environment."
+        data-tip="The .test-pyramid.yaml environment the attempt page launches at Review (drv-020). Must be review-ready: up + down + at least one healthcheck. Unset offers no review environment.">i</span></span>
+      <input type="text" name="review_env" class="provenance-input" data-testid="repo-settings-review-env"
+        value="{{.ReviewEnv}}" placeholder="{{if .ReviewEnvHint}}{{.ReviewEnvHint}}{{else}}name a review environment…{{end}}" aria-label="review environment" autocomplete="off" spellcheck="false">
+    </div>
     {{if .Saved}}<span class="provenance-saved" data-testid="repo-settings-saved" role="status">saved ✓</span>{{end}}
   </form>
   {{end}}
@@ -666,6 +689,49 @@
      banner into a visible report. Plain CLI text, HTML-escaped by the template —
      never routed through markdown. */}}
 {{define "git-result"}}<div id="git-result" class="git-result" data-testid="git-result" hx-swap-oob="true">{{.}}</div>{{end}}
+
+{{/* review-env-panel (drv-020): the launch/teardown controls for a live, clickable
+     instance of the feature under review. The panel is the outerHTML swap target for
+     its own up/down POSTs and self-polls the status route (every 2s) while the env is
+     in motion (starting/up/unhealthy), so one element carries the whole lifecycle. A
+     nil VM renders the empty placeholder, so a swap that drops the gate clears the
+     panel rather than leaving a stale one. The URL is emitted only in the up state —
+     a dead link is never shown. */}}
+{{define "review-env-panel"}}{{if .}}<section class="review-env review-env-{{if .Misconfigured}}misconfigured{{else}}{{.State}}{{end}}" id="review-env" data-testid="review-env"
+  {{- if .Poll}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/status" hx-trigger="every 2s" hx-target="#review-env" hx-swap="outerHTML"{{end}}>
+  <div class="review-env-head">
+    <h2 class="review-env-title">Review environment</h2>
+    {{template "info-bubble" "A real, running instance of the feature under review, seeded with test data. Launch it, wait for the healthcheck to go green, then click the URL to drive it. Torn down on the button, when the ticket is marked Done, or by the idle reaper."}}
+  </div>
+  <p class="review-env-env">Environment <code data-testid="review-env-name">{{.EnvName}}</code></p>
+  {{if .Misconfigured}}
+  <p class="review-env-note" data-testid="review-env-misconfigured" role="note">This repo's <code>reviewEnvironment</code> is set, but {{.Reason}}. Fix it in the repo-settings panel or the <code>.test-pyramid.yaml</code> — a review environment needs <code>up</code>, <code>down</code>, and at least one <code>healthcheck</code>.</p>
+  {{else}}
+  <p class="review-env-status" data-testid="review-env-status">Status <span class="review-env-state review-env-state-{{.State}}" data-testid="review-env-state">{{.StateLabel}}</span></p>
+  {{if and (eq (printf "%s" .State) "up") .URL}}
+  <p class="review-env-url-line"><a class="review-env-url" data-testid="review-env-url" href="{{.URL}}" target="_blank" rel="noopener">Open the review environment ↗</a></p>
+  {{end}}
+  {{if .Port}}<p class="review-env-meta" data-testid="review-env-meta">instance <code>{{.Instance}}</code> · port <code>{{.Port}}</code></p>{{end}}
+  {{if .Message}}<pre class="review-env-message" data-testid="review-env-message">{{.Message}}</pre>{{end}}
+  <div class="review-env-actions">
+    {{if .CanUp}}<div class="review-env-up-form" data-testid="review-env-up-form">
+      {{range .Params}}<label class="review-env-param" data-testid="review-env-param-{{.Name}}">
+        <span class="review-env-param-name"><code>{{.Name}}</code></span>
+        <input type="text" class="review-env-param-input" name="param:{{.Name}}" value="{{.Value}}"
+          data-testid="review-env-param-input-{{.Name}}" autocomplete="off">
+      </label>{{end}}
+      <button type="button" class="action-review-env-up" data-testid="action-review-env-up"
+        hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/up"
+        hx-include="closest .review-env-up-form"
+        hx-target="#review-env" hx-swap="outerHTML">Launch</button>
+    </div>{{end}}
+    {{if .CanDown}}<button type="button" class="action-review-env-down" data-testid="action-review-env-down"
+      hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/down"
+      hx-confirm="Tear down the review environment? This runs the env's down script and confirms it is gone."
+      hx-target="#review-env" hx-swap="outerHTML">Tear down</button>{{end}}
+  </div>
+  {{end}}
+</section>{{else}}<section id="review-env" data-testid="review-env" hidden></section>{{end}}{{end}}
 
 {{/* bdd-report-slot wraps the report panel so a drv-019 rerun can refresh it
      out-of-band (matched by #bdd-report-slot) once a fresh run is captured —

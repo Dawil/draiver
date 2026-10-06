@@ -497,6 +497,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/push", s.handleGitPush)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/sync", s.handleGitSync)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/up", s.handleReviewEnvUp)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/down", s.handleReviewEnvDown)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/review-env/status", s.handleReviewEnvStatus)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/repo-settings", s.handleRepoSettings)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)
@@ -619,6 +622,12 @@ type detailVM struct {
 	// non-nil; its HasRuns is false (and the section hidden) until drv-017's capture
 	// has written a run for the attempt. Built by s.reportPanel.
 	Report *reportPanelVM
+	// ReviewEnv drives the review-environment panel (drv-020): launch/teardown of a
+	// live, clickable instance of the feature under review. It is non-nil only when
+	// the visibility gate holds — the attempt is in Review, the repo names a
+	// reviewEnvironment, and that environment is review-ready — so the panel is absent
+	// on every other attempt. Built by s.reviewEnvPanel.
+	ReviewEnv *reviewEnvVM
 }
 
 // capabilityVM drives the "capability-panel" partial (drvweb-017): a Capability's
@@ -777,10 +786,14 @@ type repoSettingsVM struct {
 	Remote     string
 	Branch     string
 	Rung       string
+	ReviewEnv  string
 	RemoteHint string
 	BranchHint string
 	RungHint   string
-	Saved      bool
+	// ReviewEnvHint names the review-environment setting's unset meaning, surfaced as
+	// the input placeholder so the panel reads "blank = no review env offered" (drv-020).
+	ReviewEnvHint string
+	Saved         bool
 }
 
 // repoSettingsPanel projects an attempt into the repo-settings editor view model,
@@ -801,6 +814,7 @@ func (s *Server) repoSettingsPanel(a project.Attempt) repoSettingsVM {
 	}
 	stored := cfg.Repos[a.Repo]
 	vm.Remote, vm.Branch, vm.Rung = stored.DefaultRemote, stored.DefaultBranch, stored.DefaultTestRung
+	vm.ReviewEnv = stored.ReviewEnvironment
 	res := cfg.RepoSettings(a.Repo)
 	// Placeholder hints name the fallback in force while a field is unset, so the
 	// panel reads "blank, but inheriting X" rather than just blank.
@@ -816,6 +830,9 @@ func (s *Server) repoSettingsPanel(a project.Attempt) repoSettingsVM {
 	}
 	if vm.Rung == "" {
 		vm.RungHint = "unset — defaults to the pyramid's top rung"
+	}
+	if vm.ReviewEnv == "" {
+		vm.ReviewEnvHint = "unset — no review environment offered at Review"
 	}
 	return vm
 }
@@ -1224,6 +1241,11 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 		return detailVM{}, err
 	}
 	vm.Report = rp
+	// Review-environment panel (drv-020): best-effort like the pyramid badge — a nil
+	// result (gate not held, or an I/O hiccup reading config/pyramid) simply renders
+	// nothing. The git read behind it is bounded by a background context, matching
+	// pyramidBadge.
+	vm.ReviewEnv = s.reviewEnvPanel(context.Background(), a)
 	return vm, nil
 }
 
@@ -1727,6 +1749,7 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	remote := strings.TrimSpace(r.FormValue("remote"))
 	branch := strings.TrimSpace(r.FormValue("branch"))
 	rung := strings.TrimSpace(r.FormValue("rung"))
+	reviewEnv := strings.TrimSpace(r.FormValue("review_env"))
 	var upd config.RepoSettingsUpdate
 	if remote != stored.DefaultRemote {
 		upd.DefaultRemote = &remote
@@ -1736,6 +1759,9 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if rung != stored.DefaultTestRung {
 		upd.DefaultTestRung = &rung
+	}
+	if reviewEnv != stored.ReviewEnvironment {
+		upd.ReviewEnvironment = &reviewEnv
 	}
 	changed, err := s.gw.SetRepoSettings(a.Repo, upd)
 	if err != nil {

@@ -53,6 +53,35 @@ environments:
       - name: playwright-browser
         script: NODE_PATH=features/screenshots/node_modules node -e "require('playwright')" && ls ${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}/chromium-*/chrome-linux/chrome >/dev/null 2>&1
 
+  # review is this repo's own qualifying REVIEW environment (drv-020): up + down + a real
+  # healthcheck make it review-ready, so draiver's controlplane can guarantee and verify
+  # teardown. It is referenced only by the per-repo `reviewEnvironment` setting (set it in
+  # the attempt page's repo-settings panel to `review`), NOT by any level — so it never
+  # runs during `draiver test`; it is launched on demand from an attempt page in Review.
+  #
+  # review-env/up.sh spins up the REAL draiver webui (resolution #51) — built from this
+  # detached review worktree (the reviewed commit), so the instance a reviewer drives IS
+  # the UI change under review — bound to the injected DRAIVER_REVIEW_PORT. It must NOT
+  # clash with the operator's own running draiver, so it exports DRAIVER_DATA/DRAIVER_CONFIG
+  # at a throwaway per-instance .review-env-run/ work area inside the worktree (every board
+  # write lands in dummy data, never ~/.draiver) and seeds a few dummy tickets across the
+  # board states. ENV_NAME — a repo-declared parameterisation var (resolution #45) the
+  # launch form exposes as an editable input, defaulting to "review" — titles those seeded
+  # tickets, so the web-UI-set value visibly parameterises the running instance. down.sh
+  # stops the webui and the healthcheck probes the port (green = up on confirm-up, red =
+  # gone on confirm-down). The url template draiver expands with the injected port is what
+  # the reviewer clicks.
+  - name: review
+    up: sh review-env/up.sh
+    down: sh review-env/down.sh
+    healthchecks:
+      - name: http-ready
+        script: sh review-env/healthcheck.sh
+    url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+    params:
+      - name: ENV_NAME
+        default: review
+
 levels:
   - name: unit
     run: go test ./...
