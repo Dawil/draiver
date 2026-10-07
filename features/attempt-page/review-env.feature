@@ -1,17 +1,8 @@
+@ui @review-env
 Feature: Launch a review environment from the attempt page
   As a reviewer on the board
   I want to stand up a real, running instance of the feature under review
   So that I judge it by clicking around the working thing, not by reading the diff
-
-  Scenario: The panel is offered on a Review attempt with a review-ready environment
-    Given a Review attempt whose repo configures a review-ready environment
-    When I open the attempt page
-    Then the review-environment panel offers to launch it
-
-  Scenario: Launching stands up a running instance and reveals its URL
-    Given a Review attempt whose repo configures a review-ready environment
-    When I launch the review environment
-    Then the environment comes up and the attempt page reveals a clickable URL
 
   Scenario: Tearing down confirms the environment is gone
     Given a running review environment
@@ -37,3 +28,16 @@ Feature: Launch a review environment from the attempt page
     Given a Review attempt whose review environment declares a settable ENV_NAME
     When I launch the review environment with ENV_NAME set to a custom value
     Then the running instance is parameterised by the chosen ENV_NAME
+
+  Rule: On a review-ready attempt the panel offers and launches the environment
+
+    Background:
+      Given a Review attempt whose repo configures a review-ready environment
+
+    Scenario: The panel is offered on a Review attempt with a review-ready environment
+      When I open the attempt page
+      Then the review-environment panel offers to launch it
+
+    Scenario: Launching stands up a running instance and reveals its URL
+      When I launch the review environment
+      Then the environment comes up and the attempt page reveals a clickable URL

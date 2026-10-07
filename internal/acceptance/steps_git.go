@@ -25,7 +25,7 @@ import (
 )
 
 // steps_git.go realises drv-022's acceptance criteria
-// (features/git_controls_sync.feature) against a live internal/web server backed by
+// (features/attempt-page/git-controls.feature) against a live internal/web server backed by
 // a real git repo + managed worktree + origin remote. Each Sync scenario performs
 // the actual button click in a browser — accepting the hx-confirm — so the captured
 // screenshot shows the genuine outcome banner the user sees; the position scenario

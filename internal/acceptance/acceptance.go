@@ -1,7 +1,8 @@
 // Package acceptance is drv-019's own acceptance suite, authored as the executable
 // realisation of the ticket's Gherkin criteria (docs/acceptance-criteria.md). It is
 // a small, runner-agnostic BDD runner — not godog: it reads the repo's
-// features/*.feature, runs a step registry whose steps exercise drv-019's real code
+// features/ (recursively, across the capability subfolders), runs a step registry
+// whose steps exercise drv-019's real code
 // (report.Render for the download, bddexec.Rerun for the guarded rerun), and emits
 // standard cucumber-JSON plus PNG screenshot artefacts. draiver then consumes that
 // JSON exactly as it would any BDD runner's (internal/cucumber, internal/report),
@@ -61,11 +62,13 @@ func Run(featuresDir, outDir string) (Result, error) {
 	failed := 0
 	for _, gf := range features {
 		cf := cucumber.Feature{
-			URI:      gf.URI,
-			ID:       slug(gf.Name),
-			Keyword:  "Feature",
-			Name:     gf.Name,
-			Elements: []cucumber.Element{},
+			URI:         gf.URI,
+			ID:          slug(gf.Name),
+			Keyword:     "Feature",
+			Name:        gf.Name,
+			Description: gf.Description,
+			Tags:        toTags(gf.Tags),
+			Elements:    []cucumber.Element{},
 		}
 		for _, gs := range gf.Scenarios {
 			el, ok := runScenario(gf, gs, shotDir)
@@ -98,6 +101,8 @@ func runScenario(gf GherkinFeature, gs GherkinScenario, shotDir string) (cucumbe
 		Name:    gs.Name,
 		Line:    gs.Line,
 		Type:    "scenario",
+		Tags:    toTags(gs.Tags),
+		Rule:    toRule(gs.Rule),
 		Steps:   []cucumber.Step{},
 	}
 	failed := false
@@ -140,6 +145,34 @@ func persistEmbeddings(shotDir, feature, scenario string, step int, embs []cucum
 		_ = os.WriteFile(filepath.Join(shotDir, name), raw, 0o644)
 	}
 	return embs
+}
+
+// toTags converts parsed `@tag` strings into cucumber Tags, so the emitted JSON
+// carries the feature/scenario tags the drv-023 viewer facets and filters on.
+func toTags(names []string) []cucumber.Tag {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]cucumber.Tag, 0, len(names))
+	for _, n := range names {
+		out = append(out, cucumber.Tag{Name: n})
+	}
+	return out
+}
+
+// toRule converts a parsed Gherkin Rule into the per-element rule reference the
+// cucumber-JSON carries, so the viewer groups consecutive same-rule scenarios into a
+// `Rule:` sub-group. A scenario with no enclosing rule emits none.
+func toRule(r *GherkinRule) *cucumber.Rule {
+	if r == nil {
+		return nil
+	}
+	return &cucumber.Rule{
+		Keyword: "Rule",
+		Name:    r.Name,
+		Line:    r.Line,
+		Tags:    toTags(r.Tags),
+	}
 }
 
 func writeJSON(path string, v any) error {

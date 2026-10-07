@@ -1,5 +1,6 @@
 // Command acceptance is the executable for drv-019's BDD acceptance rung. It is a
-// thin wrapper over internal/acceptance: it runs the repo's features/*.feature,
+// thin wrapper over internal/acceptance: it runs the repo's features (recursively,
+// across the capability subfolders),
 // writes the cucumber-JSON and screenshot artefacts the rung declares
 // (features/_artifacts/), prints a one-line summary, and exits non-zero if any
 // scenario failed — so the rung's verdict reflects the acceptance result.
@@ -25,6 +26,12 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "acceptance:", err)
 		os.Exit(2)
+	}
+	// List the discovered features (across the capability subfolders) before the
+	// one-line summary, so the run log is self-evident about what was found.
+	fmt.Printf("discovered %d feature(s) under %s/:\n", len(res.Report), featuresDir)
+	for _, f := range res.Report {
+		fmt.Printf("  - %s\t%s (%d scenarios)\n", f.URI, f.Name, len(f.Elements))
 	}
 	acceptance.WriteSummary(os.Stdout, res)
 	if res.ScenariosFailed > 0 {

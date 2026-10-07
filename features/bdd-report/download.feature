@@ -1,3 +1,4 @@
+@report
 Feature: Download the standalone BDD report
   As a reviewer on the board
   I want to download the BDD report as a single self-contained file

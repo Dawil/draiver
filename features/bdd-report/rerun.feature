@@ -1,3 +1,4 @@
+@report
 Feature: Rerun the BDD rung to regenerate the artefact
   As a reviewer on the board
   I want to rerun the bound acceptance rung from the report page

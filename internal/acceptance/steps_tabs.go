@@ -22,7 +22,7 @@ import (
 	"github.com/Dawil/draiver/internal/webshot"
 )
 
-// steps_tabs.go realises drv-021's acceptance criteria (features/attempt_tabs.feature)
+// steps_tabs.go realises drv-021's acceptance criteria (features/attempt-page/tabs.feature)
 // against the live internal/web server. Each scenario seeds a real attempt, drives
 // the actual detail-page handler, asserts the server-rendered tabbed-card contract,
 // and attaches a real Playwright screenshot of the resulting page as its artefact —
