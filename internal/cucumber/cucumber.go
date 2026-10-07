@@ -46,7 +46,21 @@ type Element struct {
 	Line        int    `json:"line,omitempty"`
 	Type        string `json:"type"`
 	Tags        []Tag  `json:"tags,omitempty"`
+	Rule        *Rule  `json:"rule,omitempty"` // the Gherkin `Rule:` this element belongs to, if any
 	Steps       []Step `json:"steps,omitempty"`
+}
+
+// Rule is a Gherkin `Rule:` an element belongs to. Classic cucumber-JSON has no
+// first-class rule grouping, so draiver carries a lenient per-element reference: an
+// element names its owning rule and a renderer groups consecutive same-rule elements
+// into a sub-group (drv-023). Elements with no rule fall back to the flat
+// feature→scenario tree, so a runner that emits none is unaffected.
+type Rule struct {
+	ID      string `json:"id,omitempty"`
+	Keyword string `json:"keyword,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Tags    []Tag  `json:"tags,omitempty"`
 }
 
 // Step is one Given/When/Then step, its result, and any embeddings it attached.

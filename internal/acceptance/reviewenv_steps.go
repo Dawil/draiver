@@ -25,7 +25,7 @@ import (
 )
 
 // This file is drv-020's slice of the acceptance suite: the Gherkin in
-// features/review_env.feature exercised against the *real* review-env lifecycle
+// features/attempt-page/review-env.feature exercised against the *real* review-env lifecycle
 // (internal/reviewenv) over a live webui, so the report's screenshots are of a
 // genuinely running instance of the feature under review — "click around the working
 // thing," captured. It plugs into the same runner-agnostic registry drv-019's
@@ -33,7 +33,7 @@ import (
 // the identical cucumber-JSON + PNG-embedding pipeline the acceptance rung captures.
 func init() {
 	for text, fn := range map[string]StepFunc{
-		// --- features/review_env.feature ---
+		// --- features/attempt-page/review-env.feature ---
 		"a Review attempt whose repo configures a review-ready environment":        givenReviewReadyAttempt,
 		"a running review environment":                                             givenRunningEnv,
 		"a running review environment whose teardown does not stop it":             givenLeakingEnv,

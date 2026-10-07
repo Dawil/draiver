@@ -57,13 +57,13 @@ var errUndefined = errors.New("no step definition for this step")
 // the World the preceding Given set up, which is how green and red rerun share one
 // When.
 var registry = map[string]StepFunc{
-	// --- features/download.feature ---
+	// --- features/bdd-report/download.feature ---
 	"a captured BDD run with an inlined screenshot": givenCapturedRun,
 	"I render the standalone report for download":   whenRenderStandalone,
 	"the report is a single self-contained HTML document": thenSelfContained,
 	"the screenshot is inlined in the downloaded file":    thenScreenshotInlined,
 
-	// --- features/rerun.feature ---
+	// --- features/bdd-report/rerun.feature ---
 	"a bound BDD rung on a healthy environment":                  givenGreenRung,
 	"a bound BDD rung whose environment healthcheck is red":      givenRedRung,
 	"I rerun the acceptance rung from the board":                 whenRerun,
