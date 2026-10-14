@@ -156,7 +156,21 @@ draiver recall <TICKET> --all           # include superseded facts in the index
 Because it needs nothing but the on-disk log, `recall` is also how you **talk to an
 attempt out of band**: a local Claude session (this skill + `recall`, no supervised
 draiver run in the loop) can answer "what was decided about X", "known gotchas",
-"the history of fact #N" by pulling from the log directly.
+"the history of fact #N" by pulling from the log directly. To start one, run a
+local Claude from the repo root (so this skill is on its plugin path) and point it
+at the attempt — read-only, nothing is written back:
+
+```
+export DRAIVER_ATTEMPT=<id>            # pin the attempt recall reads (or pass --attempt)
+
+claude -p 'Use the draiver-onboarding skill and answer ONLY from the log via
+`draiver recall <TICKET>` (plus `recall --chain <seq>` for history) — do not read
+the code or guess. Which gotchas are known, and what is the history of fact #<seq>?'
+```
+
+Drop the `-p` for an interactive session and keep asking follow-ups: each answer is
+a fresh `recall` against the immutable log, so the conversation never needs
+draiver's supervised loop.
 
 **Tags are yours.** `--tag` attaches opaque retrieval labels; draiver assigns them
 no meaning — they never affect liveness or truth, only what `--tag` search returns.
