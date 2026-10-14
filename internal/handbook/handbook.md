@@ -1,3 +1,4 @@
+
 # Working a Draiver ticket
 
 You are a **stateless** worker on one **attempt** of a ticket. A ticket may have
@@ -22,7 +23,7 @@ isn't the default, pass `--data <dir>` or export `DRAIVER_DATA`.
 Your side of the protocol is entirely CLI: `brief` to load, `log` to record,
 `escalate` to ask, `review` to hand off. Run those yourself — never offload your
 own logging onto the human. The one verb that is *theirs*, not yours, is
-`resolve`: the human answers escalations from the board on their own time (§5).
+`resolve`: the human answers escalations from the board on their own time (§6).
 Assume you cannot see the human in real time — you communicate by writing events
 they will read on the board, not by chatting.
 
@@ -36,14 +37,19 @@ out of context — is load the full context:
 draiver brief <TICKET>
 ```
 
-Treat its output as the complete truth: the spec, every prior decision, and any
-resolved-or-open escalation you are inheriting. **Do not assume you remember
-anything the brief doesn't show.** If the brief isn't enough to resume the work,
-that's a signal the log is leaking state — fix it by logging more, below.
+Treat its output as your complete starting context: the spec, a bounded **index**
+of the currently-live facts (each a `#seq type [tags] — headline` line), and any
+open escalation you are inheriting. The brief shows headlines, not full bodies —
+pull a fact's detail with `draiver recall <TICKET> <seq>` and its full supersession
+history with `draiver recall <TICKET> --chain <seq>` (see §5). Superseded and
+resolved history is off the index by design; it is still on the log for `recall`.
+**Do not assume you remember anything the brief or a `recall` doesn't show.** If
+what you can brief and recall isn't enough to resume the work, that's a signal the
+log is leaking state — fix it by logging more, below.
 
 Run it **once, at the start of your session.** Re-briefing mid-session is a
 mistake: don't loop back to it after each event, and — critically — don't poll it
-after you escalate to see whether an answer has landed (see §5). Once you're
+after you escalate to see whether an answer has landed (see §6). Once you're
 working, you have the context; keep going.
 
 ## 2. Translate the acceptance criteria into features
@@ -57,13 +63,13 @@ runnable tests, and there is no checked-in feature store to copy from.
 Turning that prose into executable acceptance tests is **your job**: author the
 corresponding Gherkin **`.feature` files + step definitions / execution scripts in
 the code repo**, on your branch, and commit them alongside the code they cover.
-They run under the repo's BDD rung (so `draiver test` can prove them green, §6)
+They run under the repo's BDD rung (so `draiver test` can prove them green, §7)
 and, on merge, graduate into trunk as a permanent deterministic acceptance rung —
 the control plane growing one ticket at a time.
 
 Interpret the criteria faithfully. If a statement is ambiguous enough that you
 would be *guessing* at what "done" means, that is a spec question for a human —
-`escalate` it (§5) rather than encoding a guess. A spec with no acceptance-criteria
+`escalate` it (§6) rather than encoding a guess. A spec with no acceptance-criteria
 section has nothing to translate; carry on.
 
 ## 3. Log gotchas the moment they bite
@@ -108,7 +114,60 @@ MD
 )"
 ```
 
-## 5. When you need a human, escalate — then stop
+## 5. Supersede, recall, and tag — the log is a live index, not a transcript
+
+The brief no longer replays the whole log. It pushes a bounded **index of live
+facts** — one `#seq type [tags] — headline` line each — and omits everything a
+later event has retired. That keeps cold-start cheap on a busy ticket, but it
+changes both how you *write* the log and how you *read* it back.
+
+**Write a self-contained first line.** The headline the index shows is the first
+non-empty line of your body, stripped of Markdown markup and length-capped. Make
+it stand on its own: `Chose server-side pagination — result sets exceed 10k rows`
+reads in the index; `Here's what I decided:` does not. Put the detail in the lines
+beneath it, and pull it with `recall` when a headline isn't enough.
+
+**Supersede, don't duplicate.** When a fact turns out wrong or stale, do **not**
+append a contradicting fact and leave both live. Find the old seq in the index and
+retire it as you log the correction:
+
+```
+draiver log <TICKET> --type decision --supersedes 14 "Reverted to client-side pagination: the server caps the result set at 500, so 10k never happens."
+```
+
+The superseded fact leaves the brief's index — so a fresh agent never re-reads a
+belief you already abandoned — but stays on the append-only log; `recall --chain`
+walks the whole seemed-like-X → now-Y history. The log never mutates; liveness is
+a projection over it. (`--supersedes` must name a seq that exists on this attempt.)
+
+**Recall on demand.** `recall` is the read side of that index — read-only, offline,
+no daemon, reading the same hash-chained log `audit` trusts:
+
+```
+draiver recall <TICKET>                 # the live index (seq, type, tags, headline)
+draiver recall <TICKET> 14 22           # full bodies of #14 and #22, with artefact pointers
+draiver recall <TICKET> --chain 14      # the supersession history of fact #14, oldest-first
+draiver recall <TICKET> --type gotcha   # filter the index by type
+draiver recall <TICKET> --tag auth      # filter by tag (repeatable; AND)
+draiver recall <TICKET> --grep stripe   # filter by body/headline regexp
+draiver recall <TICKET> --all           # include superseded facts in the index
+```
+
+Because it needs nothing but the on-disk log, `recall` is also how you **talk to an
+attempt out of band**: a local Claude session (this skill + `recall`, no supervised
+draiver run in the loop) can answer "what was decided about X", "known gotchas",
+"the history of fact #N" by pulling from the log directly.
+
+**Tags are yours.** `--tag` attaches opaque retrieval labels; draiver assigns them
+no meaning — they never affect liveness or truth, only what `--tag` search returns.
+Before inventing a tag, skim the tags already in the index and reuse one, so
+`--tag auth` finds every related fact instead of three drifted spellings:
+
+```
+draiver log <TICKET> --type gotcha --tag auth --tag webhook "Stripe live webhooks 401 until the account is verified."
+```
+
+## 6. When you need a human, escalate — then stop
 
 When you hit something only a human can decide (missing credentials, a product
 choice, an ambiguous spec), **do not guess past it.** The one mechanism that
@@ -151,7 +210,7 @@ answer and log what you did, closing the escalate → resolve → action arc:
 draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_URL from a fixture; opened PROJ-140 for the real secret."
 ```
 
-## 6. Verify with the test pyramid before you claim
+## 7. Verify with the test pyramid before you claim
 
 If the repo ships a `.test-pyramid.yaml`, prove the work green before you hand it
 off — and the order matters:
@@ -173,10 +232,10 @@ off — and the order matters:
   free.
 
 A repo with no `.test-pyramid.yaml` has nothing to run: `draiver test` says so and
-exits clean. Do this before §7 — a review backed by a logged green result is one a
+exits clean. Do this before §8 — a review backed by a logged green result is one a
 human can trust at a glance.
 
-## 7. Claim review — push, then claim with a link
+## 8. Claim review — push, then claim with a link
 
 When you believe the work is complete, make a **claim** for a human to verify.
 Do not mark the ticket done; that decision is the human's. A claim the human
@@ -195,7 +254,7 @@ push or open a PR. You push, exactly as you run `git commit` yourself.
   `"primary_remote": "forgejo"`).
 - **Ambiguous** — several remotes with no `primary_remote` set, or a
   `primary_remote` that isn't in `git remote` — **do not guess a remote.**
-  Escalate (§5): pushing to the wrong forge is worse than asking.
+  Escalate (§6): pushing to the wrong forge is worse than asking.
 
 ```
 git push -u <remote> HEAD
@@ -227,13 +286,15 @@ draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's thre
 
 ## Loop
 
-Each session: `brief` once → work — including translating the spec's acceptance
-criteria into Gherkin features + steps on your branch — → `log` gotchas/decisions
-as you go → when blocked, `escalate` and stop (the human resolves from their board,
-on their own time) → when the ticket is worked again, a session `brief`s, reads the
-resolution, and continues → when the work is done, **verify** (iterate with
-`draiver test`, commit, then `draiver test --log`), **push** to a remote, and
-`review` with a link the human can click.
+Each session: `brief` once (an index of live facts; `recall` for detail) → work —
+including translating the spec's acceptance criteria into Gherkin features + steps
+on your branch — → `log` gotchas/decisions as you go, with self-contained first
+lines, superseding stale facts rather than duplicating them → when blocked,
+`escalate` and stop (the human resolves from their board, on their own time) → when
+the ticket is worked again, a session `brief`s, reads the resolution, and continues
+→ when the work is done, **verify** (iterate with `draiver test`, commit, then
+`draiver test --log`), **push** to a remote, and `review` with a link the human can
+click.
 
 Everything valuable lives in the log. Leave the ticket resumable — the next
 `brief` is the only handoff.

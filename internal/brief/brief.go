@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 )
@@ -35,15 +34,10 @@ func Build(root store.Root, ticket, id string) (string, error) {
 		return "", err
 	}
 
-	// Map each escalation seq to its resolution, for inline pairing.
-	resolutionOf := map[int]event.Event{}
-	for _, e := range a.Events {
-		if e.Type == "resolution" {
-			for _, r := range e.Refs {
-				resolutionOf[r] = e
-			}
-		}
-	}
+	// The knowledge fold (drv-026): the brief pushes only a bounded *index* of
+	// currently-live facts, not the whole log. Full bodies and supersession history
+	// are pulled on demand via `draiver recall`.
+	view := kb.Fold(a.Events)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# BRIEF %s / attempt %s — %s\n", a.Ticket, a.ID, a.Title)
@@ -66,37 +60,40 @@ func Build(root store.Root, ticket, id string) (string, error) {
 	b.WriteString(specBody(root.SpecPath(ticket)))
 	b.WriteString("\n\n")
 
-	fmt.Fprintf(&b, "## Log (%d events)\n\n", len(a.Events))
-	for _, e := range a.Events {
-		if e.Type == "resolution" {
-			continue // shown inline under its escalation
-		}
-		fmt.Fprintf(&b, "### #%d %s — %s — %s\n", e.Seq, e.Type, e.Actor, e.TS.UTC().Format(time.RFC3339))
-		if body := strings.TrimSpace(e.Body); body != "" {
-			b.WriteString(body)
-			b.WriteString("\n")
-		}
-		for _, art := range e.Artefacts {
-			fmt.Fprintf(&b, "[artefact: %s]\n", art)
-		}
-		if e.Type == "escalation" {
-			if res, ok := resolutionOf[e.Seq]; ok {
-				fmt.Fprintf(&b, "→ RESOLVED by #%d (%s): %s\n", res.Seq, res.Actor, strings.TrimSpace(res.Body))
-			} else {
-				b.WriteString("→ UNRESOLVED — blocked here.\n")
-			}
+	// ## Current understanding — the index: one line per live fact, in seq order.
+	// Superseded bodies, resolved escalations, and historical events are absent; the
+	// index scales with the live-fact count, not the total event count.
+	live := view.Live()
+	fmt.Fprintf(&b, "## Current understanding (%d live facts)\n\n", len(live))
+	for _, f := range live {
+		fmt.Fprintf(&b, "- %s\n", factLine(f))
+	}
+	b.WriteString("\n")
+
+	if open := view.LiveEscalations(); len(open) > 0 {
+		b.WriteString("## Open escalations (need a human)\n\n")
+		for _, f := range open {
+			fmt.Fprintf(&b, "- #%d: %s\n", f.Seq, f.Headline)
 		}
 		b.WriteString("\n")
 	}
 
-	if len(a.OpenEscalations) > 0 {
-		b.WriteString("## Open escalations (need a human)\n\n")
-		for _, e := range a.OpenEscalations {
-			fmt.Fprintf(&b, "- #%d: %s\n", e.Seq, strings.TrimSpace(e.Body))
-		}
-		b.WriteString("\n")
-	}
+	b.WriteString("Run `draiver recall <seq>` for a fact's full body, " +
+		"or `draiver recall --chain <seq>` for its history. The raw log is not shown here.\n")
 	return b.String(), nil
+}
+
+// factLine renders one index entry: `#<seq> <type> [tags] — <headline>`. Tags are
+// shown only when present; they are an opaque retrieval aid, so their order is the
+// author's and the fold never interprets them.
+func factLine(f kb.Fact) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "#%d %s", f.Seq, f.Type)
+	if len(f.Tags) > 0 {
+		fmt.Fprintf(&sb, " [%s]", strings.Join(f.Tags, " "))
+	}
+	fmt.Fprintf(&sb, " — %s", f.Headline)
+	return sb.String()
 }
 
 // specBody returns the spec markdown with its identity frontmatter stripped.

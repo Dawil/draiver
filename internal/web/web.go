@@ -49,6 +49,7 @@ import (
 	"github.com/Dawil/draiver/internal/bddexec"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/land"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/repo"
@@ -161,13 +162,25 @@ var composeTypes = map[string]bool{
 // call, so the board and a terminal share one write path. The gateway stamps the
 // server's actor and runs the same attempt-existence and link checks every append
 // goes through.
-func (s *Server) appendComposed(typ, id, att, body string) error {
+func (s *Server) appendComposed(typ, id, att, body string, tags []string, supersedes []int) error {
 	if typ == "done" {
 		_, err := s.gw.Done(id, att, body)
 		return err
 	}
-	_, err := s.gw.AppendTyped(id, att, event.Event{Type: typ, Body: body})
+	_, err := s.gw.AppendTyped(id, att, event.Event{Type: typ, Body: body, Tags: tags, Supersedes: supersedes})
 	return err
+}
+
+// parseComposeTags splits a free-text tags field into individual labels on
+// whitespace or commas, dropping empties. An empty field yields no tags.
+func parseComposeTags(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
 // stateLabels overrides how a control state is shown in the human-facing web UI.
@@ -600,16 +613,23 @@ type eventVM struct {
 	// the machine-readable RFC3339 stamp reltime.js reads to keep the age live
 	// (a Done attempt does not poll, so a frozen server string would go stale).
 	// TSFull is the precise UTC timestamp surfaced as the hover tooltip.
-	TSRel      string
-	TSISO      string
-	TSFull     string
-	BodyHTML   template.HTML
-	Refs       []int
-	Artefacts  []string
-	Links      []linkVM
+	TSRel     string
+	TSISO     string
+	TSFull    string
+	BodyHTML  template.HTML
+	Refs      []int
+	Artefacts []string
+	Links     []linkVM
+	// Tags are the event's opaque retrieval labels, rendered as small chips (drv-026).
+	Tags       []string
 	IsEsc      bool
 	Resolved   bool
 	ResolvedBy int
+	// Superseded marks a retired (non-live) non-escalation fact; SupersededBy is the
+	// seq of the event that retired it. A resolved escalation uses Resolved/ResolvedBy
+	// instead, so the two are mutually exclusive on any one event.
+	Superseded   bool
+	SupersededBy int
 }
 
 type detailVM struct {
@@ -1208,14 +1228,12 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 		return detailVM{}, err
 	}
 
-	resolutionOf := map[int]int{}
-	for _, e := range a.Events {
-		if e.Type == "resolution" {
-			for _, ref := range e.Refs {
-				resolutionOf[ref] = e.Seq
-			}
-		}
-	}
+	// The knowledge fold (drv-026) is the single source of the supersedes edge the
+	// board renders: it generalises the old resolution→escalation map to every
+	// retirement (explicit `supersedes` and the subsumed resolution bridge alike), so
+	// a superseded fact dims and links to the event that retired it exactly as a
+	// resolved escalation always has.
+	view := kb.Fold(a.Events)
 
 	now := time.Now()
 	vm := detailVM{Attempt: a, SpecHTML: s.renderSpec(id), Polls: a.State != project.Done}
@@ -1232,13 +1250,22 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 			Refs:      e.Refs,
 			Artefacts: e.Artefacts,
 			Links:     safeLinks(e.Links),
+			Tags:      e.Tags,
+		}
+		if f, ok := view.Get(e.Seq); ok && !f.Live {
+			// An escalation retired by its resolution keeps the familiar "resolved by
+			// #N" affordance (and drops the resolve form); any other retired fact is a
+			// generic "superseded by #N" demotion.
+			if e.Type == "escalation" {
+				ev.Resolved = true
+				ev.ResolvedBy = f.SupersededBy
+			} else {
+				ev.Superseded = true
+				ev.SupersededBy = f.SupersededBy
+			}
 		}
 		if e.Type == "escalation" {
 			ev.IsEsc = true
-			if by, ok := resolutionOf[e.Seq]; ok {
-				ev.Resolved = true
-				ev.ResolvedBy = by
-			}
 		}
 		vm.Events = append(vm.Events, ev)
 	}
@@ -1429,7 +1456,21 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.appendComposed(typ, id, att, body); err != nil {
+	// Optional retrieval aids (drv-026), carried only by the generic compose form (the
+	// Review-action buttons include just the body): opaque tags and a supersedes seq.
+	// A blank/zero value is simply absent, so a plain entry appends exactly as before;
+	// a non-existent supersedes seq is rejected by the gateway's append-time check.
+	tags := parseComposeTags(r.FormValue("tags"))
+	var supersedes []int
+	if sv := strings.TrimSpace(r.FormValue("supersedes")); sv != "" {
+		n, err := strconv.Atoi(sv)
+		if err != nil || n < 1 {
+			http.Error(w, "draiver: supersedes must be a positive event seq", http.StatusBadRequest)
+			return
+		}
+		supersedes = []int{n}
+	}
+	if err := s.appendComposed(typ, id, att, body, tags, supersedes); err != nil {
 		s.fail(w, err)
 		return
 	}

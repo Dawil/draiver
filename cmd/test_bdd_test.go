@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -138,13 +139,25 @@ func TestBDDCaptureSideBySideAuditBrief(t *testing.T) {
 		t.Errorf("audit failed after capture: %d\n%s", code, out)
 	}
 
-	// brief lists the captured artefacts.
+	// The brief (drv-026 progressive reveal) indexes the test-result fact by headline
+	// rather than dumping its artefact pointers; the full body + artefacts are pulled
+	// on demand via `recall <seq>`.
 	brief, code := run(t, "--data", data, "brief", "PROJ-1")
 	if code != 0 {
 		t.Fatalf("brief exited %d: %s", code, brief)
 	}
-	if !strings.Contains(brief, "[artefact: bdd/bdd/local/") {
-		t.Errorf("brief did not list captured artefacts:\n%s", brief)
+	if !strings.Contains(brief, "test-result") {
+		t.Errorf("brief did not index the test-result fact:\n%s", brief)
+	}
+	if strings.Contains(brief, "[artefact: bdd/bdd/local/") {
+		t.Errorf("brief should no longer dump artefact pointers inline (pull via recall):\n%s", brief)
+	}
+	recall, code := run(t, "--data", data, "recall", "PROJ-1", strconv.Itoa(last.Seq))
+	if code != 0 {
+		t.Fatalf("recall exited %d: %s", code, recall)
+	}
+	if !strings.Contains(recall, "[artefact: bdd/bdd/local/") {
+		t.Errorf("recall of the test-result fact did not list captured artefacts:\n%s", recall)
 	}
 }
 

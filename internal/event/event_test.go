@@ -62,6 +62,29 @@ func TestHashDeterministicAndRecomputable(t *testing.T) {
 	}
 }
 
+// A sample event carrying neither Supersedes nor Tags must hash to exactly the
+// value it did before drv-026 added those omitempty fields — the backward-compat
+// guarantee behind `draiver audit` passing untouched on pre-existing logs (AC1).
+// This golden value was computed on the pre-drv-026 canonical form; if it ever
+// changes, the omitempty discipline has been broken.
+func TestHashBackwardCompatGolden(t *testing.T) {
+	const golden = "46b7b3be3fc4da2b3141bc1b090b0afb8c80c78b5890c478cadfaa63be6cb572"
+	if got := sample().ComputeHash(); got != golden {
+		t.Errorf("sample hash = %s, want pre-drv-026 golden %s — omitempty broke", got, golden)
+	}
+	// Setting a supersedes edge must change the hash (the field is in canonical form).
+	sup := sample()
+	sup.Supersedes = []int{1}
+	if sup.ComputeHash() == golden {
+		t.Error("hash unchanged after setting Supersedes — field not in canonical form")
+	}
+	tag := sample()
+	tag.Tags = []string{"auth"}
+	if tag.ComputeHash() == golden {
+		t.Error("hash unchanged after setting Tags — field not in canonical form")
+	}
+}
+
 func TestHashSensitiveToEdits(t *testing.T) {
 	base := sample().ComputeHash()
 

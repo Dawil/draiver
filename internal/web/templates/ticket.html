@@ -220,6 +220,16 @@
         </div>
         <textarea name="body" class="compose-body" data-testid="compose-body" rows="2"
           placeholder="Record a note, a gotcha, or a decision (markdown)…"></textarea>
+        {{/* Optional retrieval aids (drv-026): opaque space/comma-separated tags, and
+             a seq this entry supersedes (retires from the live set). Both empty →
+             a plain entry, exactly as before. The Review-action buttons include only
+             the body, so these never ride on a decision/done. */}}
+        <div class="compose-row compose-aids">
+          <input type="text" name="tags" class="compose-tags" data-testid="compose-tags"
+            aria-label="Tags (optional)" placeholder="tags (optional, space-separated)">
+          <input type="number" name="supersedes" min="1" class="compose-supersedes" data-testid="compose-supersedes"
+            aria-label="Supersedes seq (optional)" placeholder="supersedes #">
+        </div>
       </form>
 
       {{if eq .Attempt.State "Review"}}
@@ -652,14 +662,16 @@
 
 {{define "attempt-log"}}<ol class="timeline" data-testid="log-timeline">
         {{range .Events}}
-        <li class="event event-{{.Type}}" id="event-{{.Seq}}" data-testid="event-{{.Seq}}">
+        <li class="event event-{{.Type}}{{if .Superseded}} event-superseded{{end}}" id="event-{{.Seq}}" data-testid="event-{{.Seq}}">
           <div class="event-head">
             <a class="seq" href="#event-{{.Seq}}" title="Permalink to this entry">#{{.Seq}}</a>
             <span class="type type-{{.Type}}">{{.Type}}</span>
             <span class="actor">{{.Actor}}</span>
             <time class="ts" data-testid="ts-{{.Seq}}" datetime="{{.TSISO}}" title="{{.TSFull}}">{{.TSRel}}</time>
           </div>
+          {{if .Tags}}<p class="event-tags" data-testid="event-tags-{{.Seq}}">{{range .Tags}}<span class="tag-chip" data-testid="tag-chip">{{.}}</span> {{end}}</p>{{end}}
           <div class="prose event-body">{{.BodyHTML}}</div>
+          {{if .Superseded}}<p class="link-note superseded" data-testid="superseded-{{.Seq}}">→ superseded by <a href="#event-{{.SupersededBy}}">#{{.SupersededBy}}</a></p>{{end}}
           {{if .Links}}<p class="event-links" data-testid="event-links-{{.Seq}}">{{range .Links}}<a class="link-chip" href="{{.Href}}" target="_blank" rel="noopener noreferrer">{{if .Rel}}{{.Rel}}{{else}}link{{end}} ↗</a>{{end}}</p>{{end}}
           {{if .IsEsc}}
             {{if .Resolved}}
