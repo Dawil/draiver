@@ -34,13 +34,19 @@ var testCmd = &cobra.Command{
 	Long: "test is the executor for a repo's .test-pyramid.yaml. Run from inside an\n" +
 		"attempt's worktree — the checkout is the code under test, and test derives\n" +
 		"which attempt from the branch it stands on. It climbs from the base rung up to\n" +
-		"RUNG (default: the top rung), running each level's command and stopping at the\n" +
-		"first non-green rung.\n" +
+		"RUNG, running each level's command. RUNG defaults to the highest `required`\n" +
+		"rung (what review needs); a per-repo default_test_rung narrows that ceiling\n" +
+		"down for a faster loop, and an explicit RUNG can climb up into advisory rungs.\n" +
+		"\n" +
+		"The climb halts at the first non-green *required* rung; a red advisory rung\n" +
+		"(required: false) is reported and the climb continues past it, so it never\n" +
+		"blocks a higher required rung or the review gate.\n" +
 		"\n" +
 		"Bare, it only runs and reports — the fast iterative loop, fine against a dirty\n" +
-		"tree. With --log it refuses a dirty tree, then on all-green through RUNG appends\n" +
-		"one durable test-result event carrying the rung and the HEAD commit — so brief\n" +
-		"replays \"rung green @ sha\" for the next agent. A failing run logs nothing.",
+		"tree. With --log it refuses a dirty tree, then on a green target through RUNG\n" +
+		"appends one durable test-result event carrying the rung and the HEAD commit —\n" +
+		"so brief replays \"rung green @ sha\" for the next agent. A failing run logs\n" +
+		"nothing.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
@@ -61,16 +67,16 @@ var testCmd = &cobra.Command{
 			return nil
 		}
 
-		// An explicit RUNG wins. Otherwise the default climb target is the repo's
-		// configured default_test_rung (drv-011) when it names a real rung — the
-		// dev-iteration default (decision #4), which may sit *below* the file's top
-		// rung — falling back to the file's top rung when unset or unknown. Resolved
-		// best-effort from the worktree (branch → attempt → recorded repo → config);
-		// any failure leaves the file's top rung, so `test` never breaks on a
-		// config/identify error. The Review gate applies this same rung as a FLOOR
-		// instead (it can only raise its bar, never lower it), so what `test` iterates
-		// at by default may be lower than what `review` ultimately demands.
-		target := p.Target().Name
+		// The default climb target is the highest *required* rung (drv-025): what the
+		// review gate ultimately needs, which may sit below the file's top rung when
+		// advisory rungs crown the ladder. The per-repo default_test_rung (drv-011),
+		// when it names a real rung, narrows that ceiling *down* for a faster local
+		// loop — it is purely the iteration ceiling now and never touches the gate.
+		// Resolved best-effort from the worktree (branch → attempt → recorded repo →
+		// config); any failure leaves the highest required rung, so `test` never breaks
+		// on a config/identify error. An explicit RUNG wins over both and can climb
+		// *up* into advisory rungs on demand.
+		target := p.HighestRequired().Name
 		if rr := repoRungForWorktree(ctx, wd); rr != "" {
 			if _, ok := levelsUpTo(p, rr); ok {
 				target = rr
@@ -97,19 +103,53 @@ var testCmd = &cobra.Command{
 			}
 		}
 
-		// Climb base→target, streaming each rung's output, stopping at the first that
-		// is not green. Each rung runs in its environment (if it names one): up →
-		// healthchecks → run → (always) down. A failing rung logs nothing — the log
-		// holds only passing results by construction — and each failure maps to its
-		// control outcome (infra→escalate, dependency→block, code→fault) via runRung.
-		for _, lv := range levels {
-			if err := runRung(ctx, cmd, wd, p, lv); err != nil {
+		// Climb base→target, streaming each rung's output. Each rung runs in its
+		// environment (if it names one): up → healthchecks → run → (always) down.
+		//
+		// The climb halts only at the first non-green *required* rung (drv-025): its
+		// failure maps to its control outcome (infra→escalate, dependency→block,
+		// code→fault) via runRung's exit code, and higher rungs never run. A red
+		// *advisory* rung — for any reason, a genuine failure or an unready environment
+		// — is reported and the climb CONTINUES past it: higher suites on the V do not
+		// depend on lower suites *passing*, and otherwise a required rung above an
+		// advisory one would be unreachable and the gate unsatisfiable. A failing rung
+		// logs nothing either way — the log holds only passing results by construction.
+		var advisoryReds []string
+		targetGreen := false
+		for i, lv := range levels {
+			err := runRung(ctx, cmd, wd, p, lv)
+			if err == nil {
+				if i == len(levels)-1 {
+					targetGreen = true
+				}
+				continue
+			}
+			if lv.IsRequired() {
 				return err
 			}
+			advisoryReds = append(advisoryReds, lv.Name)
+			fmt.Fprintf(out, "== %s: advisory rung not green — recorded, climb continues (does not gate review): %v\n", lv.Name, err)
 		}
-		fmt.Fprintf(out, "all green through %q\n", target)
+		switch {
+		case len(advisoryReds) == 0:
+			fmt.Fprintf(out, "all green through %q\n", target)
+		case targetGreen:
+			fmt.Fprintf(out, "green through %q — advisory rung(s) not green, ignored: %s\n", target, strings.Join(advisoryReds, ", "))
+		default:
+			// The explicitly requested target rung is itself advisory and not green:
+			// the climb ran everything but has no green target to attribute.
+			fmt.Fprintf(out, "advisory rung(s) not green, ignored: %s\n", strings.Join(advisoryReds, ", "))
+		}
 
 		if !testLog {
+			return nil
+		}
+
+		// --log records the target rung, so it needs the target itself green. A required
+		// target that failed already returned above; only an advisory target left red
+		// reaches here, and there is no green result to attribute — record nothing.
+		if !targetGreen {
+			fmt.Fprintf(out, "target rung %q not green — nothing recorded\n", target)
 			return nil
 		}
 
@@ -320,9 +360,11 @@ func runShell(ctx context.Context, cmd *cobra.Command, wd, script string) error 
 // repoRungForWorktree resolves the repo's configured default_test_rung (drv-011)
 // for the attempt the worktree at wd belongs to, best-effort: it maps the checkout's
 // branch to an attempt (worktree.Identify), reads that attempt's recorded repo, and
-// resolves the per-repo setting through the gateway. It returns "" — leaving the
-// caller on the file's top rung — on any failure (a non-attempt branch, a missing
-// attempt, an unreadable config), so the fast `test` loop never breaks on config.
+// resolves the per-repo setting through the gateway. Since drv-025 this is purely the
+// `draiver test` iteration ceiling — it narrows the default climb *down* and never
+// touches the review gate. It returns "" — leaving the caller on the highest required
+// rung — on any failure (a non-attempt branch, a missing attempt, an unreadable
+// config), so the fast `test` loop never breaks on config.
 func repoRungForWorktree(ctx context.Context, wd string) string {
 	key, err := worktree.Identify(ctx, wd)
 	if err != nil {

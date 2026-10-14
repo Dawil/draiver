@@ -443,6 +443,117 @@ func TestLogRecordsGreenResult(t *testing.T) {
 	}
 }
 
+// drv-025: a red *advisory* rung (required: false) below a required rung does not
+// halt the climb — it is reported and the climb continues to the required rung
+// above it, which would otherwise be unreachable.
+func TestAdvisoryRedDoesNotHaltClimb(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: "true"
+  - name: integration
+    run: "false"
+    required: false
+  - name: e2e
+    run: "true"
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("a red advisory rung must not fail the climb, got exit %d: %s", code, out)
+	}
+	if !strings.Contains(out, "== integration") {
+		t.Errorf("the advisory rung should still be run: %q", out)
+	}
+	if !strings.Contains(out, "advisory rung not green") {
+		t.Errorf("the advisory red should be reported: %q", out)
+	}
+	if !strings.Contains(out, "== e2e") {
+		t.Errorf("the climb should reach the required rung above the advisory one: %q", out)
+	}
+	if !strings.Contains(out, `green through "e2e"`) {
+		t.Errorf("should report reaching the highest required rung: %q", out)
+	}
+}
+
+// drv-025: bare `draiver test` climbs to the highest *required* rung by default —
+// an advisory rung crowning the ladder is not run unless asked for explicitly.
+func TestDefaultClimbsToHighestRequired(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: "true"
+  - name: acceptance
+    run: "true"
+  - name: integration
+    run: "true"
+    required: false
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("test exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, `all green through "acceptance"`) {
+		t.Errorf("default target should be the highest required rung (acceptance): %q", out)
+	}
+	if strings.Contains(out, "== integration") {
+		t.Errorf("the advisory top rung must not run by default: %q", out)
+	}
+}
+
+// drv-025: an explicit RUNG climbs up into an advisory rung above the highest
+// required one — the opt-in path to run (and see) an advisory suite.
+func TestExplicitRungClimbsIntoAdvisory(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: "true"
+  - name: acceptance
+    run: "true"
+  - name: integration
+    run: "true"
+    required: false
+`
+	pyramidCheckoutYAML(t, "PROJ-1", "0001", false, body)
+	out, code := run(t, "test", "integration")
+	if code != 0 {
+		t.Fatalf("explicit advisory rung exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "== integration") {
+		t.Errorf("an explicit RUNG should climb into the advisory rung: %q", out)
+	}
+	if !strings.Contains(out, `all green through "integration"`) {
+		t.Errorf("should report climbing to the explicitly requested advisory rung: %q", out)
+	}
+}
+
+// drv-025: a per-repo default_test_rung narrows the default climb ceiling *down*
+// below the highest required rung — the faster local loop. It never touches the
+// gate (that is review_test's concern); here we only assert the climb stops early.
+func TestTestRungLowersTheCeiling(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("DRAIVER_CONFIG", cfgPath)
+	data, repo, checkout := pyramidAttempt(t, [][2]string{{"unit", "true"}, {"acceptance", "true"}})
+
+	// default_test_rung = unit lowers the ceiling from the highest required rung
+	// (acceptance) down to unit.
+	if _, code := run(t, "config", "repo", repo, "--rung", "unit"); code != 0 {
+		t.Fatalf("config repo --rung exited %d", code)
+	}
+	t.Chdir(checkout)
+	out, code := run(t, "--data", data, "test")
+	if code != 0 {
+		t.Fatalf("test exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, `all green through "unit"`) {
+		t.Errorf("TestRung should lower the default ceiling to unit: %q", out)
+	}
+	if strings.Contains(out, "== acceptance") {
+		t.Errorf("the ceiling should stop the climb below acceptance: %q", out)
+	}
+}
+
 // A failing --log run records nothing and exits nonzero: the log holds only
 // passing results by construction.
 func TestLogFailingRunRecordsNothing(t *testing.T) {

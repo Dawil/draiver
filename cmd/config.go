@@ -41,7 +41,8 @@ var configRepoCmd = &cobra.Command{
 		"flag passed empty (e.g. --remote \"\") clears it so it falls back to the global\n" +
 		"default. Each value resolves per-repo → global default → builtin: the remote\n" +
 		"falls back to primary_remote, the branch to the repo's current branch, the rung\n" +
-		"to the pyramid file's top rung. The write merges into config.json atomically,\n" +
+		"(the `draiver test` iteration ceiling) to the pyramid file's highest required\n" +
+		"rung. The write merges into config.json atomically,\n" +
 		"leaving every other key and repo untouched. It is the scriptable twin of the\n" +
 		"attempt page's repo-settings panel, both going through the shared gateway.",
 	Args: cobra.ExactArgs(1),
@@ -93,7 +94,7 @@ var configRepoCmd = &cobra.Command{
 		fmt.Fprintf(tw, "repo\t%s\n", repoPath)
 		fmt.Fprintf(tw, "default remote\t%s\n", resolvedLine(stored.DefaultRemote, r.Remote, "unset — git actions fall back to the sole remote or surface ambiguity"))
 		fmt.Fprintf(tw, "default branch\t%s\n", resolvedLine(stored.DefaultBranch, r.Branch, "unset — defaults to the repo's current branch"))
-		fmt.Fprintf(tw, "default test rung\t%s\n", resolvedLine(stored.DefaultTestRung, r.TestRung, "unset — defaults to the pyramid file's top rung"))
+		fmt.Fprintf(tw, "default test rung\t%s\n", resolvedLine(stored.DefaultTestRung, r.TestRung, "unset — `draiver test` iteration ceiling; defaults to the pyramid file's highest required rung"))
 		return tw.Flush()
 	},
 }

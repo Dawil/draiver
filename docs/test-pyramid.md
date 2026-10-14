@@ -66,6 +66,10 @@ levels:
    is the single source of truth. **A missing `.test-pyramid.yaml` is a valid,
    non-error state**: no file → no gate.
 
+   > **Superseded by drv-025.** The gate is no longer the single top rung — it is
+   > the set of rungs marked `required` (default true). See
+   > *"Per-rung `required`"* below.
+
 3. **`--log` gates on a clean tree.** Bare `draiver test` runs against a dirty tree
    (fast, iterative verification — records nothing). `draiver test --log` **refuses
    if the working tree has uncommitted changes**, then runs. So the agent iterates
@@ -78,14 +82,19 @@ levels:
    result at current HEAD.* A result whose `commit` ≠ HEAD is **stale** and does not
    count — a further commit after logging correctly invalidates the claim.
 
-**The Review gate.** `draiver review` folds the log for the highest logged rung at
-current HEAD; if a `.test-pyramid.yaml` exists but no result covers HEAD at the
-target rung, the claim is **refused** with a message naming the gap and the fix
+**The Review gate.** `draiver review` folds the log over the **required set**: every
+rung marked `required` (the default) must be logged green at current HEAD. If a
+`.test-pyramid.yaml` exists but some required rung is not green at HEAD, the claim is
+**refused** with a message naming the outstanding required rung(s) and the fix
 (`draiver test --log`). No file → no gate (not a failure). This is the
 enforce-by-process-control seam, the same shape as the permission gate and
 `merge`'s clean-checkout gate. It does not remove the human Review gate — it
 shrinks the judgment surface behind it. `brief` surfaces the result for free (it is
-a replayed log event), so a fresh agent inherits "integration green @ abc123."
+a replayed log event), so a fresh agent inherits "acceptance green @ abc123."
+
+> **Pre-drv-025 this was a single top rung** ("the highest logged rung at HEAD
+> equals the target"). drv-025 generalised it to the required set so an advisory
+> rung can sit anywhere in the ladder without gating. See *"Per-rung `required`"*.
 
 **The v1 verb:**
 
@@ -244,6 +253,85 @@ levels:
 
 A BDD run on its own never substitutes for the human Review — a cleared acceptance
 rung *feeds* the Review, it does not replace it (drv-014).
+
+## Per-rung `required` (drv-025): advisory rungs the spine does not gate on
+
+The file order conflated two orthogonal things. drv-025 splits them:
+
+- **Altitude** — where a rung sits on the testing V (unit < integration < e2e). It is
+  intrinsic to *what the test is*, and it is the **only** thing the list order
+  encodes. Nothing moves in the list because it is flaky or optional.
+- **Enforcement** — whether a rung must be green before `draiver review` admits a
+  claim. This is a policy driven by flakiness, environment availability, and
+  confidence — **not** by altitude. It is carried by a new per-rung flag.
+
+```yaml
+levels:
+  - name: unit
+    run: go test ./...
+  - name: acceptance
+    run: go run ./features/acceptance        # required by default
+  - name: integration
+    run: go test -tags=integration ./...
+    environment: local
+    required: false                          # advisory: run & reported, never gates
+```
+
+- **`required: true|false`, default `true`.** Omitting the key keeps a rung
+  required, so **every pre-drv-025 file behaves exactly as before** (all rungs
+  required; the gate is the top rung green at HEAD). `required: false` makes a rung
+  **advisory**: still *defined*, still *run* when it lies in the climb path, still
+  *reported* — but a red advisory rung (for **any** reason: a genuine failure or an
+  unready environment) **never blocks the review gate and never halts the climb**.
+- **Not a contiguous prefix.** A `required` rung may legitimately sit *above* an
+  advisory one; the required set need not be the bottom N rungs. The gate folds the
+  whole set.
+- **Validation.** A pyramid with **zero** required rungs is rejected at load —
+  nothing to gate on is a config error, not an ungated repo. (A repo with no pyramid
+  file at all stays ungated, as always.)
+
+**Two mechanics follow directly.**
+
+1. **`draiver test` no longer stops at the first non-green rung unconditionally.** It
+   climbs base→up and halts only at the first non-green **required** rung (with that
+   rung's control-outcome exit: up=6/escalate, healthcheck=7/block, run=1/fault). A
+   red **advisory** rung is reported and the climb **continues past it** — higher
+   suites on the V do not depend on lower suites *passing*, and otherwise a required
+   rung above an advisory one would be unreachable.
+2. **The review gate folds the required *set*, not a single top rung.** Admission is
+   now *"every `required` rung is logged green at this exact HEAD"* rather than *"the
+   highest logged rung equals the target."* Stale results (logged before a later
+   commit) still do not count. The refusal names the specific outstanding required
+   rung(s).
+
+**What `default_test_rung` (per-repo `TestRung`) becomes.** Its two drv-011 jobs
+split, and only one survives:
+
+- Its **review-gate floor** role is **removed** — the file's `required` flags are now
+  the sole authority on what the spine requires (a scalar cannot express a floor over
+  a non-monotonic required set anyway).
+- Its **`draiver test` default-climb** role **survives, clarified**: it is purely the
+  **iteration ceiling** for the fast local loop — how high bare `draiver test` climbs
+  when no explicit `RUNG` is given. And the default itself changed: bare `draiver
+  test` now climbs to the **highest `required` rung** (what review needs), not the
+  file's top rung. `TestRung` narrows that ceiling *down* (faster loops); an explicit
+  `RUNG` argument still climbs *up* into advisory rungs on demand.
+
+**This repo dogfoods it.** `.test-pyramid.yaml` marks `integration` `required:
+false` (it needs a container runtime and already skips cleanly without one), so
+draiver's own gate requires `unit` + `acceptance` and treats `integration` as
+advisory — altitude keeps it on top of the V, enforcement makes it non-blocking,
+without corrupting the ordering.
+
+**Deferred (built only on demand).** *Per-environment opt-in enforcement* ("advisory
+in the file, but the CI box that *can* run it treats it as required") would be an
+explicit **promote-only** operator setting (e.g. `additional_required: [e2e]`) that
+can only *add* enforcement over the file author's rungs, never remove it — preserving
+the trust boundary (the gate must not be *softenable* from mutable `config.json`). It
+must **not** overload the `TestRung` scalar (now the iteration ceiling). Renaming
+`required` to `blocking:`/`gates_review:` was considered and declined: the subtlety
+that an advisory rung is still *run* (to climb past it) is documented here rather than
+encoded in the name.
 
 ## Why this is on-thesis, not a bolt-on
 
