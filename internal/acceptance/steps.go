@@ -58,18 +58,42 @@ var errUndefined = errors.New("no step definition for this step")
 // When.
 var registry = map[string]StepFunc{
 	// --- features/bdd-report/download.feature ---
-	"a captured BDD run with an inlined screenshot": givenCapturedRun,
-	"I render the standalone report for download":   whenRenderStandalone,
+	"a captured BDD run with an inlined screenshot":       givenCapturedRun,
+	"I render the standalone report for download":         whenRenderStandalone,
 	"the report is a single self-contained HTML document": thenSelfContained,
 	"the screenshot is inlined in the downloaded file":    thenScreenshotInlined,
 
 	// --- features/bdd-report/rerun.feature ---
-	"a bound BDD rung on a healthy environment":                  givenGreenRung,
-	"a bound BDD rung whose environment healthcheck is red":      givenRedRung,
-	"I rerun the acceptance rung from the board":                 whenRerun,
-	"the rung runs green and a fresh artefact set is captured":   thenRerunGreen,
-	"the rerun is blocked and no bogus report is captured":       thenRerunBlocked,
+	"a bound BDD rung on a healthy environment":                    givenGreenRung,
+	"a bound BDD rung whose environment healthcheck is red":        givenRedRung,
+	"I rerun the acceptance rung from the board":                   whenRerun,
+	"the rung runs green and a fresh artefact set is captured":     thenRerunGreen,
+	"the rerun is blocked and no bogus report is captured":         thenRerunBlocked,
 	"the block explains that the ball is passed back to the human": thenBlockExplains,
+
+	// --- features/progressive-brief/recall.feature (drv-026) ---
+	"an attempt with a fact superseded by a later one":           givenSupersededFact,
+	"the brief indexes the live fact and not the superseded one": thenBriefIndexesLiveOnly,
+	"recall of the superseded seq still returns its body":        thenRecallBodyReturns,
+	"recall of the chain returns the history oldest-to-newest":   thenRecallChainOrdered,
+	"audit still passes over the superseding chain":              thenAuditPasses,
+	"an attempt with two facts tagged differently":               givenTwoTaggedFacts,
+	"recall filtered by a tag returns only the matching fact":    thenRecallByTagFilters,
+
+	// --- features/progressive-brief/cold-start.feature (drv-026, AC7) ---
+	"a busy attempt with many superseded facts":                givenBusyAttempt,
+	"the brief is materially smaller than a full-log replay":   thenBriefSmallerThanReplay,
+	"adding more superseded history keeps the brief size flat": thenMoreHistoryKeepsBriefFlat,
+
+	// --- features/progressive-brief/talk.feature (drv-026, AC8) ---
+	"an attempt with decisions, gotchas, and a superseded fact": givenAttemptWithKnowledge,
+	"recall answers which gotchas are known":                    thenRecallAnswersGotchas,
+	"recall answers the history of a superseded fact":           thenRecallAnswersHistory,
+
+	// --- features/progressive-brief/board.feature (drv-026, AC6) ---
+	"a board attempt with a superseded fact and tags":                           givenBoardWithSupersededAndTags,
+	"the attempt page demotes the superseded fact with a link to its successor": thenPageDemotesSuperseded,
+	"the attempt page shows the tags as chips":                                  thenPageShowsTagChips,
 }
 
 // invokeStep runs the step definition matching text, or reports errUndefined so the

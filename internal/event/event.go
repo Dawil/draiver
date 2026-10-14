@@ -49,8 +49,18 @@ type Event struct {
 	// exactly as before — the same forward-compatible discipline Outcome added.
 	Rung   string `yaml:"rung,omitempty"`
 	Commit string `yaml:"commit,omitempty"`
-	Prev   string `yaml:"prev"`
-	Hash   string `yaml:"hash"`
+	// Supersedes lists the seqs this event retires from the live set — the single
+	// `supersedes` truth primitive the progressive-reveal fold (internal/kb) folds
+	// over (drv-026). It is dedicated, NOT a flavour of Refs (which stays "see
+	// also"), so the fold is unambiguous. Tags are opaque, agent-owned retrieval
+	// labels the fold never interprets — tag drift degrades search only, never
+	// truth. Both are omitempty, so every event that sets neither (all pre-drv-026
+	// events) hashes and serialises exactly as before — the forward-compatible
+	// discipline Outcome/Rung/Commit already use.
+	Supersedes []int    `yaml:"supersedes,omitempty"`
+	Tags       []string `yaml:"tags,omitempty"`
+	Prev       string   `yaml:"prev"`
+	Hash       string   `yaml:"hash"`
 
 	Body string `yaml:"-"`
 }
@@ -59,19 +69,21 @@ type Event struct {
 // cannot hash itself) and TS pinned to a canonical RFC3339 UTC string, so the
 // canonical form is byte-stable across marshals.
 type hashable struct {
-	Seq       int      `yaml:"seq"`
-	Type      string   `yaml:"type"`
-	TS        string   `yaml:"ts"`
-	Actor     string   `yaml:"actor"`
-	Ticket    string   `yaml:"ticket"`
-	Attempt   string   `yaml:"attempt"`
-	Refs      []int    `yaml:"refs,omitempty"`
-	Artefacts []string `yaml:"artefacts,omitempty"`
-	Links     []Link   `yaml:"links,omitempty"`
-	Outcome   string   `yaml:"outcome,omitempty"`
-	Rung      string   `yaml:"rung,omitempty"`
-	Commit    string   `yaml:"commit,omitempty"`
-	Prev      string   `yaml:"prev"`
+	Seq        int      `yaml:"seq"`
+	Type       string   `yaml:"type"`
+	TS         string   `yaml:"ts"`
+	Actor      string   `yaml:"actor"`
+	Ticket     string   `yaml:"ticket"`
+	Attempt    string   `yaml:"attempt"`
+	Refs       []int    `yaml:"refs,omitempty"`
+	Artefacts  []string `yaml:"artefacts,omitempty"`
+	Links      []Link   `yaml:"links,omitempty"`
+	Outcome    string   `yaml:"outcome,omitempty"`
+	Rung       string   `yaml:"rung,omitempty"`
+	Commit     string   `yaml:"commit,omitempty"`
+	Supersedes []int    `yaml:"supersedes,omitempty"`
+	Tags       []string `yaml:"tags,omitempty"`
+	Prev       string   `yaml:"prev"`
 }
 
 // ComputeHash returns the sha256 (hex) over the event's canonical frontmatter
@@ -79,19 +91,21 @@ type hashable struct {
 // the body. Editing any field, the body, or prev changes the hash.
 func (e Event) ComputeHash() string {
 	h := hashable{
-		Seq:       e.Seq,
-		Type:      e.Type,
-		TS:        e.TS.UTC().Format(time.RFC3339),
-		Actor:     e.Actor,
-		Ticket:    e.Ticket,
-		Attempt:   e.Attempt,
-		Refs:      e.Refs,
-		Artefacts: e.Artefacts,
-		Links:     e.Links,
-		Outcome:   e.Outcome,
-		Rung:      e.Rung,
-		Commit:    e.Commit,
-		Prev:      e.Prev,
+		Seq:        e.Seq,
+		Type:       e.Type,
+		TS:         e.TS.UTC().Format(time.RFC3339),
+		Actor:      e.Actor,
+		Ticket:     e.Ticket,
+		Attempt:    e.Attempt,
+		Refs:       e.Refs,
+		Artefacts:  e.Artefacts,
+		Links:      e.Links,
+		Outcome:    e.Outcome,
+		Rung:       e.Rung,
+		Commit:     e.Commit,
+		Supersedes: e.Supersedes,
+		Tags:       e.Tags,
+		Prev:       e.Prev,
 	}
 	front, err := yaml.Marshal(h)
 	if err != nil {

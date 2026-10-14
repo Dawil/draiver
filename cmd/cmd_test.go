@@ -48,6 +48,8 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	logType = ""
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
 	logURLs, logLinks, reviewURLs, reviewLinks = nil, nil, nil, nil
+	logSupersedes, logTags = nil, nil
+	recallChain, recallType, recallGrep, recallAll, recallTags = 0, "", "", false, nil
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
 	newTool, newModel, newRepo, newBase = "", "", "", ""
 	dependsWants, dependsAfter, dependsRequires = nil, nil, nil

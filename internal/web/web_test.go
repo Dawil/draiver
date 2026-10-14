@@ -198,6 +198,52 @@ func TestAttemptDetailRendersSpecAndTimeline(t *testing.T) {
 	}
 }
 
+// TestDetailShowsSupersededAndTags is acceptance #6: a superseded fact renders
+// visibly demoted with a link to the event that retired it, and tags render as
+// chips — while a resolved escalation keeps its familiar "resolved by #N" affordance
+// (the fold is the single source of both demotions).
+func TestDetailShowsSupersededAndTags(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	const id, att = "SUP-1", "0001"
+	if err := root.EnsureAttemptDirs(id, att); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: "+id+"\ntitle: Sup\n---\n\n# Sup\n"), 0o644)
+	ticketlog.Append(root, id, att, event.Event{Type: "created", Actor: "a", Body: "start"})                                              // #1
+	ticketlog.Append(root, id, att, event.Event{Type: "gotcha", Actor: "a", Body: "keys only work in test mode", Tags: []string{"auth"}}) // #2
+	ticketlog.Append(root, id, att, event.Event{Type: "gotcha", Actor: "a", Body: "live keys 401 until verified", Supersedes: []int{2}})  // #3 retires #2
+	ticketlog.Append(root, id, att, event.Event{Type: "escalation", Actor: "a", Body: "which provider?"})                                 // #4
+	ticketlog.Append(root, id, att, event.Event{Type: "resolution", Actor: "a", Refs: []int{4}, Body: "use Auth0"})                       // #5 resolves #4
+
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := get(t, s.Handler(), "/ticket/"+id+"/"+att)
+	if rr.Code != 200 {
+		t.Fatalf("GET detail = %d", rr.Code)
+	}
+	body := rr.Body.String()
+
+	for _, want := range []string{
+		`data-testid="superseded-2"`, // #2 carries the demotion marker
+		`href="#event-3"`,            // ...linking to the event that retired it
+		`event-superseded`,           // ...and the card is dimmed/collapsed
+		`data-testid="event-tags-2"`, // #2's tag chips
+		`data-testid="tag-chip"`,     // a chip itself
+		"auth",                       // the tag value
+		`data-testid="resolved-4"`,   // the resolved escalation keeps its affordance
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail missing %q", want)
+		}
+	}
+	// A resolved escalation must NOT also render the generic superseded marker.
+	if strings.Contains(body, `data-testid="superseded-4"`) {
+		t.Errorf("resolved escalation #4 should use the resolved affordance, not a superseded marker")
+	}
+}
+
 // TestAttemptTabsStructure pins the drv-021 tabbed top card: an accessible
 // tablist/tab/tabpanel with Spec selected by default (roving tabindex), its panel
 // shown while the others are [hidden], the always-present Provenance and Cache tabs,
@@ -1147,6 +1193,69 @@ func TestComposeBoxAppendsTypedEntry(t *testing.T) {
 	}
 	if strings.Contains(out, "<html") {
 		t.Errorf("log-append response must be a fragment, not a full page")
+	}
+}
+
+// TestComposeBoxTagsAndSupersedes pins the optional drv-026 compose aids: the form
+// exposes a tags input and a supersedes field, and posting them plumbs opaque tags
+// and a supersedes edge onto the appended event (so the new entry retires the named
+// one from the live set). A bad supersedes seq is a 400, and nothing is written.
+func TestComposeBoxTagsAndSupersedes(t *testing.T) {
+	root := seedBoard(t)
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	// The optional inputs render on the detail page.
+	page := get(t, h, "/ticket/PROJ-3/0001").Body.String()
+	for _, want := range []string{`data-testid="compose-tags"`, `data-testid="compose-supersedes"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("compose form missing optional aid %q", want)
+		}
+	}
+
+	// Seed a fact (#2) to supersede.
+	ticketlog.Append(root, "PROJ-3", "0001", event.Event{Type: "gotcha", Actor: "a", Body: "stale fact"})
+
+	form := url.Values{
+		"type":       {"gotcha"},
+		"body":       {"the corrected fact"},
+		"tags":       {"auth, db"},
+		"supersedes": {"2"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-3/0001/log", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("POST log = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	events, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	last := events[len(events)-1]
+	if got := strings.Join(last.Tags, ","); got != "auth,db" {
+		t.Errorf("appended tags = %q, want auth,db", got)
+	}
+	if len(last.Supersedes) != 1 || last.Supersedes[0] != 2 {
+		t.Errorf("appended supersedes = %v, want [2]", last.Supersedes)
+	}
+
+	// A non-numeric supersedes is a 400 and writes nothing.
+	n := len(events)
+	bad := url.Values{"type": {"note"}, "body": {"x"}, "supersedes": {"notanum"}}
+	req2 := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-3/0001/log", strings.NewReader(bad.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.Header.Set("Origin", "http://"+req2.Host)
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != 400 {
+		t.Errorf("bad supersedes POST = %d, want 400", rr2.Code)
+	}
+	after, _ := ticketlog.Read(root, "PROJ-3", "0001")
+	if len(after) != n {
+		t.Errorf("a rejected compose must write nothing: %d -> %d", n, len(after))
 	}
 }
 

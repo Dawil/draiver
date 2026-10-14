@@ -10,7 +10,10 @@ import (
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
-func TestBuildIncludesSpecLogAndEscalationPairing(t *testing.T) {
+// The brief is now a progressive-reveal fold (drv-026): it indexes only live-fact
+// headlines and lists the open (live) escalations, and does NOT replay full bodies,
+// resolved escalations, or superseded history — those are pulled via `recall`.
+func TestBuildIndexesLiveFactsAndOpenEscalations(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	id := "PROJ-1"
 	const att = "0001"
@@ -22,14 +25,17 @@ func TestBuildIncludesSpecLogAndEscalationPairing(t *testing.T) {
 	for _, s := range []struct {
 		typ, body string
 		refs      []int
+		sup       []int
 	}{
-		{"created", "start", nil},
-		{"decision", "chose cobra over urfave", nil},
-		{"escalation", "which OAuth provider?", nil},
-		{"resolution", "use Auth0", []int{3}},
-		{"escalation", "prod secret location?", nil},
+		{"created", "start", nil, nil},
+		{"decision", "chose cobra over urfave", nil, nil},                                 // #2
+		{"escalation", "which OAuth provider?", nil, nil},                                 // #3
+		{"resolution", "use Auth0", []int{3}, nil},                                        // #4 — retires #3
+		{"escalation", "prod secret location?", nil, nil},                                 // #5 — open
+		{"gotcha", "test keys only work in test mode", nil, nil},                          // #6
+		{"gotcha", "actually live keys 401 until the account is verified", nil, []int{6}}, // #7 — supersedes #6
 	} {
-		if _, err := ticketlog.Append(root, id, att, event.Event{Type: s.typ, Actor: "a", Refs: s.refs, Body: s.body}); err != nil {
+		if _, err := ticketlog.Append(root, id, att, event.Event{Type: s.typ, Actor: "a", Refs: s.refs, Supersedes: s.sup, Body: s.body}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -39,19 +45,35 @@ func TestBuildIncludesSpecLogAndEscalationPairing(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Present: header, spec, the live-fact index (headlines), and the open escalation.
 	for _, want := range []string{
 		"BRIEF PROJ-1 / attempt 0001 — Wire auth",
 		"State: Needs me",
-		"Use OAuth.",                  // spec body, frontmatter stripped
-		"chose cobra over urfave",     // a decision event
-		"→ RESOLVED by #4",            // escalation #3 paired with resolution
-		"use Auth0",                   // resolution body inline
-		"→ UNRESOLVED",                // escalation #5 has no resolution
+		"Use OAuth.",               // spec body, frontmatter stripped
+		"## Current understanding", // the index section
+		"#2 decision — chose cobra over urfave",
+		"#5 escalation — prod secret location?", // open escalation is a live fact
+		"#7 gotcha — actually live keys 401 until the account is verified",
 		"Open escalations (need a human)",
 		"#5: prod secret location?",
+		"draiver recall", // the pull-on-demand hint
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("brief missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// Absent: resolved escalation #3 and the superseded gotcha #6 — both retired, so
+	// off the index and never replayed. (The resolution #4 is itself a live fact, so
+	// its "use Auth0" headline legitimately appears above.)
+	for _, gone := range []string{
+		"which OAuth provider?",            // #3 is retired by the resolution bridge
+		"test keys only work in test mode", // #6 superseded by #7
+		"#3 escalation",                    // retired facts are off the index
+		"#6 gotcha",
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("brief should not replay retired/superseded content %q\n---\n%s", gone, out)
 		}
 	}
 

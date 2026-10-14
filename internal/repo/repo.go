@@ -59,6 +59,24 @@ func (r *Repo) AppendAt(ticket, att string, e event.Event) (event.Event, error) 
 	if !r.root.AttemptExists(ticket, att) {
 		return event.Event{}, fmt.Errorf("attempt %s/%s not found", ticket, att)
 	}
+	// A supersedes edge must name an existing event on THIS attempt — else the fold
+	// (internal/kb) would carry a dangling retirement. The log read is paid only when
+	// the append actually carries a supersedes edge, mirroring the link-check guard.
+	if len(e.Supersedes) > 0 {
+		events, err := ticketlog.Read(r.root, ticket, att)
+		if err != nil {
+			return event.Event{}, err
+		}
+		exists := make(map[int]bool, len(events))
+		for _, ev := range events {
+			exists[ev.Seq] = true
+		}
+		for _, s := range e.Supersedes {
+			if !exists[s] {
+				return event.Event{}, fmt.Errorf("--supersedes %d: no such event on %s/%s", s, ticket, att)
+			}
+		}
+	}
 	if len(e.Links) > 0 {
 		cfg, err := config.Load("")
 		if err != nil {
