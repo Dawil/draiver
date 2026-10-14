@@ -485,6 +485,16 @@ body {
 .resolve-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .resolve-submit { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
 .resolve-submit:hover { border-color: var(--accent); color: var(--accent); }
+/* drv-028: second action on a context-window auto-stop escalation — clear it AND
+   bring the attempt back up on a clean context window. Styled as the primary
+   affordance (accent-tinted) since it is the common case for this escalation kind. */
+.restart-context-form { margin: 6px 0 0; }
+.restart-context-submit { background: color-mix(in srgb, var(--accent) 14%, var(--panel-2)); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line)); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
+.restart-context-submit:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); }
+/* The restart outcome banner (OOB-swapped), mirroring .git-result. */
+.restart-result { font-size: 13px; margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--ink); white-space: pre-wrap; }
+.restart-result-ok { border-color: color-mix(in srgb, var(--done) 55%, var(--line)); background: color-mix(in srgb, var(--done) 12%, transparent); }
+.restart-result-fail { border-color: var(--alert); background: var(--alert-bg); color: var(--ink); }
 .refs, .artefacts { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
 /* Review-link chips: an event's forge-neutral links, labelled by rel, rendered
    below the body. Each opens in a new tab; the scheme is re-checked at render

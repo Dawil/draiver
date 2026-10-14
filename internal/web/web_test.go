@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -1790,6 +1792,223 @@ func TestResolveCrossOriginRejected(t *testing.T) {
 	after, _ := ticketlog.Read(root, "ESC-1", "0001")
 	if len(after) != len(before) {
 		t.Errorf("cross-origin resolve must not append an event")
+	}
+}
+
+// --- drv-028: "Restart context window" on context-window auto-stop escalations ---
+
+// seedAutoStopEscalation builds an attempt whose open escalation is a context-window
+// auto-stop — i.e. it carries limit.TagContextAutoStop, exactly as the limit gate
+// records it. #1 created, #2 the tagged auto-stop escalation (left open).
+func seedAutoStopEscalation(t *testing.T) store.Root {
+	t.Helper()
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("ESC-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("ESC-1"), []byte("---\nid: ESC-1\ntitle: Ran away\n---\n\nspec"), 0o644)
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, "ESC-1", "0001", event.Event{
+		Type:  "escalation",
+		Actor: "agent:claude-code",
+		Body:  "Context-window auto-stop: the session's context fill reached 151,000 tokens…",
+		Tags:  []string{limit.TagContextAutoStop},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// newServerWithRestart builds a server over root with a restart stub that records
+// the (ticket, attempt) it was handed and returns stubErr, so a test can assert the
+// handler both resolves and triggers the restart — and how it reports a restart that
+// could not be scheduled.
+func newServerWithRestart(t *testing.T, root store.Root, stubErr error) (http.Handler, *[]string) {
+	t.Helper()
+	var calls []string
+	s, err := New(root, WithRestart(func(_ context.Context, ticket, att string) error {
+		calls = append(calls, ticket+"/"+att)
+		return stubErr
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.Handler(), &calls
+}
+
+// postRestartContext posts the restart-context form for one escalation, same-origin.
+func postRestartContext(t *testing.T, h http.Handler, id, att string, seq int) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{"seq": {strconv.Itoa(seq)}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/"+id+"/"+att+"/restart-context", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestRestartButtonRendersOnlyForAutoStop pins the render guard: the "Restart
+// context window" button shows on an OPEN context-window auto-stop escalation and is
+// absent on an ordinary escalation and on a resolved auto-stop one. The Resolve box
+// is untouched in every case (a human may still answer instead of restart).
+func TestRestartButtonRendersOnlyForAutoStop(t *testing.T) {
+	// Auto-stop escalation → both Resolve and Restart render.
+	auto := seedAutoStopEscalation(t)
+	h := newServerOver(t, auto)
+	page := get(t, h, "/ticket/ESC-1/0001").Body.String()
+	for _, want := range []string{
+		`data-testid="restart-context-form-2"`,
+		`data-testid="restart-context-submit-2"`,
+		"/ticket/ESC-1/0001/restart-context",
+		`data-testid="resolve-submit-2"`, // the plain Resolve stays alongside it
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("auto-stop escalation detail missing %q", want)
+		}
+	}
+
+	// Ordinary (untagged) escalation → Resolve only, no Restart.
+	ord := seedEscalation(t)
+	ho := newServerOver(t, ord)
+	po := get(t, ho, "/ticket/ESC-1/0001").Body.String()
+	if !strings.Contains(po, `data-testid="resolve-submit-2"`) {
+		t.Errorf("ordinary escalation should still render Resolve")
+	}
+	if strings.Contains(po, `data-testid="restart-context-submit-2"`) {
+		t.Errorf("ordinary escalation must NOT render the Restart button")
+	}
+
+	// Resolved auto-stop → neither box; the Restart button is gone.
+	if _, err := ticketlog.Append(auto, "ESC-1", "0001", event.Event{Type: "resolution", Actor: "human:d", Refs: []int{2}, Body: "handled"}); err != nil {
+		t.Fatal(err)
+	}
+	pr := get(t, h, "/ticket/ESC-1/0001").Body.String()
+	if strings.Contains(pr, `data-testid="restart-context-submit-2"`) {
+		t.Errorf("resolved auto-stop escalation must not render the Restart button")
+	}
+}
+
+// TestRestartContextResolvesAndRestarts pins the happy path: one POST resolves the
+// escalation (a resolution refing its seq, attempt leaves Stuck) AND triggers the
+// restart for this attempt, returning the attempt-live fragment plus an "ok" banner.
+func TestRestartContextResolvesAndRestarts(t *testing.T) {
+	root := seedAutoStopEscalation(t)
+	h, calls := newServerWithRestart(t, root, nil)
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.NeedsMe {
+		t.Fatalf("seed state = %q, want NeedsMe", got)
+	}
+
+	before, _ := ticketlog.Read(root, "ESC-1", "0001")
+	rr := postRestartContext(t, h, "ESC-1", "0001", 2)
+	if rr.Code != 200 {
+		t.Fatalf("POST restart-context = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+
+	// Durable half: exactly one resolution refing #2.
+	after, _ := ticketlog.Read(root, "ESC-1", "0001")
+	if len(after) != len(before)+1 {
+		t.Fatalf("expected one new event, got %d -> %d", len(before), len(after))
+	}
+	last := after[len(after)-1]
+	if last.Type != "resolution" || len(last.Refs) != 1 || last.Refs[0] != 2 {
+		t.Errorf("appended = {type:%q refs:%v}, want a resolution refing [2]", last.Type, last.Refs)
+	}
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.Running {
+		t.Errorf("after restart, state = %q, want Running (left Stuck)", got)
+	}
+
+	// Restart half: the stub was handed this attempt exactly once.
+	if len(*calls) != 1 || (*calls)[0] != "ESC-1/0001" {
+		t.Errorf("restart calls = %v, want one [ESC-1/0001]", *calls)
+	}
+
+	out := rr.Body.String()
+	for _, want := range []string{
+		"state-Running",               // badge leaves Stuck
+		`data-testid="resolved-2"`,    // escalation flips to resolved
+		`data-testid="restart-result"`, // the OOB outcome banner rode along
+		`data-kind="ok"`,              // ...reporting success
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("restart live fragment missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `data-testid="restart-context-form-2"`) {
+		t.Errorf("resolved escalation should no longer render the Restart button")
+	}
+	if strings.Contains(out, "<html") {
+		t.Errorf("restart response must be a fragment, not a full page")
+	}
+}
+
+// TestRestartContextResolvesEvenWhenRestartFails pins the drv-028 AC degraded path:
+// if the restart cannot be scheduled (no `ctl up`), the escalation is STILL resolved
+// durably and the UI reports the failure — the escalation is never left open.
+func TestRestartContextResolvesEvenWhenRestartFails(t *testing.T) {
+	root := seedAutoStopEscalation(t)
+	h, calls := newServerWithRestart(t, root, errors.New("no running `ctl up`"))
+
+	rr := postRestartContext(t, h, "ESC-1", "0001", 2)
+	if rr.Code != 200 {
+		t.Fatalf("POST restart-context = %d, want 200 (resolution still succeeds)\n%s", rr.Code, rr.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Errorf("restart should have been attempted once, got %d", len(*calls))
+	}
+	// Durable half landed despite the restart failure.
+	if got := stateOf(t, root, "ESC-1", "0001"); got != project.Running {
+		t.Errorf("state = %q, want Running — escalation must be resolved even on a failed restart", got)
+	}
+	out := rr.Body.String()
+	if !strings.Contains(out, `data-kind="fail"`) {
+		t.Errorf("a failed restart must report fail in the banner\n%s", out)
+	}
+	if !strings.Contains(out, `data-testid="resolved-2"`) {
+		t.Errorf("escalation must still show resolved on a failed restart\n%s", out)
+	}
+}
+
+// TestRestartContextRejectsNonAutoStop pins the route guard: posting the restart
+// route at an ordinary (untagged) escalation is a 400 and neither resolves nor
+// restarts — the button only serves the auto-stop kind.
+func TestRestartContextRejectsNonAutoStop(t *testing.T) {
+	root := seedEscalation(t) // #2 is an ordinary, untagged escalation
+	h, calls := newServerWithRestart(t, root, nil)
+
+	before, _ := ticketlog.Read(root, "ESC-1", "0001")
+	rr := postRestartContext(t, h, "ESC-1", "0001", 2)
+	if rr.Code < 400 || rr.Code >= 500 {
+		t.Errorf("restart on a non-auto-stop escalation = %d, want 4xx\n%s", rr.Code, rr.Body.String())
+	}
+	after, _ := ticketlog.Read(root, "ESC-1", "0001")
+	if len(after) != len(before) {
+		t.Errorf("a rejected restart must not append (resolve) anything (%d -> %d)", len(before), len(after))
+	}
+	if len(*calls) != 0 {
+		t.Errorf("a rejected restart must not trigger the restart, got %d calls", len(*calls))
+	}
+}
+
+// TestRestartContextCrossOriginRejected pins the CSRF guard on the restart write.
+func TestRestartContextCrossOriginRejected(t *testing.T) {
+	root := seedAutoStopEscalation(t)
+	h, calls := newServerWithRestart(t, root, nil)
+	before, _ := ticketlog.Read(root, "ESC-1", "0001")
+	form := url.Values{"seq": {"2"}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/ESC-1/0001/restart-context", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://evil.example")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("cross-origin restart = %d, want 403", rr.Code)
+	}
+	after, _ := ticketlog.Read(root, "ESC-1", "0001")
+	if len(after) != len(before) || len(*calls) != 0 {
+		t.Errorf("cross-origin restart must neither append nor restart")
 	}
 }
 

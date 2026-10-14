@@ -31,6 +31,13 @@ import (
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
+// TagContextAutoStop marks the escalation the limit gate records so a consumer
+// can recognize a context-window auto-stop without sniffing stopBody's prose (the
+// opaque, producer-owned Tags field, drv-026). The web board keys the "Restart
+// context window" affordance off this tag (drv-028); the fold and brief treat it
+// as any other retrieval label, so tagging is truth-neutral.
+const TagContextAutoStop = "context-auto-stop"
+
 // Gate enforces a context-window ceiling on one attempt's session. Construct it
 // with New. It appends the auto-stop escalation into ticket/attempt's log
 // (attributing it to actor) and reaps the session through halt.
@@ -97,6 +104,7 @@ func (g *Gate) Consider(ev agent.Event) (Outcome, error) {
 		Type:  "escalation",
 		Actor: g.actor,
 		Body:  stopBody(ctxTokens, g.threshold),
+		Tags:  []string{TagContextAutoStop},
 	}); err != nil {
 		return Ignored, fmt.Errorf("limit: record auto-stop for %s/%s: %w", g.ticket, g.attempt, err)
 	}

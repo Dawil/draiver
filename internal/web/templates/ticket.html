@@ -250,6 +250,11 @@
       </div>
       {{end}}
 
+      {{/* drv-028: the "Restart context window" button OOB-swaps its outcome here. It
+           lives outside the log-region so the 3s poll's innerHTML swap never clobbers
+           it; hidden until a restart post fills it. */}}
+      <div id="restart-result" class="restart-result" data-testid="restart-result" hidden></div>
+
       <div class="log-region" data-testid="log-region" data-order="newest"
         {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
         {{template "attempt-log" .}}
@@ -696,6 +701,24 @@
                   placeholder="Answer this escalation (markdown)…"></textarea>
                 <button type="submit" class="resolve-submit" data-testid="resolve-submit-{{.Seq}}">Resolve</button>
               </form>
+              {{if .ContextAutoStop}}
+              {{/* drv-028: a context-window auto-stop was not blocked on a human
+                   answer — it just filled its window. This second action clears the
+                   escalation AND brings the attempt back up on a clean context
+                   window (the `ctl restart --new-session` path), so the common case
+                   is one click instead of resolve-then-restart. It posts the same
+                   escalation seq to its own route; the response swaps the attempt-live
+                   fragment into the log region (like Resolve) plus an OOB banner
+                   reporting whether the restart was scheduled. Rendered only for this
+                   escalation kind (ContextAutoStop); absent on ordinary/permission and
+                   resolved escalations. */}}
+              <form class="restart-context-form" data-testid="restart-context-form-{{.Seq}}"
+                hx-post="/ticket/{{$.Attempt.Ticket}}/{{$.Attempt.ID}}/restart-context"
+                hx-target="[data-testid=log-region]" hx-swap="innerHTML">
+                <input type="hidden" name="seq" value="{{.Seq}}">
+                <button type="submit" class="restart-context-submit" data-testid="restart-context-submit-{{.Seq}}">Restart context window</button>
+              </form>
+              {{end}}
             {{end}}
           {{end}}
           {{if .Refs}}<p class="refs">refs: {{range .Refs}}#{{.}} {{end}}</p>{{end}}
@@ -712,6 +735,12 @@
      banner into a visible report. Plain CLI text, HTML-escaped by the template —
      never routed through markdown. */}}
 {{define "git-result"}}<div id="git-result" class="git-result git-result-{{.Kind}}" data-testid="git-result" data-kind="{{.Kind}}" role="status" hx-swap-oob="true">{{.Message}}</div>{{end}}
+
+{{/* restart-result carries the "Restart context window" outcome (drv-028) back onto
+     the page as an OOB swap paired with the attempt-live fragment: "ok" (resolved +
+     restart scheduled) or "fail" (resolved durably, restart could not be scheduled).
+     Plain text, HTML-escaped — never markdown. */}}
+{{define "restart-result"}}<div id="restart-result" class="restart-result restart-result-{{.Kind}}" data-testid="restart-result" data-kind="{{.Kind}}" role="status" hx-swap-oob="true">{{.Message}}</div>{{end}}
 
 {{/* review-env-panel (drv-020): the launch/teardown controls for a live, clickable
      instance of the feature under review. The panel is the outerHTML swap target for

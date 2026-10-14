@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/config"
+	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/web"
 )
 
@@ -38,7 +40,31 @@ var webuiCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		srv, err := web.New(root, web.WithActor(webuiActor()), web.WithSupervisionDefault(cfg.DefaultSupervision))
+		// The board's "Restart context window" button (drv-028) reaps the attempt's
+		// session and hands it back to a running `ctl up` on a clean context window —
+		// the `ctl restart --new-session` path. The web package can't build a
+		// reconciler, so inject a client one here. Only the client Restart verb is
+		// exercised (reap + flush-session + hand-off to the daemon): the daemon brings
+		// the attempt up with its own config, so BaseSpec/model are irrelevant and a
+		// minimal Root/Adapters/Actor reconciler suffices. With no `ctl up` running,
+		// Restart returns reconcile.ErrNoController and the handler reports it.
+		rec, err := reconcile.New(reconcile.Options{
+			Root:     root,
+			Adapters: claudeAdapters,
+			Actor:    webuiActor(),
+		})
+		if err != nil {
+			return err
+		}
+		restart := func(ctx context.Context, ticket, att string) error {
+			_, err := rec.Restart(ctx, ticket, att, reconcile.FlushSession)
+			return err
+		}
+		srv, err := web.New(root,
+			web.WithActor(webuiActor()),
+			web.WithSupervisionDefault(cfg.DefaultSupervision),
+			web.WithRestart(restart),
+		)
 		if err != nil {
 			return err
 		}

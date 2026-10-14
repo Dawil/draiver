@@ -1,6 +1,7 @@
 package limit_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,6 +77,12 @@ func TestCrossingThresholdStopsAndEscalates(t *testing.T) {
 	}
 	if !strings.Contains(open[0].Body, "151,000") || !strings.Contains(open[0].Body, "150,000") {
 		t.Errorf("escalation body missing the numbers: %q", open[0].Body)
+	}
+	// drv-028: the escalation must self-identify as an auto-stop via the opaque tag,
+	// so a consumer (the board's "Restart context window" button) can recognize it
+	// without sniffing the body prose.
+	if !slices.Contains(open[0].Tags, limit.TagContextAutoStop) {
+		t.Errorf("auto-stop escalation missing %q tag: tags=%v", limit.TagContextAutoStop, open[0].Tags)
 	}
 }
 
