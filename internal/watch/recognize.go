@@ -192,6 +192,18 @@ func (r ProtocolRecognizer) fromArgs(args []string) (Promotion, bool) {
 			// the same as a human-invoked one.
 			p.Body = "Agent claims the ticket is complete; ready for review."
 		}
+	case "park":
+		// Promote the suspend hand-off so it lands in the supervised log (drvctl-052).
+		// The recognizer cannot re-derive the CLI's wake-source record, so it carries
+		// only the agent's optional reason; the completion gate is the authority on
+		// whether a park is a legitimate hand-off (it accepts one only when a wake
+		// source is present), so promoting a park with no reason text is harmless.
+		p.Type = "park"
+		if len(pos) >= 2 {
+			p.Body = pos[1]
+		} else {
+			p.Body = "Parked: suspending to Pending until a wake source fires."
+		}
 	default:
 		return Promotion{}, false
 	}

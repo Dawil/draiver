@@ -2,6 +2,7 @@ package completion_test
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -31,6 +32,25 @@ func newFixture(t *testing.T) (store.Root, string, string) {
 }
 
 func success() agent.Event { return agent.Event{Kind: agent.EventTurnEnd, Turn: "success"} }
+
+// makeParkable turns the fixture ticket into a `wants:` coordinator with a child
+// still in flight, so wake.Pending reports a source — the condition under which
+// the gate accepts a `park` as a hand-off and suspends (rather than escalates) an
+// unmet turn. It writes the parent's spec frontmatter and creates a not-Done child
+// attempt.
+func makeParkable(t *testing.T, root store.Root, ticket string) {
+	t.Helper()
+	fm := "---\nid: " + ticket + "\nwants: [CHILD-1]\n---\n\nbody\n"
+	if err := os.WriteFile(root.SpecPath(ticket), []byte(fm), 0o644); err != nil {
+		t.Fatalf("write parent spec: %v", err)
+	}
+	if err := root.EnsureTicketDir("CHILD-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attempt.Create(root, "CHILD-1", attempt.New{Tool: "claude-code", Model: "opus-4.8", Repo: "/repo", Actor: "human:x"}); err != nil {
+		t.Fatalf("create child attempt: %v", err)
+	}
+}
 
 // recorder captures the nudge prompts a gate sends.
 type recorder struct{ prompts []string }
@@ -174,5 +194,95 @@ func TestLatchesAfterEscalating(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("escalations recorded = %d, want exactly 1", n)
+	}
+}
+
+// TestParkableSuspendsInsteadOfEscalating is drvctl-052 AC2: a parkable attempt (a
+// `wants:` coordinator with a child still in flight — e.g. one that delegated via
+// `resolve --by` and then stopped) that ends a success turn without a hand-off is
+// nudged once, then SUSPENDED (Parked), never escalated. No escalation lands on its
+// own log, its state stays Running (the read-time projection drops it to Pending
+// once reaped), and the session is not halted at the gate.
+func TestParkableSuspendsInsteadOfEscalating(t *testing.T) {
+	ctx := context.Background()
+	root, ticket, att := newFixture(t)
+	makeParkable(t, root, ticket)
+	rec := &recorder{}
+	var halted bool
+	g, err := completion.New(root, ticket, att, "agent:claude-code", rec.prompt, func() error { halted = true; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First unmet success → nudge; the parkable nudge offers `park` as the stop.
+	if out, err := g.Consider(ctx, success()); err != nil || out != completion.Nudged {
+		t.Fatalf("first success: out=%v err=%v, want Nudged/nil", out, err)
+	}
+	if len(rec.prompts) != 1 || !strings.Contains(rec.prompts[0], "park") {
+		t.Fatalf("parkable nudge must offer park: %v", rec.prompts)
+	}
+
+	// Second unmet success → Parked, not Escalated. No halt, no escalation on disk.
+	if out, err := g.Consider(ctx, success()); err != nil || out != completion.Parked {
+		t.Fatalf("second success: out=%v err=%v, want Parked/nil (suspend, not escalate)", out, err)
+	}
+	if halted {
+		t.Fatal("a park suspension must not reap the session at the gate — the coordinator gate retires it")
+	}
+	events, err := ticketlog.Read(root, ticket, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, open := project.Derive(events)
+	if st == project.NeedsMe || len(open) != 0 {
+		t.Fatalf("parkable suspend must not manufacture an escalation: state=%v open=%+v", st, open)
+	}
+
+	// Latched: a later success frame is a no-op (no second decision stacked).
+	if out, _ := g.Consider(ctx, success()); out != completion.Ignored {
+		t.Fatalf("third success out=%v, want Ignored (latched after Parked)", out)
+	}
+}
+
+// TestParkCountsAsHandoffWhenParkable is drvctl-052 AC1 on the gate side: a durable
+// `park` newer than the baseline meets the hand-off obligation when the attempt is
+// parkable, so the success turn is Ignored — no nudge, no escalation.
+func TestParkCountsAsHandoffWhenParkable(t *testing.T) {
+	ctx := context.Background()
+	root, ticket, att := newFixture(t)
+	makeParkable(t, root, ticket)
+	rec := &recorder{}
+	g, err := completion.New(root, ticket, att, "agent:claude-code", rec.prompt, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, ticket, att, event.Event{Type: "park", Actor: "agent:x", Body: "delegated; nothing needs me"}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := g.Consider(ctx, success()); err != nil || out != completion.Ignored {
+		t.Fatalf("success after a parkable park: out=%v err=%v, want Ignored/nil", out, err)
+	}
+	if len(rec.prompts) != 0 {
+		t.Fatalf("a legitimate park is a hand-off — must not nudge: %v", rec.prompts)
+	}
+}
+
+// TestParkIsNotHandoffWithoutWakeSource is the guard on the other side: a `park`
+// filed by an attempt with NO wake source (a leaf) would sleep forever, so it is
+// not a legitimate hand-off. The gate ignores it and still nudges the unmet turn —
+// so a stray park cannot silently strand a leaf in Running + enabled.
+func TestParkIsNotHandoffWithoutWakeSource(t *testing.T) {
+	ctx := context.Background()
+	root, ticket, att := newFixture(t) // a leaf: no wants: edges, not parkable
+	rec := &recorder{}
+	g, err := completion.New(root, ticket, att, "agent:claude-code", rec.prompt, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticketlog.Append(root, ticket, att, event.Event{Type: "park", Actor: "agent:x", Body: "stray park"}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := g.Consider(ctx, success()); err != nil || out != completion.Nudged {
+		t.Fatalf("park with no wake source must not satisfy: out=%v err=%v, want Nudged/nil", out, err)
 	}
 }
