@@ -31,10 +31,12 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +53,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/land"
+	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
@@ -109,6 +112,17 @@ type Server struct {
 	// deterministic stub so the handler's outcome-mapping and report refresh can be
 	// exercised without a real repo, exactly as they do for alive/pyramidGit.
 	rerun func(ctx context.Context, a project.Attempt) (bddexec.Outcome, error)
+	// restart reaps the attempt's live session and hands it back to a running
+	// `ctl up` to bring up on a clean context window, cold-starting from brief — the
+	// `ctl restart --new-session` path (FlushSession). It backs the board's "Restart
+	// context window" button on a context-window auto-stop escalation (drv-028). The
+	// web package stays free of a reconcile dependency: the real implementation is
+	// injected from cmd/webui.go (WithRestart), which can build a client reconciler;
+	// a nil field means no controller was wired, so the handler reports the restart
+	// could not be scheduled while the resolution it already wrote stays durable. A
+	// non-nil error (e.g. reconcile.ErrNoController when no `ctl up` is running) is
+	// surfaced verbatim in the restart-result banner.
+	restart func(ctx context.Context, ticket, att string) error
 }
 
 // Option configures a Server at construction. It keeps New's zero-config form
@@ -137,6 +151,20 @@ func WithSupervisionDefault(mode string) Option {
 	return func(s *Server) {
 		if m, err := project.ParseSupervision(mode); err == nil {
 			s.supDefault = m
+		}
+	}
+}
+
+// WithRestart injects the attempt-restart implementation the "Restart context
+// window" button drives (drv-028). The web package cannot build a reconciler
+// without pulling in the daemon's wiring, so cmd/webui.go — which can — passes a
+// closure over a client reconciler's Restart(FlushSession). An unset restart (the
+// zero-config New) leaves the handler reporting "restart unavailable"; the
+// resolution it writes first is unaffected.
+func WithRestart(fn func(ctx context.Context, ticket, att string) error) Option {
+	return func(s *Server) {
+		if fn != nil {
+			s.restart = fn
 		}
 	}
 }
@@ -448,6 +476,13 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	s.rerun = func(ctx context.Context, a project.Attempt) (bddexec.Outcome, error) {
 		return bddexec.Rerun(ctx, s.root, a.Repo, a.Ticket, a.ID)
 	}
+	// Default restart to "unavailable": the web package cannot build a reconciler, so
+	// the real path is injected by cmd/webui.go (WithRestart). Left unset, the handler
+	// still resolves the escalation durably and reports the restart could not be
+	// scheduled — the same degraded behaviour as a missing `ctl up`.
+	s.restart = func(ctx context.Context, ticket, att string) error {
+		return errRestartUnavailable
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -517,6 +552,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/report/rerun", s.handleReportRerun)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/log", s.handleLogAppend)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/resolve", s.handleResolve)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/restart-context", s.handleRestartContext)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/push", s.handleGitPush)
@@ -625,6 +661,11 @@ type eventVM struct {
 	IsEsc      bool
 	Resolved   bool
 	ResolvedBy int
+	// ContextAutoStop marks an OPEN escalation recorded by the context-window limit
+	// gate (it carries limit.TagContextAutoStop, drv-028). The template keys the extra
+	// "Restart context window" button off it, so the affordance shows only on this one
+	// escalation kind and never on an ordinary/permission escalation or a resolved one.
+	ContextAutoStop bool
 	// Superseded marks a retired (non-live) non-escalation fact; SupersededBy is the
 	// seq of the event that retired it. A resolved escalation uses Resolved/ResolvedBy
 	// instead, so the two are mutually exclusive on any one event.
@@ -1266,6 +1307,12 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 		}
 		if e.Type == "escalation" {
 			ev.IsEsc = true
+			// An OPEN auto-stop escalation (tagged by the limit gate) earns the extra
+			// restart affordance; a resolved one falls through to the plain "resolved by
+			// #N" note like any other escalation.
+			if !ev.Resolved && slices.Contains(e.Tags, limit.TagContextAutoStop) {
+				ev.ContextAutoStop = true
+			}
 		}
 		vm.Events = append(vm.Events, ev)
 	}
@@ -2042,6 +2089,133 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(live)
+}
+
+// errRestartUnavailable is the default restart outcome when no implementation was
+// injected (WithRestart) — the board was built without a controller to hand off
+// to. It reads like the no-daemon case because the human-facing effect is the
+// same: the escalation is resolved, but the attempt was not brought back up.
+var errRestartUnavailable = errors.New("restart unavailable: no running `ctl up` to bring the attempt back up")
+
+// restartAnswer is the resolution body the "Restart context window" button writes.
+// The resolve path requires a non-empty answer; this records *why* the escalation
+// was cleared so the log reads as a deliberate operator action, not an empty ack.
+const restartAnswer = "Cleared via **Restart context window** — resuming the attempt on a clean context window (cold-start brief)."
+
+// restartResultVM drives the "restart-result" banner the restart handler OOB-swaps
+// alongside the attempt-live fragment (drv-028), mirroring gitResultVM. Kind —
+// "ok" (resolved and restart scheduled) or "fail" (resolved durably, but the
+// restart could not be scheduled) — styles the banner; Message is plain text,
+// HTML-escaped by the template.
+type restartResultVM struct {
+	Kind    string
+	Message string
+}
+
+// handleRestartContext backs the board's "Restart context window" button on a
+// context-window auto-stop escalation (drv-028). It is modelled on handleResolve:
+// same-origin guard, attempt-exists check, and the open-escalation validation of
+// classifyResolveTarget — plus the one extra guard that the target actually carries
+// limit.TagContextAutoStop, since the button only renders for that escalation kind.
+// It resolves the escalation first (the durable half, via the same gateway Resolve
+// handleResolve uses) and only then restarts the attempt on a clean context window.
+// A failed restart does NOT reopen the escalation — resolution has already landed —
+// it is reported in the OOB restart-result banner, mirroring how the limit gate
+// writes the escalation before it halts. The primary swap is the attempt-live
+// fragment into [data-testid=log-region], exactly as handleResolve returns.
+func (s *Server) handleRestartContext(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	seq, err := strconv.Atoi(strings.TrimSpace(r.FormValue("seq")))
+	if err != nil {
+		http.Error(w, "draiver: escalation seq must be an integer", http.StatusBadRequest)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// The seq must name an open escalation on THIS attempt (same guard as resolve)...
+	if ok, status, msg := classifyResolveTarget(a, seq); !ok {
+		http.Error(w, "draiver: "+msg, status)
+		return
+	}
+	// ...and it must be a context-window auto-stop (the only kind this button serves).
+	// The button never renders elsewhere; this rejects a forged/misrouted post.
+	if !isContextAutoStop(a, seq) {
+		http.Error(w, fmt.Sprintf("draiver: escalation #%d on %s/%s is not a context-window auto-stop", seq, id, att), http.StatusBadRequest)
+		return
+	}
+	// Resolve first: this is the durable half. Even if the restart cannot be
+	// scheduled, the escalation must not be left open (AC).
+	if _, err := s.gw.Resolve(id, att, seq, restartAnswer); err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Now restart on a clean window. A failure here is an expected outcome (no
+	// `ctl up`), not a server fault: report it in the banner, do not 500 and do not
+	// reopen the already-resolved escalation.
+	result := restartResultVM{Kind: "ok", Message: "Restarting the attempt on a clean context window — cold-starting from brief. Watch it come back up on the board."}
+	if err := s.restart(r.Context(), id, att); err != nil {
+		result = restartResultVM{Kind: "fail", Message: "Resolved, but the restart could not be scheduled — " + cleanRestartErr(err)}
+	}
+	vm, err := s.detail(id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	live, err := s.executeLive(vm)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	banner, err := s.renderFragment("restart-result", result)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(live)
+	w.Write(banner)
+}
+
+// cleanRestartErr renders a restart error for the failure banner, trimming the
+// internal "reconcile: " plumbing prefix so the message leads with the cause.
+func cleanRestartErr(err error) string {
+	return strings.TrimPrefix(err.Error(), "reconcile: ")
+}
+
+// isContextAutoStop reports whether seq names an escalation on a carrying the
+// limit gate's context-auto-stop tag — the one escalation kind the restart button
+// serves. It reads the same durable tags the view model keys ContextAutoStop off.
+func isContextAutoStop(a project.Attempt, seq int) bool {
+	for i := range a.Events {
+		if a.Events[i].Seq == seq {
+			return a.Events[i].Type == "escalation" && slices.Contains(a.Events[i].Tags, limit.TagContextAutoStop)
+		}
+	}
+	return false
+}
+
+// renderFragment executes a named template into a byte slice (the OOB banner the
+// restart handler appends after the attempt-live fragment), so one response body
+// carries both swaps — mirroring how the git verbs pair the live fragment with the
+// git-result banner.
+func (s *Server) renderFragment(name string, data any) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := s.tmpl.ExecuteTemplate(&buf, name, data); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // classifyResolveTarget validates a posted seq against the derived attempt before
