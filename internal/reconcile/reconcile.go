@@ -817,8 +817,14 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 	} else if out == completion.Escalated {
 		r.opt.Logf("reconcile: completion auto-stop %s/%s: success turn with no review/escalation filed", key.Ticket, key.Attempt)
 		return
+	} else if out == completion.Parked {
+		// A stopping, still-wakeable attempt (a `wants:` coordinator that delegated and
+		// stopped) is suspending, not stalling: the gate declined to escalate. No reap
+		// here — the coordinator gate (+ reverse-`wants:` withdrawal) trims it from the
+		// desired set on the next tick and retires it to Pending (drvctl-052).
+		r.opt.Logf("reconcile: completion suspend %s/%s: success turn with no hand-off but a wake source present — Pending, not escalated", key.Ticket, key.Attempt)
 	} else if out == completion.Nudged {
-		r.opt.Logf("reconcile: completion nudge %s/%s: reminded to claim review or escalate", key.Ticket, key.Attempt)
+		r.opt.Logf("reconcile: completion nudge %s/%s: reminded to claim review, park, or escalate", key.Ticket, key.Attempt)
 	}
 
 	if ev.Kind != agent.EventPermission {

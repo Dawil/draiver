@@ -15,15 +15,27 @@
 // on, the gate reads a log that already reflects a genuine hand-off — it never
 // races the agent's own filing.
 //
+// `park` is the third legitimate hand-off (drvctl-052): a turn-end that suspends
+// the attempt to Pending with no human-facing escalation. The gate accepts a
+// `park` exactly when the attempt still has a pending wake source
+// (internal/wake) — a parkable state is also what lets the gate *suspend rather
+// than escalate* a stopping coordinator that delegated to a child via
+// `resolve --by` (which writes the child's log, not its own). Without a wake
+// source a park would sleep forever, so it is not accepted and the gate falls
+// through to the nudge/escalate path.
+//
 // It escalates in two bounded steps so it cannot loop:
 //
 //   - First unmet success turn: inject a one-shot nudge prompt telling the agent
-//     to claim `review` or `escalate`. That nudge is itself a user turn, so the
-//     agent runs again; if it files, the next turn's obligation is met and the
-//     gate goes quiet.
-//   - A subsequent unmet success turn (the nudge went unheeded): append a durable
+//     to claim `review`, `park`, or `escalate`. That nudge is itself a user turn,
+//     so the agent runs again; if it files, the next turn's obligation is met and
+//     the gate goes quiet.
+//   - A subsequent unmet success turn (the nudge went unheeded): if the attempt is
+//     parkable (a wake source exists) the gate SUSPENDS it — no escalation, the
+//     wake machinery reaps it to Pending — because a stopping, still-wakeable
+//     attempt is not a stall on the human's desk. Otherwise it appends a durable
 //     `escalation` — which flips the attempt to Needs-me so the daemon parks it —
-//     and halt the session, so a stalled "done without handoff" lands on the board
+//     and halts the session, so a stalled "done without handoff" lands on the board
 //     for a human instead of idling. The gate then latches.
 //
 // A Gate drives one attempt's session and is not safe for concurrent use: call
@@ -39,6 +51,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/wake"
 )
 
 // defaultMaxNudges is how many times the gate nudges an unmet success turn before
@@ -104,12 +117,20 @@ const (
 	// already met (a review/escalation is on disk). The gate did nothing.
 	Ignored Outcome = iota
 	// Nudged: a successful turn ended with nothing filed; the gate injected the
-	// reminder prompt telling the agent to claim review or escalate.
+	// reminder prompt telling the agent to claim review, park, or escalate.
 	Nudged
 	// Escalated: a successful turn ended with nothing filed after the nudge was
-	// exhausted; the gate recorded a human-facing escalation and (if halt was set)
-	// reaped the session. The gate then latches.
+	// exhausted and the attempt had no wake source; the gate recorded a human-facing
+	// escalation and (if halt was set) reaped the session. The gate then latches.
 	Escalated
+	// Parked: a successful turn ended without a hand-off after the nudge was
+	// exhausted, but the attempt still has a pending wake source (internal/wake), so
+	// it is in a legitimate suspend state rather than a stall. The gate declined to
+	// manufacture a human escalation — the wake machinery (the coordinator gate in
+	// drvctl-052, the async waker in drvctl-055) reaps it to Pending — and latches.
+	// An explicit `draiver park` hand-off is Ignored (quiet, like review/escalate);
+	// Parked is only the gate's own suppression of an otherwise-manufactured escalation.
+	Parked
 )
 
 // Consider inspects one normalized event. Only a turn ending in success is acted
@@ -124,7 +145,15 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 		return Ignored, nil
 	}
 
-	met, err := g.handedOff()
+	// A pending wake source makes this a parkable suspend point: a `park` counts as a
+	// hand-off, and an unmet turn is suspended (Parked) rather than escalated onto a
+	// human. Read it once per considered turn-end.
+	parkable, err := g.parkable()
+	if err != nil {
+		return Ignored, fmt.Errorf("completion: check wake source for %s/%s: %w", g.ticket, g.attempt, err)
+	}
+
+	met, err := g.handedOff(parkable)
 	if err != nil {
 		return Ignored, fmt.Errorf("completion: check hand-off for %s/%s: %w", g.ticket, g.attempt, err)
 	}
@@ -132,17 +161,27 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 		return Ignored, nil
 	}
 
-	// A nil nudger has nothing to deliver, so skip straight to escalation rather
-	// than burn a silent nudge budget.
+	// A nil nudger has nothing to deliver, so skip straight to the escalate/suspend
+	// decision rather than burn a silent nudge budget.
 	if g.nudge != nil && g.nudges < g.maxNudges {
 		g.nudges++
-		if err := g.nudge(ctx, nudgeMessage(g.ticket)); err != nil {
+		if err := g.nudge(ctx, nudgeMessage(g.ticket, parkable)); err != nil {
 			return Ignored, fmt.Errorf("completion: nudge %s/%s: %w", g.ticket, g.attempt, err)
 		}
 		return Nudged, nil
 	}
 
-	// The nudge went unheeded; hand the stall to a human. Latch first so even a
+	// The nudge went unheeded. A still-wakeable attempt that stopped is suspending,
+	// not stalling: do not manufacture a human escalation (that is the pre-digest
+	// net-negative bug — a coordinator that delegated via `resolve --by` and stopped
+	// escalated onto its own ticket). The wake machinery reaps it to Pending. Latch
+	// so later frames settle on the one decision.
+	if parkable {
+		g.fired = true
+		return Parked, nil
+	}
+
+	// The nudge went unheeded and nothing can wake it; hand the stall to a human. Latch first so even a
 	// failing append or halt cannot re-enter and stack a second escalation on the
 	// next frame.
 	g.fired = true
@@ -163,30 +202,57 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 	return Escalated, nil
 }
 
-// handedOff reports whether a review or escalation newer than the session
-// baseline is on disk — the durable proof the session met its hand-off
-// obligation. It reads the same log tail the protocol gate reads, so a hand-off
-// the recognizer just promoted off the stream is seen immediately.
-func (g *Gate) handedOff() (bool, error) {
+// handedOff reports whether a hand-off newer than the session baseline is on disk
+// — the durable proof the session met its obligation. A `review` or `escalation`
+// always counts; a `park` counts only when parkable, because a park with no wake
+// source would sleep forever and so is not a legitimate suspend (it falls through
+// to the nudge/escalate path). It reads the same log tail the protocol gate reads,
+// so a hand-off the recognizer just promoted off the stream is seen immediately.
+func (g *Gate) handedOff(parkable bool) (bool, error) {
 	events, err := ticketlog.Read(g.root, g.ticket, g.attempt)
 	if err != nil {
 		return false, err
 	}
+	sawPark := false
 	for _, e := range events {
 		if e.Seq <= g.baseline {
 			continue
 		}
-		if e.Type == "review" || e.Type == "escalation" {
+		switch e.Type {
+		case "review", "escalation":
 			return true, nil
+		case "park":
+			sawPark = true
 		}
 	}
-	return false, nil
+	return sawPark && parkable, nil
+}
+
+// parkable reports whether the attempt currently has a pending wake source — the
+// condition under which the gate treats a `park` as a hand-off and suspends
+// (rather than escalates) an unmet turn. It reads the live edges/log each time,
+// so a child reaching Done mid-session (which removes the coordinator's wake
+// source) is seen on the next considered turn-end.
+func (g *Gate) parkable() (bool, error) {
+	sources, err := wake.Pending(g.root, g.ticket, g.attempt)
+	if err != nil {
+		return false, err
+	}
+	return len(sources) > 0, nil
 }
 
 // nudgeMessage is the one-shot reminder a session that stopped without handing off
 // receives. It names the exact commands so the agent can meet the obligation in
-// one step, mirroring the withhold nudge's shape.
-func nudgeMessage(ticket string) string {
+// one step, mirroring the withhold nudge's shape. When the attempt is parkable (a
+// wake source exists) it offers `park` as the stop option alongside escalate,
+// because a coordinator mid-epic must not claim its own review.
+func nudgeMessage(ticket string, parkable bool) string {
+	if parkable {
+		return fmt.Sprintf(
+			"Your turn ended at success, but no `review`, `park`, or `escalation` has been filed for this attempt — a supervised session must hand off before it stops. If nothing needs you right now and a wake source will bring you back (a child's lifecycle, or an async job), run `draiver park %s` to suspend to Pending. If you are blocked or need a human decision, run `draiver escalate %s \"…\"`. Do one now.",
+			ticket, ticket,
+		)
+	}
 	return fmt.Sprintf(
 		"Your turn ended at success, but no `review` or `escalation` has been filed for this attempt — a supervised session must hand off before it stops. If the work is complete, run `draiver review %s` to claim it for review. If you are blocked or need a human decision, run `draiver escalate %s \"…\"`. Do one now.",
 		ticket, ticket,
