@@ -3,13 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
-	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
 )
@@ -31,10 +32,10 @@ var reviewCmd = &cobra.Command{
 		"use it; with several, push to the config's primary_remote. Prefer a compare\n" +
 		"URL (--link compare=<base>/compare/<main>...<branch>) when there is no PR.\n" +
 		"\n" +
-		"If the attempt's repo declares a .test-pyramid.yaml, review is gated: the\n" +
-		"target (top) rung must be logged green at the current HEAD before a claim is\n" +
-		"admitted. Climb it with `draiver test --log`. A repo with no pyramid is not\n" +
-		"gated.",
+		"If the attempt's repo declares a .test-pyramid.yaml, review is gated: every\n" +
+		"rung marked `required` (the default) must be logged green at the current HEAD\n" +
+		"before a claim is admitted — advisory rungs (required: false) never block.\n" +
+		"Climb with `draiver test --log`. A repo with no pyramid is not gated.",
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
@@ -76,17 +77,17 @@ var reviewCmd = &cobra.Command{
 	},
 }
 
-// reviewGate refuses a claim whose attempt has not climbed its pyramid's target
-// rung at the current HEAD. It is the read-only twin of merge's clean-checkout
-// gate: it resolves the attempt's checkout attempt-addressed (via the worktree
-// Manager, from the recorded repo) and folds the attempt's log — never cutting a
-// worktree, never touching cwd, because review is TICKET-addressed and may be run
-// from anywhere.
+// reviewGate refuses a claim whose attempt has not logged every *required* rung of
+// its pyramid green at the current HEAD (drv-025). It is the read-only twin of
+// merge's clean-checkout gate: it resolves the attempt's checkout attempt-addressed
+// (via the worktree Manager, from the recorded repo) and folds the attempt's log —
+// never cutting a worktree, never touching cwd, because review is TICKET-addressed
+// and may be run from anywhere.
 //
 // It is deliberately permissive about *whether there is anything to gate* — an
 // attempt with no recorded repo, no live checkout, or no .test-pyramid.yaml is
 // simply not gated (a pass, not a failure). It refuses only when a pyramid exists
-// and the log proves the target rung is not green at HEAD.
+// and the log proves some required rung is not green at HEAD.
 func reviewGate(ctx context.Context, root store.Root, ticket, att string) error {
 	a, err := project.LoadAttempt(root, ticket, att)
 	if err != nil {
@@ -129,8 +130,8 @@ func reviewGate(ctx context.Context, root store.Root, ticket, att string) error 
 	}
 
 	// Map the attempt's test-result events onto the pyramid's neutral Result pair;
-	// only green results are logged (drvctl-048), so the fold is "highest logged
-	// rung at HEAD" with no failing state to reconcile.
+	// only green results are logged (drvctl-048), so the fold has no failing state to
+	// reconcile.
 	var results []pyramid.Result
 	for _, e := range a.Events {
 		if e.Type == "test-result" {
@@ -138,30 +139,35 @@ func reviewGate(ctx context.Context, root store.Root, ticket, att string) error 
 		}
 	}
 
-	// The target rung: the file's top rung, floored up by the repo's configured
-	// default_test_rung (drv-011) if it names a higher one. The floor can only ever
-	// raise the bar, never lower it, so a repo setting tightens a review but can't
-	// weaken the file author's. Resolved best-effort through the gateway — a missing
-	// or unreadable config leaves the file's top rung as the gate, never failing the
-	// claim on a config error.
-	repoRung := ""
-	if rs, rerr := repo.New(root, resolveActor()).RepoSettings(a.Repo); rerr == nil {
-		repoRung = rs.TestRung
-	}
-	target := p.FloorTarget(repoRung)
-	highest, ok := p.HighestAtHEAD(results, head)
-	if ok && highest.Name == target.Name {
-		// The target rung is green at this exact HEAD — the claim is admitted.
+	// The gate folds over the required SET, not a single top rung (drv-025): every
+	// rung marked `required: true` (the default) must be logged green at this exact
+	// HEAD. The per-repo default_test_rung no longer floors the gate — it is now only
+	// the `draiver test` iteration ceiling — so the file's `required` flags are the
+	// sole authority on what the spine requires. Stale results (logged before a later
+	// commit) still do not count.
+	satisfied, outstanding := p.RequiredStatus(results, head)
+	if len(outstanding) == 0 {
+		// Every required rung is green at this exact HEAD — the claim is admitted.
 		return nil
 	}
 
-	have := "no rung is green at HEAD"
-	if ok {
-		have = fmt.Sprintf("the highest green rung at HEAD is %q", highest.Name)
+	have := "no required rung is green at HEAD"
+	if len(satisfied) > 0 {
+		have = fmt.Sprintf("required rung(s) green at HEAD: %s", quotedRungNames(satisfied))
 	}
 	return fmt.Errorf(
-		"review refused: target rung %q of %s is not green at HEAD %s (%s) — climb it with `draiver test --log`, then claim review; a result logged before a later commit is stale and does not count",
-		target.Name, pyramid.FileName, shortSHA(head), have)
+		"review refused: required rung(s) %s of %s not green at HEAD %s (%s) — climb with `draiver test --log`, then claim review; a result logged before a later commit is stale and does not count",
+		quotedRungNames(outstanding), pyramid.FileName, shortSHA(head), have)
+}
+
+// quotedRungNames renders a list of levels as their quoted names, for a gate
+// refusal that names exactly which required rungs are outstanding (or satisfied).
+func quotedRungNames(levels []pyramid.Level) string {
+	names := make([]string, len(levels))
+	for i, lv := range levels {
+		names[i] = strconv.Quote(lv.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 func init() {

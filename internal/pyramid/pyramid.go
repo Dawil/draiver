@@ -57,6 +57,23 @@ type Level struct {
 	// script-output files (drv-017). Paths are relative to the worktree. Empty → the
 	// rung captures only its CucumberJSON (if any) and nothing else.
 	Artifacts []string `yaml:"artifacts,omitempty"`
+	// Required marks whether this rung GATES the review (drv-025), orthogonally to its
+	// altitude (list position). It is a pointer so "unset" is distinguishable from an
+	// explicit false: nil defaults to required (see IsRequired), so every rung in a
+	// pre-drv-025 file keeps gating exactly as before. required:false makes the rung
+	// *advisory* — still defined, still run when it lies in the climb path, and still
+	// reported, but a red result (a genuine failure OR an unready environment) never
+	// blocks the review gate and never halts the climb. A required rung may legitimately
+	// sit *above* an advisory one; the required set need not be a contiguous prefix.
+	Required *bool `yaml:"required,omitempty"`
+}
+
+// IsRequired reports whether this rung gates the review. A nil Required pointer —
+// a level that omits the key, i.e. every level in a pre-drv-025 file — defaults to
+// true, preserving the original "every rung gates" behaviour. required:false is the
+// only way to make a rung advisory.
+func (l Level) IsRequired() bool {
+	return l.Required == nil || *l.Required
 }
 
 // Healthcheck is one readiness probe of an Environment: a named shell command that
@@ -203,30 +220,20 @@ func (p *Pyramid) Target() Level {
 	return p.Levels[len(p.Levels)-1]
 }
 
-// FloorTarget returns the rung a consumer should target given the file's ladder and
-// an optional repo-configured default rung (drv-011's default_test_rung). The repo
-// default acts as a FLOOR, never lowering the file's top-rung bar: the result is the
-// higher-in-climb-order of the file's top rung and repoRung. An empty repoRung, or
-// one naming a rung not in this pyramid (a typo, or a level since removed/renamed),
-// leaves the target at the file's top rung.
-//
-// Because the top rung is the maximum climb index, a floor can only ever raise the
-// bar, never lower it — so repo config can tighten a review but structurally cannot
-// weaken one below what the .test-pyramid.yaml author designated. That is the
-// deliberate, conservative resolution of the file-top-vs-repo-default open question
-// (the spec's recommendation): the read is honoured, the gate is never softened.
-func (p *Pyramid) FloorTarget(repoRung string) Level {
-	top := p.Target()
-	if repoRung == "" {
-		return top
-	}
-	topIdx := len(p.Levels) - 1
-	for i, lv := range p.Levels {
-		if lv.Name == repoRung && i > topIdx {
-			return lv
+// HighestRequired returns the highest required rung in climb order — the default
+// climb target for bare `draiver test` (what the review gate ultimately needs,
+// decision drv-025) and the ceiling the per-repo TestRung narrows *down*. It is safe
+// on any Pyramid returned by Load/Parse, which validates that at least one required
+// rung exists (a zero-required pyramid is a config error). Advisory rungs above the
+// highest required one are reached only by an explicit RUNG argument.
+func (p *Pyramid) HighestRequired() Level {
+	var hi Level
+	for _, lv := range p.Levels {
+		if lv.IsRequired() {
+			hi = lv
 		}
 	}
-	return top
+	return hi
 }
 
 // Result is one logged rung outcome the review gate folds over: a rung that was
@@ -248,6 +255,11 @@ type Result struct {
 //
 // The fold is trivial precisely because only green results are logged: there is
 // no failing/partial state to reconcile, just the highest rung present at HEAD.
+//
+// Since drv-025 split altitude from enforcement, this is the DISPLAY fold — it
+// drives the read-only pyramid badge (internal/web), which shows how high the climb
+// reached regardless of which rungs gate. The *review gate* no longer uses it: it
+// folds the required set via RequiredStatus below.
 func (p *Pyramid) HighestAtHEAD(results []Result, head string) (Level, bool) {
 	index := make(map[string]int, len(p.Levels))
 	for i, lv := range p.Levels {
@@ -266,6 +278,49 @@ func (p *Pyramid) HighestAtHEAD(results []Result, head string) (Level, bool) {
 		return Level{}, false
 	}
 	return p.Levels[best], true
+}
+
+// RequiredStatus folds the logged Results and HEAD into the review-gate verdict
+// (drv-025): the required rungs that are satisfied (provably green at HEAD) and the
+// required rungs still outstanding, both in climb order. The gate admits iff
+// outstanding is empty; the refusal names outstanding.
+//
+// A required rung is satisfied when some result at HEAD names a rung at or above it
+// in climb order. This is sound because `draiver test` halts at the first non-green
+// *required* rung, so reaching (and logging) the rung at climb-index j proves every
+// required rung at index ≤ j passed — advisory reds between them never break the
+// chain, since they do not halt the climb. A Result whose Commit != head is stale
+// and does not count (a later commit invalidates it), exactly as before; a Result
+// naming a rung absent from this pyramid is ignored.
+//
+// It supersedes the single-top-rung admission test: the gate is the fold over the
+// whole required SET, which need not be a contiguous prefix — a required rung may
+// sit above an advisory one and is still required to be green.
+func (p *Pyramid) RequiredStatus(results []Result, head string) (satisfied, outstanding []Level) {
+	index := make(map[string]int, len(p.Levels))
+	for i, lv := range p.Levels {
+		index[lv.Name] = i
+	}
+	maxIdx := -1
+	for _, r := range results {
+		if r.Commit != head {
+			continue
+		}
+		if i, ok := index[r.Rung]; ok && i > maxIdx {
+			maxIdx = i
+		}
+	}
+	for i, lv := range p.Levels {
+		if !lv.IsRequired() {
+			continue
+		}
+		if i <= maxIdx {
+			satisfied = append(satisfied, lv)
+		} else {
+			outstanding = append(outstanding, lv)
+		}
+	}
+	return satisfied, outstanding
 }
 
 // Load resolves and reads .test-pyramid.yaml from a worktree path.
@@ -361,6 +416,22 @@ func (p *Pyramid) validate() error {
 		if env := strings.TrimSpace(lv.Environment); env != "" && !envs[env] {
 			return fmt.Errorf("level %q: environment %q is not declared (environments: %s)", name, env, envNames(p))
 		}
+	}
+
+	// At least one rung must gate the review (drv-025). `required` is orthogonal to
+	// order — there is no contiguity constraint — but a pyramid with *zero* required
+	// rungs has nothing for the review gate to enforce, which is a config error, not
+	// an intentionally ungated repo (a repo with no pyramid file at all stays ungated,
+	// as today). Reject it so the mistake surfaces at load rather than silently
+	// admitting every claim.
+	required := 0
+	for _, lv := range p.Levels {
+		if lv.IsRequired() {
+			required++
+		}
+	}
+	if required == 0 {
+		return errors.New("no required levels: at least one level must be required (omit `required` or set required: true) so the review gate has something to enforce")
 	}
 	return nil
 }

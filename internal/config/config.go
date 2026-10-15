@@ -146,10 +146,12 @@ type RepoSettings struct {
 	// base defaults to. Empty → the repo's current branch (a git concern the caller
 	// resolves), so there is no global default branch to fall through to.
 	DefaultBranch string `json:"default_branch"`
-	// DefaultTestRung is the top rung the pyramid must clear before Review for this
-	// repo. Empty → the file's own top rung (the builtin). The global
-	// default_test_level it would supersede is deferred (docs/test-pyramid.md), so
-	// there is no global value to fall through to today.
+	// DefaultTestRung is the `draiver test` iteration ceiling for this repo: how high
+	// bare `draiver test` climbs when no explicit RUNG is given. Since drv-025 it is
+	// ONLY that — it no longer floors the review gate (the gate folds the file's
+	// `required` flags instead). Empty → the file's highest required rung (the
+	// builtin). The global default_test_level it would supersede is deferred
+	// (docs/test-pyramid.md), so there is no global value to fall through to today.
 	DefaultTestRung string `json:"default_test_rung"`
 	// ReviewEnvironment names the .test-pyramid.yaml environment the attempt page's
 	// review-environment panel launches at Review (drv-020). Empty → no review env is
@@ -163,15 +165,17 @@ type RepoSettings struct {
 // Resolved is a repo's effective settings after global fallback is applied — what a
 // consumer actually reads. A field is empty only when neither the per-repo entry nor
 // the global default set it, signalling the caller to apply its builtin (the repo's
-// current branch, the pyramid file's top rung).
+// current branch, the pyramid file's highest required rung).
 type Resolved struct {
 	// Remote is DefaultRemote → PrimaryRemote → "".
 	Remote string
 	// Branch is DefaultBranch → "" (the repo's current branch is the builtin,
 	// resolved git-side by the caller — there is no global default branch).
 	Branch string
-	// TestRung is DefaultTestRung → "" (the pyramid file's top rung is the builtin;
-	// the global default_test_level is deferred, so nothing sits between them yet).
+	// TestRung is DefaultTestRung → "" (the pyramid file's highest required rung is
+	// the builtin; the global default_test_level is deferred, so nothing sits between
+	// them yet). It is the `draiver test` iteration ceiling, not a review-gate floor
+	// (drv-025).
 	TestRung string
 	// ReviewEnvironment is ReviewEnvironment → "" (there is no global default and no
 	// builtin: unset simply means this repo offers no review environment, drv-020).
@@ -181,7 +185,7 @@ type Resolved struct {
 // RepoSettings resolves a repo's effective settings: per-repo entry → global
 // default → builtin, each key resolved independently so a per-repo entry that sets
 // only one key leaves the others falling through. An empty resolved field hands the
-// builtin back to the caller (the repo's current branch, the file's top rung). It is
+// builtin back to the caller (the repo's current branch, the file's highest required rung). It is
 // total — a repo with no entry is a valid, common state, not an error.
 func (c Config) RepoSettings(repoPath string) Resolved {
 	rs := c.Repos[repoPath] // zero value when absent — every field empty, all fall through

@@ -46,6 +46,32 @@ func pyramidAttempt(t *testing.T, rungs [][2]string) (data, repo, checkout strin
 	return data, repo, wt.Path
 }
 
+// pyramidAttemptYAML is pyramidAttempt's sibling for gate tests that need the
+// per-rung `required` schema: it writes body verbatim as the attempt's committed
+// .test-pyramid.yaml, so the gate folds the real required set.
+func pyramidAttemptYAML(t *testing.T, body string) (data, repo, checkout string) {
+	t.Helper()
+	repo = landRepo(t)
+	data = t.TempDir()
+	if _, code := run(t, "--data", data, "--actor", "human:test", "new", "PROJ-1", "--title", "T", "--repo", repo); code != 0 {
+		t.Fatalf("new exited %d", code)
+	}
+	m, err := worktree.NewManager(repo)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	wt, err := m.Create(context.Background(), worktree.Spec{Key: worktree.Key{Ticket: "PROJ-1", Attempt: "0001"}})
+	if err != nil {
+		t.Fatalf("Create worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Path, ".test-pyramid.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, wt.Path, "add", ".test-pyramid.yaml")
+	gitIn(t, wt.Path, "commit", "-q", "-m", "add pyramid")
+	return data, repo, wt.Path
+}
+
 // reviewEventCount returns how many review events the attempt's log holds — the
 // probe for "did a refused claim leave an event behind" (it must not).
 func reviewEventCount(t *testing.T, data string) int {
@@ -147,6 +173,82 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// drv-025 AC1: with an advisory `integration` rung, the gate requires only the
+// required set (unit + acceptance). Logging the highest required rung (acceptance)
+// admits the claim even though integration was never run — its env may be
+// unavailable, and an advisory rung never gates.
+func TestReviewGate_AdmitsWithRequiredGreenAdvisoryAbsent(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: "true"
+  - name: acceptance
+    run: "true"
+  - name: integration
+    run: "true"
+    required: false
+`
+	data, _, wt := pyramidAttemptYAML(t, body)
+	t.Chdir(wt)
+	// Default target is the highest required rung (acceptance); integration is not run.
+	if out, code := run(t, "--data", data, "--actor", "agent:test", "test", "--log"); code != 0 {
+		t.Fatalf("test --log exited %d: %s", code, out)
+	}
+	out, code := run(t, "--data", data, "--actor", "agent:test", "review", "PROJ-1", "ready")
+	if code != 0 {
+		t.Fatalf("all required rungs green at HEAD should admit the claim, got exit %d: %s", code, out)
+	}
+	if n := reviewEventCount(t, data); n != 1 {
+		t.Errorf("an admitted claim should append exactly one review event, found %d", n)
+	}
+}
+
+// drv-025: a required rung ABOVE an advisory one gates correctly and is reachable.
+// With unit(req) < integration(advisory, red) < e2e(req): logging only unit refuses
+// (e2e outstanding, named in the message); climbing to e2e past the red advisory
+// rung logs e2e and admits.
+func TestReviewGate_RequiredAboveAdvisory(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: "true"
+  - name: integration
+    run: "false"
+    required: false
+  - name: e2e
+    run: "true"
+`
+	data, _, wt := pyramidAttemptYAML(t, body)
+	t.Chdir(wt)
+
+	// Only unit logged: e2e (required, above the advisory rung) is outstanding → refuse.
+	if out, code := run(t, "--data", data, "--actor", "agent:test", "test", "unit", "--log"); code != 0 {
+		t.Fatalf("test unit --log exited %d: %s", code, out)
+	}
+	out, code, err := runE(t, "--data", data, "--actor", "agent:test", "review", "PROJ-1", "ready")
+	if code == 0 {
+		t.Fatalf("a missing required rung above an advisory one must refuse, got exit 0: %s", out)
+	}
+	if msg := errText(err); !strings.Contains(msg, "e2e") {
+		t.Errorf("refusal should name the outstanding required rung e2e: %q", msg)
+	}
+	if n := reviewEventCount(t, data); n != 0 {
+		t.Errorf("a refused claim must leave no review event, found %d", n)
+	}
+
+	// Climb to e2e — past the red advisory integration rung — and the claim is admitted.
+	if out, code := run(t, "--data", data, "--actor", "agent:test", "test", "e2e", "--log"); code != 0 {
+		t.Fatalf("test e2e --log should climb past the red advisory rung, got exit %d: %s", code, out)
+	}
+	out, code = run(t, "--data", data, "--actor", "agent:test", "review", "PROJ-1", "ready")
+	if code != 0 {
+		t.Fatalf("all required rungs green should admit, got exit %d: %s", code, out)
+	}
+	if n := reviewEventCount(t, data); n != 1 {
+		t.Errorf("an admitted claim should append exactly one review event, found %d", n)
+	}
 }
 
 // A repo that declares no .test-pyramid.yaml is not gated at all: review proceeds

@@ -1,18 +1,32 @@
 # .test-pyramid.yaml — draiver's own test pyramid (drv-010, dogfooding drv-009).
 #
-# Levels are ordered bottom-to-top: the list order IS the pyramid, so the last
-# entry is the target (top) rung. drv-009's Review gate requires the target rung
-# green-at-HEAD before a claim is accepted on this repo's tickets.
+# Levels are ordered bottom-to-top: the list order IS the pyramid — intrinsic
+# altitude on the testing V (unit < acceptance < integration), and ONLY that.
 #
-#   unit        — today's fast, container-free suite; the near-universal base rung.
-#   integration — Testcontainers suite (a real Forgejo forge + a real served
-#                 webui) behind the `integration` build tag, so `go test ./...`
-#                 (the unit rung) stays fast and needs no Docker daemon.
+# `required` (drv-025) is orthogonal to that order: it is per-rung ENFORCEMENT, a
+# policy driven by flakiness/environment/confidence, not by altitude. A rung
+# defaults to `required: true` (gates review); `required: false` makes it ADVISORY —
+# still defined, still run when it lies in the climb path, still reported, but a red
+# result (a real failure OR an unready env) never blocks the review gate and never
+# halts the climb. A required rung may legitimately sit above an advisory one.
 #
-# Run the top rung locally with `draiver test integration` or, directly,
-# `go test -tags=integration ./internal/e2e/integration/...`. The integration
-# rung needs a container runtime (Docker/Podman); it skips cleanly when none is
-# available. See docs/integration-testing.md.
+# drv-009's Review gate therefore folds the whole *required set*: every required rung
+# must be green-at-HEAD before a claim is accepted. For this repo that is unit +
+# acceptance; integration is advisory (see below).
+#
+#   unit        — today's fast, container-free suite; the near-universal base rung. REQUIRED.
+#   acceptance  — drv-019's BDD rung (Gherkin under features/). REQUIRED.
+#   integration — Testcontainers suite (a real Forgejo forge + a real served webui)
+#                 behind the `integration` build tag. ADVISORY (required: false): it
+#                 needs a container runtime (Docker/Podman) and already skips cleanly
+#                 when none is present, so it must not be able to block the gate — the
+#                 exact case per-rung `required` exists for. Altitude keeps it on top;
+#                 enforcement sets it advisory, without corrupting the ordering.
+#
+# Run it locally with `draiver test integration` (an explicit RUNG climbs into
+# advisory rungs) or, directly, `go test -tags=integration ./internal/e2e/integration/...`.
+# See docs/integration-testing.md. Bare `draiver test` climbs to `acceptance` (the
+# highest required rung) by default and does not run integration.
 # environments (drv-012) factor *where* a rung runs out of *what* it runs. A rung
 # names one by `environment:`; unset = the implicit ambient context (the unit rung
 # below). Each env says how to bring it `up`, tear it `down`, and `healthcheck`
@@ -100,3 +114,8 @@ levels:
   - name: integration
     run: go test -tags=integration ./internal/e2e/integration/...
     environment: local
+    # Advisory (drv-025): altitude keeps integration at the top of the V, but
+    # enforcement makes it non-blocking. It needs a container runtime and skips
+    # cleanly without one, so gating review on it would be a flakiness policy
+    # smuggled into altitude ordering — exactly what `required` decouples.
+    required: false

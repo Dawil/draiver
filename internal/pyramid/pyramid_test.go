@@ -358,23 +358,154 @@ var threeRung = &Pyramid{Levels: []Level{
 	{Name: "e2e", Run: "x"},
 }}
 
-func TestFloorTarget(t *testing.T) {
+// boolPtr is the test helper for the *bool Required field.
+func boolPtr(b bool) *bool { return &b }
+
+// IsRequired defaults a nil pointer to true and honours an explicit false.
+func TestIsRequired(t *testing.T) {
+	if !(Level{}).IsRequired() {
+		t.Error("a level with no required key must default to required (nil → true)")
+	}
+	if !(Level{Required: boolPtr(true)}).IsRequired() {
+		t.Error("required: true must be required")
+	}
+	if (Level{Required: boolPtr(false)}).IsRequired() {
+		t.Error("required: false must be advisory")
+	}
+}
+
+// The required key parses and round-trips: nil when omitted, explicit when set.
+func TestLoad_RequiredFieldParses(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: go test ./...
+  - name: acceptance
+    run: go run ./acceptance
+  - name: integration
+    run: go test -tags=integration ./...
+    required: false
+`
+	p, err := Parse([]byte(body))
+	if err != nil {
+		t.Fatalf("valid required ladder should parse: %v", err)
+	}
+	if p.Levels[0].Required != nil {
+		t.Errorf("omitted required should parse to nil, got %v", *p.Levels[0].Required)
+	}
+	if p.Levels[2].Required == nil || *p.Levels[2].Required {
+		t.Errorf("integration should parse to required:false, got %v", p.Levels[2].Required)
+	}
+}
+
+// A pyramid with zero required rungs is rejected at load: nothing would gate.
+func TestLoad_ZeroRequiredRejected(t *testing.T) {
+	body := `
+levels:
+  - name: unit
+    run: go test ./...
+    required: false
+  - name: integration
+    run: go test -tags=integration ./...
+    required: false
+`
+	p, err := Parse([]byte(body))
+	if err == nil {
+		t.Fatalf("a zero-required pyramid must be rejected, got %+v", p)
+	}
+	if !strings.Contains(err.Error(), "no required levels") {
+		t.Errorf("error %q should explain the zero-required gate problem", err.Error())
+	}
+}
+
+// HighestRequired returns the top required rung in climb order, even when advisory
+// rungs sit above it or interleave with required ones.
+func TestHighestRequired(t *testing.T) {
 	cases := []struct {
-		name     string
-		repoRung string
-		want     string
+		name   string
+		levels []Level
+		want   string
 	}{
-		{"unset repo rung → file top", "", "e2e"},
-		{"repo rung below top → floored up to file top (never lowers the bar)", "unit", "e2e"},
-		{"repo rung equal to top → file top", "e2e", "e2e"},
-		{"unknown repo rung (typo) → ignored, file top", "smoke", "e2e"},
+		{
+			name:   "all required → file top",
+			levels: []Level{{Name: "unit", Run: "x"}, {Name: "e2e", Run: "x"}},
+			want:   "e2e",
+		},
+		{
+			name: "advisory crowns the ladder → highest required is below the top",
+			levels: []Level{
+				{Name: "unit", Run: "x"},
+				{Name: "acceptance", Run: "x"},
+				{Name: "integration", Run: "x", Required: boolPtr(false)},
+			},
+			want: "acceptance",
+		},
+		{
+			name: "required above an advisory → the required one wins",
+			levels: []Level{
+				{Name: "unit", Run: "x"},
+				{Name: "integration", Run: "x", Required: boolPtr(false)},
+				{Name: "e2e", Run: "x"},
+			},
+			want: "e2e",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := threeRung.FloorTarget(tc.repoRung).Name; got != tc.want {
-				t.Errorf("FloorTarget(%q) = %q, want %q", tc.repoRung, got, tc.want)
+			p := &Pyramid{Levels: tc.levels}
+			if got := p.HighestRequired().Name; got != tc.want {
+				t.Errorf("HighestRequired() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// RequiredStatus is the review-gate fold: every required rung must be green at HEAD,
+// and a logged rung covers every required rung at or below its climb index (advisory
+// reds between them do not break the chain).
+func TestRequiredStatus(t *testing.T) {
+	const head = "cafef00d"
+	const old = "deadbeef"
+	// unit(req) < integration(advisory) < e2e(req): a required rung ABOVE an advisory.
+	p := &Pyramid{Levels: []Level{
+		{Name: "unit", Run: "x"},
+		{Name: "integration", Run: "x", Required: boolPtr(false)},
+		{Name: "e2e", Run: "x"},
+	}}
+	names := func(ls []Level) []string {
+		out := make([]string, len(ls))
+		for i, l := range ls {
+			out[i] = l.Name
+		}
+		return out
+	}
+	eq := func(got []string, want ...string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Nothing logged → both required rungs outstanding.
+	if sat, out := p.RequiredStatus(nil, head); len(sat) != 0 || !eq(names(out), "unit", "e2e") {
+		t.Errorf("empty log: satisfied=%v outstanding=%v, want none / unit,e2e", names(sat), names(out))
+	}
+	// unit green at HEAD → unit satisfied, e2e (required, above the advisory) still outstanding.
+	if sat, out := p.RequiredStatus([]Result{{Rung: "unit", Commit: head}}, head); !eq(names(sat), "unit") || !eq(names(out), "e2e") {
+		t.Errorf("unit@head: satisfied=%v outstanding=%v, want unit / e2e", names(sat), names(out))
+	}
+	// e2e green at HEAD covers the whole required set, across the advisory rung below it.
+	if sat, out := p.RequiredStatus([]Result{{Rung: "e2e", Commit: head}}, head); !eq(names(sat), "unit", "e2e") || len(out) != 0 {
+		t.Errorf("e2e@head: satisfied=%v outstanding=%v, want unit,e2e / none", names(sat), names(out))
+	}
+	// A stale e2e result does not count: both required rungs outstanding again.
+	if sat, out := p.RequiredStatus([]Result{{Rung: "e2e", Commit: old}}, head); len(sat) != 0 || !eq(names(out), "unit", "e2e") {
+		t.Errorf("e2e@old (stale): satisfied=%v outstanding=%v, want none / unit,e2e", names(sat), names(out))
 	}
 }
 

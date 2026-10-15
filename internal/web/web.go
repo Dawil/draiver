@@ -901,7 +901,7 @@ func (s *Server) repoSettingsPanel(a project.Attempt) repoSettingsVM {
 		vm.BranchHint = "unset — defaults to the repo's current branch"
 	}
 	if vm.Rung == "" {
-		vm.RungHint = "unset — defaults to the pyramid's top rung"
+		vm.RungHint = "unset — `draiver test` iteration ceiling; defaults to the pyramid's highest required rung"
 	}
 	if vm.ReviewEnv == "" {
 		vm.ReviewEnvHint = "unset — no review environment offered at Review"
