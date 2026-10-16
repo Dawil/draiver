@@ -83,6 +83,18 @@ func TestHashBackwardCompatGolden(t *testing.T) {
 	if tag.ComputeHash() == golden {
 		t.Error("hash unchanged after setting Tags — field not in canonical form")
 	}
+	// drvctl-051's `woken-by` payload fields are the same omitempty discipline: unset
+	// they leave the golden untouched; set they change the canonical hash.
+	wc := sample()
+	wc.WokenChild = "E2E-1"
+	if wc.ComputeHash() == golden {
+		t.Error("hash unchanged after setting WokenChild — field not in canonical form")
+	}
+	ws := sample()
+	ws.WokenSeq = 20
+	if ws.ComputeHash() == golden {
+		t.Error("hash unchanged after setting WokenSeq — field not in canonical form")
+	}
 }
 
 func TestHashSensitiveToEdits(t *testing.T) {

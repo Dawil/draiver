@@ -59,8 +59,19 @@ type Event struct {
 	// discipline Outcome/Rung/Commit already use.
 	Supersedes []int    `yaml:"supersedes,omitempty"`
 	Tags       []string `yaml:"tags,omitempty"`
-	Prev       string   `yaml:"prev"`
-	Hash       string   `yaml:"hash"`
+	// WokenChild and WokenSeq carry a `woken-by` activation event's
+	// machine-readable payload (drvctl-051): the child ticket whose lifecycle
+	// doorbell woke the parent coordinator, and the seq of that doorbell on the
+	// child's log. The reconciler authors this event on the *parent's* own log at
+	// wake time; one entry serves three consumers — dedup (a handled doorbell has a
+	// matching activation, an unhandled one does not), replay ordering, and the
+	// cold-start brief's wake-reason tail (drvctl-053). Both omitempty, following the
+	// Outcome/Rung/Commit forward-compatible precedent, so every event that is not a
+	// `woken-by` hashes and serialises exactly as before.
+	WokenChild string `yaml:"woken_child,omitempty"`
+	WokenSeq   int    `yaml:"woken_seq,omitempty"`
+	Prev       string `yaml:"prev"`
+	Hash       string `yaml:"hash"`
 
 	Body string `yaml:"-"`
 }
@@ -83,6 +94,8 @@ type hashable struct {
 	Commit     string   `yaml:"commit,omitempty"`
 	Supersedes []int    `yaml:"supersedes,omitempty"`
 	Tags       []string `yaml:"tags,omitempty"`
+	WokenChild string   `yaml:"woken_child,omitempty"`
+	WokenSeq   int      `yaml:"woken_seq,omitempty"`
 	Prev       string   `yaml:"prev"`
 }
 
@@ -105,6 +118,8 @@ func (e Event) ComputeHash() string {
 		Commit:     e.Commit,
 		Supersedes: e.Supersedes,
 		Tags:       e.Tags,
+		WokenChild: e.WokenChild,
+		WokenSeq:   e.WokenSeq,
 		Prev:       e.Prev,
 	}
 	front, err := yaml.Marshal(h)

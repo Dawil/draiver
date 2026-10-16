@@ -184,12 +184,17 @@ func TestCoordinatorLeafEnableUnchanged(t *testing.T) {
 }
 
 // TestCoordinatorReconvergesToPendingAfterWake is acceptance #3 plus the migration
-// invariant (#6): a pre-digest coordinator wakes to Running on a child escalation,
-// then returns to Pending once that escalation resolves. Because the dormancy gate
-// is deliberately *not* fire-once (unlike the forward gate), an already-admitted
-// coordinator is trimmed and retired back to Pending on the next reconcile — which
-// is exactly what lets a legacy-broken coordinator reconverge with no manual
-// disable/re-enable.
+// invariant (#6), updated for the drvctl-051 edge-triggered activation model: a
+// pre-digest coordinator wakes to Running on a child-escalation doorbell, then
+// returns to Pending once it `park`s. The withdrawal trigger changed with the
+// generalised activation: the old level-triggered edge reaped the coordinator the
+// instant the *child escalation resolved*; now a woken manager holds an in-flight
+// activation (`woken-by` with no later `park`) and stays desired until **it itself
+// parks** (drvctl-052's completion-gate reconciliation). The dormancy gate is still
+// deliberately *not* fire-once, so once the park flips the phase to dormant the
+// already-admitted coordinator is trimmed and retired back to Pending on the next
+// reconcile — the same no-manual-disable/re-enable reconvergence, now driven by the
+// manager's own hand-off rather than an external resolution.
 func TestCoordinatorReconvergesToPendingAfterWake(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
@@ -212,9 +217,9 @@ func TestCoordinatorReconvergesToPendingAfterWake(t *testing.T) {
 		t.Fatal("the coordinator was admitted before any escalation — it should be dormant")
 	}
 
-	// The child escalates → the pre-digest coordinator wakes.
-	esc, err := ticketlog.Append(w.root, "CH", chAtt, event.Event{Type: "escalation", Actor: "agent:x", Body: "need a decision"})
-	if err != nil {
+	// The child escalates → the pre-digest coordinator wakes, and the reconciler
+	// authors a `woken-by CH #<esc>` activation on CAP's own log (the dedup marker).
+	if _, err := ticketlog.Append(w.root, "CH", chAtt, event.Event{Type: "escalation", Actor: "agent:x", Body: "need a decision"}); err != nil {
 		t.Fatalf("escalate CH: %v", err)
 	}
 	if err := r.Tick(ctx); err != nil {
@@ -229,17 +234,29 @@ func TestCoordinatorReconvergesToPendingAfterWake(t *testing.T) {
 		return capAd != nil
 	})
 
-	// The recommendation lands: the child's escalation is resolved, returning CH to
-	// Running and removing the reason the coordinator was awake.
-	if _, err := ticketlog.Append(w.root, "CH", chAtt, event.Event{Type: "resolution", Actor: "human:dave", Refs: []int{esc.Seq}, Body: "proceed"}); err != nil {
-		t.Fatalf("resolve CH escalation: %v", err)
+	// The manager handles the doorbell and hands off with a `park` (the serial-replay
+	// stop signal): a park later than its activation flips the phase to dormant,
+	// removing the in-flight marker that kept it desired.
+	if _, err := ticketlog.Append(w.root, "CAP", capAtt, event.Event{Type: "park", Actor: "agent:claude-code", Body: "handled CH; nothing else needs me"}); err != nil {
+		t.Fatalf("park CAP: %v", err)
 	}
 
-	// Tick 3: with no open child escalation, reverse-wants no longer wakes CAP, so
-	// the dormancy gate trims it back out of the desired set and it is retired —
-	// returning to Pending without a manual disable/re-enable.
+	// Tick 3: CAP is dormant (parked past its activation) but still live, so the
+	// dormancy gate trims it out of the desired set and it is retired — returning to
+	// Pending without a manual disable/re-enable.
 	if err := r.Tick(ctx); err != nil {
 		t.Fatalf("tick 3: %v", err)
 	}
-	waitFor(t, "woken coordinator reaped back to Pending", func() bool { return capAd.wasKilled() })
+	waitFor(t, "parked coordinator reaped back to Pending", func() bool { return capAd.wasKilled() })
+
+	// Tick 4: the CH escalation doorbell is handled (its activation is on CAP's log),
+	// so CAP is not re-woken — it stays Pending. A spurious re-wake would spawn a new
+	// session; assert the spawn count held at the two (CH + the one CAP wake).
+	before := f.count()
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 4: %v", err)
+	}
+	if n := f.count(); n != before {
+		t.Fatalf("a handled doorbell re-woke the coordinator: %d spawns, want %d — edge-trigger dedup failed", n, before)
+	}
 }
