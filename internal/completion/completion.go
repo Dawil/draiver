@@ -147,11 +147,13 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 
 	// A pending wake source makes this a parkable suspend point: a `park` counts as a
 	// hand-off, and an unmet turn is suspended (Parked) rather than escalated onto a
-	// human. Read it once per considered turn-end.
-	parkable, err := g.parkable()
+	// human. Read the sources once per considered turn-end — the kinds matter for the
+	// auto-park below, not only whether any exist.
+	sources, err := wake.Pending(g.root, g.ticket, g.attempt)
 	if err != nil {
 		return Ignored, fmt.Errorf("completion: check wake source for %s/%s: %w", g.ticket, g.attempt, err)
 	}
+	parkable := len(sources) > 0
 
 	met, err := g.handedOff(parkable)
 	if err != nil {
@@ -178,6 +180,23 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 	// so later frames settle on the one decision.
 	if parkable {
 		g.fired = true
+		// The safety net for drvctl-055's emergent pattern: a worker that launched a
+		// detached test and ended its turn without parking (forgot the `&& draiver
+		// park`) has a live async job but no explicit park, so the reconciler's
+		// async-dormancy — which keys on a park after the launch — would never reap it
+		// and the idle session would linger. Author the park the agent omitted so the
+		// suspend is durable and the async wake machinery reaps it to Pending. Scoped to
+		// the async source: a `wants:` coordinator is reaped by the coordinator gate and
+		// must keep its existing no-write Parked behaviour (drvctl-052).
+		if hasAsyncSource(sources) {
+			if _, err := ticketlog.Append(g.root, g.ticket, g.attempt, event.Event{
+				Type:  "park",
+				Actor: g.actor,
+				Body:  autoParkBody(),
+			}); err != nil {
+				return Parked, fmt.Errorf("completion: auto-park %s/%s: %w", g.ticket, g.attempt, err)
+			}
+		}
 		return Parked, nil
 	}
 
@@ -228,17 +247,24 @@ func (g *Gate) handedOff(parkable bool) (bool, error) {
 	return sawPark && parkable, nil
 }
 
-// parkable reports whether the attempt currently has a pending wake source — the
-// condition under which the gate treats a `park` as a hand-off and suspends
-// (rather than escalates) an unmet turn. It reads the live edges/log each time,
-// so a child reaching Done mid-session (which removes the coordinator's wake
-// source) is seen on the next considered turn-end.
-func (g *Gate) parkable() (bool, error) {
-	sources, err := wake.Pending(g.root, g.ticket, g.attempt)
-	if err != nil {
-		return false, err
+// hasAsyncSource reports whether any of the attempt's pending wake sources is a
+// detached async job (drvctl-055) — the kind the gate auto-parks for, so a worker
+// that launched a test but omitted `draiver park` still suspends durably rather
+// than lingering idle.
+func hasAsyncSource(sources []wake.Source) bool {
+	for _, s := range sources {
+		if s.Kind == wake.AsyncJob {
+			return true
+		}
 	}
-	return len(sources) > 0, nil
+	return false
+}
+
+// autoParkBody renders the park the gate authors on an agent's behalf when it
+// stopped with a live async job but did not hand off (the board renders event
+// bodies as Markdown).
+func autoParkBody() string {
+	return "Auto-parked by the completion gate: this turn ended with a detached test still running but no `review`, `park`, or `escalation` filed. Suspending to Pending — the test result will land on this log and wake the attempt to claim review (green) or iterate (red)."
 }
 
 // nudgeMessage is the one-shot reminder a session that stopped without handing off

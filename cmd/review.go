@@ -129,12 +129,15 @@ func reviewGate(ctx context.Context, root store.Root, ticket, att string) error 
 		return err
 	}
 
-	// Map the attempt's test-result events onto the pyramid's neutral Result pair;
-	// only green results are logged (drvctl-048), so the fold has no failing state to
-	// reconcile.
+	// Map the attempt's test-result events onto the pyramid's neutral Result pair.
+	// A synchronous `test --log` only ever logs a green result, but a *detached*
+	// `draiver test --detach` (drvctl-055) records pass AND fail so the worker can be
+	// woken either way — a failing result carries Outcome=="fail". Only a passing
+	// result is green at HEAD, so a fail must never be read as satisfying the gate;
+	// an empty Outcome is the legacy green `test --log` record and still counts.
 	var results []pyramid.Result
 	for _, e := range a.Events {
-		if e.Type == "test-result" {
+		if e.Type == "test-result" && e.Outcome != "fail" {
 			results = append(results, pyramid.Result{Rung: e.Rung, Commit: e.Commit})
 		}
 	}
