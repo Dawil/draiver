@@ -92,6 +92,18 @@ type Attempt struct {
 	// on retire (drvctl-031). Nil until an attempt retires with a metered session,
 	// so a card renders the cache panel only once there is something to show.
 	Metrics *agent.Metrics
+
+	// Coordinator, WakeChild and QueueDepth are the coordinator-card presentation
+	// bits (drvweb-023), filled by the web board caller from DeriveCoordinatorSignal
+	// exactly as WaitingReason/EscalatedTo are filled — empty/zero on a log-only load
+	// and for a non-coordinator attempt. Coordinator is true when this attempt's
+	// ticket carries `wants:` edges (IsCoordinator); WakeChild is the child named by
+	// the latest in-flight `woken-by` activation (the board's "why", empty when the
+	// manager is not currently woken); QueueDepth is the count of child doorbells
+	// waiting behind the current activation.
+	Coordinator bool
+	WakeChild   string
+	QueueDepth  int
 }
 
 // isLifecycle reports whether an event type moves the control state: the last
