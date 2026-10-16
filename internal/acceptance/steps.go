@@ -94,6 +94,14 @@ var registry = map[string]StepFunc{
 	"a board attempt with a superseded fact and tags":                           givenBoardWithSupersededAndTags,
 	"the attempt page demotes the superseded fact with a link to its successor": thenPageDemotesSuperseded,
 	"the attempt page shows the tags as chips":                                  thenPageShowsTagChips,
+
+	// --- features/progressive-brief/manager-brief.feature (drvctl-053) ---
+	"a coordinator attempt that wants two children and was woken by a child escalation": givenCoordinatorWokenByChild,
+	"the brief lists each child's control-state and open escalations":                   thenBriefListsTeam,
+	"the brief injects the coordinator protocol":                                        thenBriefInjectsProtocol,
+	"the wake reason is the tail of the brief":                                          thenWakeReasonIsTail,
+	"a plain worker attempt with no wants edges":                                        givenPlainWorkerAttempt,
+	"the brief carries no manager injection":                                            thenNoManagerInjection,
 }
 
 // invokeStep runs the step definition matching text, or reports errUndefined so the

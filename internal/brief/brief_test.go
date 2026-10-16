@@ -119,4 +119,87 @@ func TestBuildOmitsProtocolCarriesSpecAndLog(t *testing.T) {
 			t.Errorf("brief missing per-ticket content %q\n---\n%s", want, out)
 		}
 	}
+
+	// A ticket with no `wants:` edges gets the worker brief unchanged: no manager
+	// injection leaks in (drvctl-053 acceptance #2).
+	for _, gone := range []string{"## Your team", "Coordinator protocol", "You were woken"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("worker brief must not carry manager injection %q\n---\n%s", gone, out)
+		}
+	}
+}
+
+// A `wants:` ticket is told it is a manager (drvctl-053): the brief injects the
+// `## Your team` roster (each child's control-state + open escalations via the
+// project.Control fold), the coordinator protocol, and — as the brief's freshest
+// tail — the spine-authored `woken-by` activation event (drvctl-051) as the wake
+// reason. The `wants:` roster is no longer stripped out of the brief.
+func TestManagerBriefInjectsTeamProtocolAndWakeReason(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+
+	// Two children: C1 has an open escalation (Needs me), C2 reached Review. A third
+	// wanted child, C3, has no attempt yet.
+	const c1, c2, c3 = "PROJ-C1", "PROJ-C2", "PROJ-C3"
+	for _, c := range []string{c1, c2, c3} {
+		if err := root.EnsureAttemptDirs(c, "0001"); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(root.SpecPath(c), []byte("---\nid: "+c+"\ntitle: Child "+c+"\n---\n\n# "+c), 0o644)
+	}
+	// C3 has a spec but no attempt — remove the attempt dir we just made.
+	os.RemoveAll(root.AttemptsDir(c3))
+
+	mustAppend(t, root, c1, "0001", event.Event{Type: "created", Actor: "a", Body: "start"})
+	mustAppend(t, root, c1, "0001", event.Event{Type: "escalation", Actor: "a", Body: "which endpoint should the worker call?"})
+	mustAppend(t, root, c2, "0001", event.Event{Type: "created", Actor: "a", Body: "start"})
+	mustAppend(t, root, c2, "0001", event.Event{Type: "review", Actor: "a", Body: "claim: done, see PR"})
+
+	// The manager P wants: [C1, C2, C3].
+	const p, att = "PROJ-P", "0001"
+	if err := root.EnsureAttemptDirs(p, att); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(p), []byte("---\nid: PROJ-P\ntitle: Integrate the parts\nwants:\n  - "+c1+"\n  - "+c2+"\n  - "+c3+"\n---\n\n# Integrate\n\nMake the pieces fit."), 0o644)
+	mustAppend(t, root, p, att, event.Event{Type: "created", Actor: "a", Body: "manager start"})
+	mustAppend(t, root, p, att, event.Event{Type: "enable", Actor: "a", Body: "supervised"})
+	// The spine's activation event on the manager's own log — its wake reason.
+	mustAppend(t, root, p, att, event.Event{
+		Type: "woken-by", Actor: "reconciler", WokenChild: c1, WokenSeq: 2,
+		Body: "Woken by `" + c1 + "` #2 — a child `escalation` lifecycle doorbell.",
+	})
+
+	out, err := Build(root, p, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"## Your team",
+		"You are a **manager**",
+		"`PROJ-C1`/0001 — **Needs me**", // child control-state via the Control fold
+		"#2: which endpoint should the worker call?", // the child's open escalation
+		"`PROJ-C2`/0001 — **Review**",
+		"`PROJ-C3` — no attempt yet", // wanted but unminted
+		"## Coordinator protocol",
+		"charter",
+		"draiver park",
+		"You were woken for this wake:",                               // the tail label
+		"Woken by `PROJ-C1` #2 — a child `escalation` lifecycle doorbell", // the reconciler body
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("manager brief missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// The wake reason is the tail — the freshest line, after the recall hint.
+	if i, j := strings.Index(out, "draiver recall <seq>"), strings.Index(out, "You were woken"); i < 0 || j < 0 || j < i {
+		t.Errorf("wake reason must be the brief's tail (after the recall hint)\n---\n%s", out)
+	}
+}
+
+func mustAppend(t *testing.T, root store.Root, ticket, att string, e event.Event) {
+	t.Helper()
+	if _, err := ticketlog.Append(root, ticket, att, e); err != nil {
+		t.Fatal(err)
+	}
 }
