@@ -64,6 +64,7 @@ import (
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/wake"
 	"github.com/Dawil/draiver/internal/watch"
 	"github.com/Dawil/draiver/internal/worktree"
 )
@@ -529,6 +530,16 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	if err := r.activateReverseWants(all, out); err != nil {
 		return nil, err
 	}
+
+	// Worker async-job park/wake (drvctl-055): the leaf analog of the two passes
+	// above, folded into one because a worker's detached test lives on its own log.
+	// It trims a worker parked behind an in-flight detached test (→ Pending) and
+	// re-adds one whose result has landed (authoring the `woken-by` that wakes it).
+	// Additive and scoped to async-launching attempts, so it never regresses a
+	// plainly-working leaf (see async_jobs.go).
+	if err := r.reconcileAsyncJobs(all, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -904,6 +915,24 @@ func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.St
 	// candidate for reclaiming the checkout.
 	if st == project.NeedsMe {
 		return
+	}
+
+	// A worker parked behind an in-flight detached test keeps its worktree warm
+	// (drvctl-055): the climb is running *in this very checkout* and the launch
+	// demanded a clean tree, so the clean-checkout reclamation below would otherwise
+	// delete the working directory out from under the running test. The async source
+	// is cleared the moment the result lands, so a retire after that point reclaims
+	// normally (the work is committed). Best-effort: a read error falls through to the
+	// usual dirty/clean reclamation rather than stranding the retire.
+	if srcs, err := wake.Pending(r.opt.Root, key.Ticket, key.Attempt); err != nil {
+		r.opt.Logf("reconcile: retire %s/%s: async-source check: %v", key.Ticket, key.Attempt, err)
+	} else {
+		for _, s := range srcs {
+			if s.Kind == wake.AsyncJob {
+				r.recordRetire(key, st, false, "a detached test is still running in the checkout (async job in flight)")
+				return
+			}
+		}
 	}
 
 	// Reclamation acts on the attempt's own repo (drvctl-015). If it could not be

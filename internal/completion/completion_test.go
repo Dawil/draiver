@@ -267,6 +267,59 @@ func TestParkCountsAsHandoffWhenParkable(t *testing.T) {
 	}
 }
 
+// TestAutoParkOnLiveAsyncJob is drvctl-055's safety net (AC #5): a leaf worker that
+// launched a detached test and ended its turn WITHOUT the `&& draiver park` has a
+// live async job but no explicit hand-off. The gate must not escalate (it is a
+// test-wait, not a human question); instead it auto-authors the park the agent
+// omitted, so the async-dormancy reconciler — which keys on a park after the launch
+// — reaps the idle session to Pending rather than letting it linger.
+func TestAutoParkOnLiveAsyncJob(t *testing.T) {
+	ctx := context.Background()
+	root, ticket, att := newFixture(t) // a leaf — its only wake source is the async job
+	// `draiver test --detach` wrote this launch marker; the agent then stopped without
+	// parking, so there is no park on the log yet.
+	if _, err := ticketlog.Append(root, ticket, att, event.Event{Type: "async-job", Actor: "agent:x", Rung: "unit", Body: "launched detached test"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	var halted bool
+	g, err := completion.New(root, ticket, att, "agent:claude-code", rec.prompt, func() error { halted = true; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First unmet success → nudge (park offered, since the async job makes it parkable).
+	if out, err := g.Consider(ctx, success()); err != nil || out != completion.Nudged {
+		t.Fatalf("first success: out=%v err=%v, want Nudged/nil", out, err)
+	}
+	// Second unmet success → Parked, and the gate authors the park the agent omitted.
+	if out, err := g.Consider(ctx, success()); err != nil || out != completion.Parked {
+		t.Fatalf("second success: out=%v err=%v, want Parked/nil", out, err)
+	}
+	if halted {
+		t.Fatal("an auto-park must not reap the session at the gate — the async reconciler retires it")
+	}
+
+	events, err := ticketlog.Read(root, ticket, att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parks int
+	for _, e := range events {
+		if e.Type == "park" {
+			parks++
+		}
+	}
+	if parks != 1 {
+		t.Fatalf("the gate must author exactly one park on behalf of the agent, got %d", parks)
+	}
+	// And it must not have manufactured a human escalation.
+	st, open := project.Derive(events)
+	if st == project.NeedsMe || len(open) != 0 {
+		t.Fatalf("auto-park must not escalate: state=%v open=%+v", st, open)
+	}
+}
+
 // TestParkIsNotHandoffWithoutWakeSource is the guard on the other side: a `park`
 // filed by an attempt with NO wake source (a leaf) would sleep forever, so it is
 // not a legitimate hand-off. The gate ignores it and still nudges the unmet turn —

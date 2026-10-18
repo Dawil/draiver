@@ -246,10 +246,46 @@ off — and the order matters:
   free.
 
 A repo with no `.test-pyramid.yaml` has nothing to run: `draiver test` says so and
-exits clean. Do this before §8 — a review backed by a logged green result is one a
+exits clean. Do this before §9 — a review backed by a logged green result is one a
 human can trust at a glance.
 
-## 8. Claim review — push, then claim with a link
+## 8. Park behind long async work instead of idling a live agent
+
+Some work you kick off is long and runs on its own — the detached test runner in
+§7 is the first example, but the shape is general. Holding a live agent (with its
+context, and the tokens it burns) idling while that work runs is pure waste, and
+stopping with no hand-off is worse: the completion gate reads a silent stop as a
+stall and manufactures a **false escalation** — a wait masquerading as a human
+question. The right move is to **launch the work as a tracked async job and then
+`park`**:
+
+```
+draiver test --detach && draiver park <TICKET>
+```
+
+`--detach` fires the test off out-of-band (it does not block your session) and
+returns immediately; `draiver park` then suspends the attempt to **Pending** — a
+legitimate idle, not a Needs-me. You stop here, exactly as you stop after
+`escalate` (§6): no polling, no idling. When the async job finishes it lands a
+durable result event on **your own** log, which path-activates (wakes) the parked
+attempt — a fresh session cold-starts with that result as its brief tail and acts
+on it: claim review (§9) if green, iterate if red.
+
+Two things make this safe to reach for:
+
+- **`launch && park` short-circuits.** The `&&` runs `park` only if the launch
+  actually started the job. If the launch fails, the `&&` short-circuits, `park`
+  never runs, and you stay live — and even a stray `park` with no wake source is
+  refused, so you can never park into a sleep-forever.
+- **The gate backs you up.** If you launch the async job but forget the `&&
+  draiver park` and just stop, the completion gate sees the live job and
+  auto-`park`s for you rather than escalating — so a handoff-less stop behind live
+  async work still lands as Pending, not a false human question.
+
+Park is not test-specific: any long, self-completing job whose result returns to
+your own log fits the same `launch-async && park` shape.
+
+## 9. Claim review — push, then claim with a link
 
 When you believe the work is complete, make a **claim** for a human to verify.
 Do not mark the ticket done; that decision is the human's. A claim the human
@@ -305,7 +341,9 @@ including translating the spec's acceptance criteria into Gherkin features + ste
 on your branch — → `log` gotchas/decisions as you go, with self-contained first
 lines, superseding stale facts rather than duplicating them → when blocked,
 `escalate` and stop (the human resolves from their board, on their own time) → when
-the ticket is worked again, a session `brief`s, reads the resolution, and continues
+you fire off long self-completing work (a detached test), `launch-async && park`
+and stop (§8); the result lands on your log and wakes the attempt → when the ticket
+is worked again, a session `brief`s, reads the resolution or result, and continues
 → when the work is done, **verify** (iterate with `draiver test`, commit, then
 `draiver test --log`), **push** to a remote, and `review` with a link the human can
 click.

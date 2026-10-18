@@ -94,6 +94,19 @@ var registry = map[string]StepFunc{
 	"a board attempt with a superseded fact and tags":                           givenBoardWithSupersededAndTags,
 	"the attempt page demotes the superseded fact with a link to its successor": thenPageDemotesSuperseded,
 	"the attempt page shows the tags as chips":                                  thenPageShowsTagChips,
+
+	// --- features/manager-as-worker/park-async.feature (drvctl-055) ---
+	"a worker that launched a detached test and has not yet seen a result":            givenLaunchedDetachedTest,
+	"the worker has a pending async-job wake source":                                  thenHasAsyncSource,
+	"the worker is a suspend point rather than a human escalation":                    thenSuspendNotEscalation,
+	"a worker whose detached test has landed its result on its own log":               givenResultLanded,
+	"the async-job wake source is answered and no longer holds the worker parked":     thenSourceAnswered,
+	"a worker that ended its turn with a detached test running but filed no hand-off": givenTurnEndWithLiveJobNoHandoff,
+	"the completion gate considers the turn-end":                                      whenCompletionGateConsiders,
+	"the gate parks the worker rather than escalating a human":                        thenGateParksNotEscalates,
+	"a park hand-off is recorded on the worker's own log":                             thenParkRecorded,
+	"a worker with a synchronous test result and no detached launch":                  givenSyncResultNoLaunch,
+	"the worker has no async-job wake source":                                         thenNoAsyncSource,
 }
 
 // invokeStep runs the step definition matching text, or reports errUndefined so the
