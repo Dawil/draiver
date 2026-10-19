@@ -48,7 +48,7 @@ func TestBoardMovesEscalationUpUnderPreDigest(t *testing.T) {
 	for _, want := range []string{
 		`data-testid="attempt-link-KID-0001"`, // the KID card is rendered
 		`data-testid="waiting-KID-0001"`,      // with a Pending waiting reason
-		"escalated to `CAP`",                  // attributed to the parent
+		"escalated to <code>CAP</code>",       // attributed to the parent, markdown-rendered (drvweb-023: no literal backticks)
 		`data-testid="count-stuck">0<`,        // KID left the Needs-me column
 	} {
 		if !strings.Contains(body, want) {
