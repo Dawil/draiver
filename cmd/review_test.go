@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -144,6 +145,50 @@ func TestReviewGate_AdmitsWhenTargetGreenAtHEAD(t *testing.T) {
 	}
 	if n := reviewEventCount(t, data); n != 1 {
 		t.Errorf("an admitted claim should append exactly one review event, found %d", n)
+	}
+}
+
+// A detached `test --detach` records pass AND fail (drvctl-055), so the review gate
+// must never read a failing result as green: an Outcome=="fail" test-result at the
+// target rung and the current HEAD is still refused, even though a legacy green
+// `test --log` record (empty Outcome) at the same rung/commit would admit.
+func TestReviewGate_FailingResultDoesNotSatisfy(t *testing.T) {
+	data, _, wt := pyramidAttempt(t, [][2]string{{"unit", "true"}})
+	head := headOf(t, wt, "HEAD")
+	root := store.Root{Dir: data}
+
+	// A detached climb that went red lands a fail result naming the target rung at HEAD.
+	if _, err := ticketlog.Append(root, "PROJ-1", "0001", event.Event{
+		Type: "test-result", Actor: "agent:test", Outcome: "fail", Rung: "unit", Commit: head,
+		Body: "unit red @ HEAD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code, err := runE(t, "--data", data, "--actor", "agent:test", "review", "PROJ-1", "ready")
+	if code == 0 {
+		t.Fatalf("a failing test-result must not satisfy the gate, got exit 0: %s", out)
+	}
+	if msg := errText(err); !strings.Contains(msg, "unit") {
+		t.Errorf("refusal should still name the target rung: %q", msg)
+	}
+	if n := reviewEventCount(t, data); n != 0 {
+		t.Errorf("a refused claim must leave no review event, found %d", n)
+	}
+
+	// The same rung/commit recorded as a PASS admits — proving it was the Outcome, not
+	// a missing rung, that held the gate shut.
+	if _, err := ticketlog.Append(root, "PROJ-1", "0001", event.Event{
+		Type: "test-result", Actor: "agent:test", Outcome: "pass", Rung: "unit", Commit: head,
+		Body: "unit green @ HEAD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := run(t, "--data", data, "--actor", "agent:test", "review", "PROJ-1", "ready"); code != 0 {
+		t.Fatalf("a passing result at the target rung/HEAD should admit, got exit %d: %s", code, out)
+	}
+	if n := reviewEventCount(t, data); n != 1 {
+		t.Errorf("the admitted claim should append exactly one review event, found %d", n)
 	}
 }
 

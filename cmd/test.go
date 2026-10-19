@@ -103,6 +103,14 @@ var testCmd = &cobra.Command{
 			}
 		}
 
+		// --detach hands the climb off to an out-of-band runner and returns at once, so
+		// the agent's session is not held idle while the test runs (drvctl-055). It
+		// records a launch marker, fires the detached runner, and exits 0 — the worker's
+		// `&& draiver park` then suspends it until the result lands.
+		if testDetach {
+			return launchDetached(ctx, cmd, wd, target, levels)
+		}
+
 		// Climb base→target, streaming each rung's output. Each rung runs in its
 		// environment (if it names one): up → healthchecks → run → (always) down.
 		//
@@ -114,21 +122,9 @@ var testCmd = &cobra.Command{
 		// depend on lower suites *passing*, and otherwise a required rung above an
 		// advisory one would be unreachable and the gate unsatisfiable. A failing rung
 		// logs nothing either way — the log holds only passing results by construction.
-		var advisoryReds []string
-		targetGreen := false
-		for i, lv := range levels {
-			err := runRung(ctx, cmd, wd, p, lv)
-			if err == nil {
-				if i == len(levels)-1 {
-					targetGreen = true
-				}
-				continue
-			}
-			if lv.IsRequired() {
-				return err
-			}
-			advisoryReds = append(advisoryReds, lv.Name)
-			fmt.Fprintf(out, "== %s: advisory rung not green — recorded, climb continues (does not gate review): %v\n", lv.Name, err)
+		targetGreen, advisoryReds, failErr := climb(ctx, cmd, wd, p, levels)
+		if failErr != nil {
+			return failErr
 		}
 		switch {
 		case len(advisoryReds) == 0:
@@ -257,6 +253,35 @@ func testResultBody(target, sha, runKey string) string {
 		return fmt.Sprintf("Rung `%s` green @ `%s`.", target, shortSHA(sha))
 	}
 	return fmt.Sprintf("Rung `%s` green @ `%s`. BDD artefacts captured under `%s`.", target, shortSHA(sha), runKey)
+}
+
+// climb runs the rungs base→target in order and reports the outcome without
+// deciding what to do about it — the shared engine behind the synchronous `draiver
+// test`, `--log`, and the detached runner (drvctl-055). It returns whether the
+// target rung itself came up green, the advisory rungs that were red (reported but
+// non-gating, drv-025), and failErr: the control-coded error of the first red
+// *required* rung, at which point the climb halts and higher rungs never run.
+//
+// A caller that must preserve exit-code semantics (the synchronous CLI) returns
+// failErr verbatim; the detached runner instead swallows it and records a failing
+// result, since its whole point is to land a verdict on the log rather than exit.
+func climb(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, levels []pyramid.Level) (targetGreen bool, advisoryReds []string, failErr error) {
+	out := cmd.OutOrStdout()
+	for i, lv := range levels {
+		err := runRung(ctx, cmd, wd, p, lv)
+		if err == nil {
+			if i == len(levels)-1 {
+				targetGreen = true
+			}
+			continue
+		}
+		if lv.IsRequired() {
+			return false, advisoryReds, err
+		}
+		advisoryReds = append(advisoryReds, lv.Name)
+		fmt.Fprintf(out, "== %s: advisory rung not green — recorded, climb continues (does not gate review): %v\n", lv.Name, err)
+	}
+	return targetGreen, advisoryReds, nil
 }
 
 // runRung executes one rung in its environment, mapping each kind of failure to
@@ -408,5 +433,6 @@ func rungNames(p *pyramid.Pyramid) string {
 
 func init() {
 	testCmd.Flags().BoolVar(&testLog, "log", false, "on all-green, append a durable test-result event (refuses a dirty tree)")
+	testCmd.Flags().BoolVar(&testDetach, "detach", false, "run the climb out-of-band and land a durable pass/fail result on the attempt's log; returns at once so the session can `park` (drvctl-055)")
 	rootCmd.AddCommand(testCmd)
 }

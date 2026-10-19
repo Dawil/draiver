@@ -60,6 +60,49 @@ func TestPendingLeafHasNoSource(t *testing.T) {
 	}
 }
 
+// A leaf worker that launched a detached test (an `async-job` marker on its own
+// log) with no result yet HAS a wake source — the AsyncJob source — so its park is
+// legitimate and the completion gate suspends it rather than escalating (AC #2).
+func TestPendingLeafWithInflightAsyncJob(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	att := seedTicket(t, root, "LEAF")
+	if _, err := ticketlog.Append(root, "LEAF", att, event.Event{Type: "async-job", Actor: "agent:x", Rung: "unit", Body: "launched"}); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+
+	sources, err := wake.Pending(root, "LEAF", att)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(sources) != 1 || sources[0].Kind != wake.AsyncJob {
+		t.Fatalf("want a single async-job source for an in-flight detached test, got %+v", sources)
+	}
+}
+
+// Once the detached test lands its result, the launch is answered: the AsyncJob
+// source is gone, so a later park would refuse (nothing left to wake) and retire may
+// reclaim the checkout. This is the upper boundary of the async wake window.
+func TestPendingAsyncJobAnsweredByResult(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	att := seedTicket(t, root, "LEAF")
+	if _, err := ticketlog.Append(root, "LEAF", att, event.Event{Type: "async-job", Actor: "agent:x", Rung: "unit", Body: "launched"}); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	if _, err := ticketlog.Append(root, "LEAF", att, event.Event{Type: "test-result", Actor: "agent:x", Outcome: "pass", Rung: "unit", Body: "green"}); err != nil {
+		t.Fatalf("result: %v", err)
+	}
+
+	sources, err := wake.Pending(root, "LEAF", att)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	for _, s := range sources {
+		if s.Kind == wake.AsyncJob {
+			t.Fatalf("a landed result answers the launch ⇒ no async-job source, got %+v", sources)
+		}
+	}
+}
+
 // A `wants:` coordinator with at least one child still in flight (not Done) has a
 // pending wake source: reverse-`wants:` activation can still fire on that child's
 // lifecycle, so the attempt can be woken and park is legitimate. The source names
