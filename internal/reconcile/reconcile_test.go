@@ -48,6 +48,13 @@ type fakeAdapter struct {
 	resumeID   string
 	prompts    []string
 	decisions  map[string]agent.Decision
+
+	// initAfterPrompt mirrors real headless claude on a *resume* (drvctl-056): a
+	// resumed process emits its system/init frame only once it receives its first
+	// user turn, never before. Resume sets this (for a live, non-stale id) and the
+	// first Prompt consumes it to emit init. A fresh Spawn, by contrast, emits init
+	// immediately (pre-input), so it never sets this.
+	initAfterPrompt bool
 }
 
 func (a *fakeAdapter) Spawn(ctx context.Context, spec agent.SessionSpec) (string, error) {
@@ -63,13 +70,12 @@ func (a *fakeAdapter) Resume(ctx context.Context, sessionID string, spec agent.S
 	a.mu.Lock()
 	a.resumeID = sessionID
 	a.started = true
-	stale := a.staleResume
+	// A live resume comes online only after its first user turn (drvctl-056); a
+	// stale id starts a process that dies on arrival and never emits init at all, so
+	// it never comes online and confirmOnline times out. Either way Resume emits
+	// nothing here — unlike a fresh Spawn, which emits init pre-input.
+	a.initAfterPrompt = !a.staleResume
 	a.mu.Unlock()
-	// A stale id starts a process that dies on arrival: it never emits the
-	// system/init frame, so it never comes online and confirmOnline times out.
-	if !stale {
-		a.emit(agent.Event{Kind: agent.EventSystem, SessionID: sessionID})
-	}
 	return nil
 }
 
@@ -79,8 +85,17 @@ func (a *fakeAdapter) Online() <-chan struct{} { return a.online }
 
 func (a *fakeAdapter) Prompt(ctx context.Context, text string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.prompts = append(a.prompts, text)
+	// A resumed process emits its system/init frame on the first user turn it
+	// receives (drvctl-056): the prime that brings it online. Consume the pending
+	// flag under the lock, then emit outside it (emit takes the same lock).
+	fire := a.initAfterPrompt
+	a.initAfterPrompt = false
+	id := a.resumeID
+	a.mu.Unlock()
+	if fire {
+		a.emit(agent.Event{Kind: agent.EventSystem, SessionID: id})
+	}
 	return nil
 }
 
@@ -906,6 +921,193 @@ func TestResumeAfterResolution(t *testing.T) {
 		t.Fatalf("resume must be nudged, not re-briefed: got %q", p)
 	} else if !strings.Contains(p, "resuming") || !strings.Contains(p, "draiver brief PROJ-1") {
 		t.Fatalf("resume nudge missing its guidance: %q", p)
+	}
+}
+
+// TestBringUpResumePrimesTurnToComeOnline is drvctl-056's headline regression
+// guard. A recorded id whose *resumed* process emits system/init only after its
+// first user turn — real headless `claude --resume`'s behavior — must still come
+// online: bringUp primes the resume nudge *before* confirming online, so the
+// resume succeeds, keeps the id, and does NOT fall through to a fresh Spawn. The
+// old fake emitted init unconditionally in Resume (pre-input), which is exactly
+// why this ordering bug slipped through; the fake now mirrors real claude.
+func TestBringUpResumePrimesTurnToComeOnline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+
+	// Seed a live (resumable) session id so bringUp resumes it. The fake comes
+	// online only once it is prompted — the whole point of the regression.
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	if err := sess.WriteIdentity(session.Identity{Adapter: "claude-code", SessionID: "live-id"}); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+
+	f := &factory{} // NOT staleResume: the resume is genuinely resumable
+	// A short confirm window so a *reverted* fix (confirm before priming) falls
+	// through promptly and fails this test, rather than hanging on the 10s default.
+	r := w.reconcilerConfirm(t, f, newProc(), 500*time.Millisecond)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+
+	// The resume is primed and comes online: one adapter, prompted with the nudge.
+	waitFor(t, "resume comes online via its primed turn", func() bool {
+		return f.count() == 1 && len(f.at(0).prompted()) > 0
+	})
+	resumed := f.at(0)
+	if resumed.resumedWith() != "live-id" {
+		t.Fatalf("bring-up must resume the recorded id, got %q", resumed.resumedWith())
+	}
+	if resumed.wasKilled() {
+		t.Fatal("a resume that came online must not be reaped")
+	}
+	if f.count() != 1 {
+		t.Fatalf("a successful resume must not fall through to a Spawn, got %d adapters", f.count())
+	}
+	// Driven with the nudge, not the full brief; the id is preserved (no new mint).
+	if p := resumed.prompted()[0]; strings.Contains(p, "BRIEF") {
+		t.Fatalf("a resume must be nudged, not re-briefed: %q", p)
+	} else if !strings.Contains(p, "resuming") {
+		t.Fatalf("resume nudge missing its guidance: %q", p)
+	}
+	if id, _ := sess.ReadIdentity(); id.SessionID != "live-id" {
+		t.Fatalf("resume must preserve the session id (no new mint, no --fork), got %q", id.SessionID)
+	}
+}
+
+// TestResumeSkippedWhenContextNearLimit is drvctl-056 AC#3's headroom gate: a
+// recorded id whose parked context fill sits near the window limit is NOT resumed
+// — resuming it would trip the context auto-stop on its first frame — so bringUp
+// cold-starts a fresh session (a clean window) and briefs it.
+func TestResumeSkippedWhenContextNearLimit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	if err := sess.WriteIdentity(session.Identity{Adapter: "claude-code", SessionID: "near-limit-id"}); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	// Parked fill at 90% of a 100k limit — past the 0.8 resume headroom.
+	if err := sess.WriteMeter(session.Meter{Usage: agent.Usage{ContextTokens: 90_000}}); err != nil {
+		t.Fatalf("seed meter: %v", err)
+	}
+
+	f := &factory{}
+	r := w.reconcilerLimit(t, f, newProc(), 100_000)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	waitFor(t, "cold-start fresh on near-limit context", func() bool {
+		return f.count() == 1 && len(f.at(0).prompted()) > 0
+	})
+	fresh := f.at(0)
+	if fresh.resumedWith() != "" {
+		t.Fatalf("a near-limit parked context must cold-start, not resume (got resume id %q)", fresh.resumedWith())
+	}
+	if p := fresh.prompted()[0]; !strings.Contains(p, "BRIEF") {
+		t.Fatalf("a cold-start must inject the full brief, got %q", p)
+	}
+}
+
+// TestResumeWhenContextHasHeadroom is the companion to the near-limit skip: a
+// parked fill comfortably under the resume headroom is resumed normally — the
+// headroom gate only diverts a conversation that is actually near the ceiling
+// (drvctl-056 AC#3).
+func TestResumeWhenContextHasHeadroom(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := newWorld(t)
+	ticket := "PROJ-1"
+	att := w.newTicket(t, ticket)
+
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	if err := sess.WriteIdentity(session.Identity{Adapter: "claude-code", SessionID: "headroom-id"}); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	// 20% of a 100k limit — well under the 0.8 headroom, so resume as usual.
+	if err := sess.WriteMeter(session.Meter{Usage: agent.Usage{ContextTokens: 20_000}}); err != nil {
+		t.Fatalf("seed meter: %v", err)
+	}
+
+	f := &factory{}
+	r := w.reconcilerLimit(t, f, newProc(), 100_000)
+	t.Cleanup(r.Close)
+
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("admit tick: %v", err)
+	}
+	waitFor(t, "resume on headroom", func() bool {
+		return f.count() == 1 && len(f.at(0).prompted()) > 0
+	})
+	resumed := f.at(0)
+	if resumed.resumedWith() != "headroom-id" {
+		t.Fatalf("a parked context with headroom must resume, got resume id %q", resumed.resumedWith())
+	}
+	if p := resumed.prompted()[0]; strings.Contains(p, "BRIEF") {
+		t.Fatalf("a resume must be nudged, not re-briefed: %q", p)
+	}
+}
+
+// TestAsyncWakeResumesParkedSession is drvctl-056 AC#3's end-to-end: after `test
+// --detach && park`, the result-landing wake RESUMES the parked session (amending
+// drvctl-055's cold-start-on-wake) and primes it with a wake note naming the
+// landed test-result, so the agent reads the verdict and claims review / iterates
+// without a recall round-trip to rederive its own just-done state.
+func TestAsyncWakeResumesParkedSession(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "WRK"
+	att := w.newTicket(t, ticket)
+
+	// The attempt already ran a session (recorded, resumable id), launched a detached
+	// test and parked; the session has since been reaped (no live pid in the table).
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	if err := sess.WriteIdentity(session.Identity{Adapter: "claude-code", SessionID: "parked-id"}); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	appendEvt(t, w.root, ticket, att, event.Event{Type: "async-job", Actor: "agent:x", Rung: "unit", Body: "launched detached test"})
+	appendEvt(t, w.root, ticket, att, event.Event{Type: "park", Actor: "agent:x", Body: "parked behind the detached test"})
+	result, err := ticketlog.Append(w.root, ticket, att, event.Event{Type: "test-result", Actor: "agent:x", Outcome: "pass", Rung: "unit", Commit: "deadbeef", Body: "green"})
+	if err != nil {
+		t.Fatalf("append test-result: %v", err)
+	}
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	// The landed result is the doorbell: the reconciler authors the woken-by and
+	// admits the worker, which RESUMES the parked id rather than cold-starting.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("wake tick: %v", err)
+	}
+	waitFor(t, "parked session resumed on wake", func() bool {
+		return f.count() == 1 && len(f.at(0).prompted()) > 0
+	})
+	resumed := f.at(0)
+	if resumed.resumedWith() != "parked-id" {
+		t.Fatalf("async wake must resume the parked id, got %q", resumed.resumedWith())
+	}
+	p := resumed.prompted()[0]
+	if strings.Contains(p, "BRIEF") {
+		t.Fatalf("async wake must resume (nudge), not cold-start (brief): %q", p)
+	}
+	if !strings.Contains(p, "test-result") || !strings.Contains(p, fmt.Sprintf("#%d", result.Seq)) {
+		t.Fatalf("resume nudge must carry the wake note naming the landed result #%d: %q", result.Seq, p)
 	}
 }
 

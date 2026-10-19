@@ -108,6 +108,12 @@ var registry = map[string]StepFunc{
 	"a worker with a synchronous test result and no detached launch":                  givenSyncResultNoLaunch,
 	"the worker has no async-job wake source":                                         thenNoAsyncSource,
 
+	// --- features/manager-as-worker/resume-on-wake.feature (drvctl-056) ---
+	"a resumed session being given its first driving turn":                       givenResumedSessionDriven,
+	"the agent is nudged to continue its work, not cold-started from the brief":  thenNudgedNotBriefed,
+	"a session resumed because its detached test landed a result on its own log": givenResumedByAsyncResult,
+	"the driving turn tells the agent to read that result and hand off":          thenWakeNudgeNamesResult,
+
 	// --- features/progressive-brief/manager-brief.feature (drvctl-053) ---
 	"a coordinator attempt that wants two children and was woken by a child escalation": givenCoordinatorWokenByChild,
 	"the brief lists each child's control-state and open escalations":                   thenBriefListsTeam,
