@@ -14,3 +14,10 @@ Feature: Rerun the BDD rung to regenerate the artefact
     When I rerun the acceptance rung from the board
     Then the rerun is blocked and no bogus report is captured
     And the block explains that the ball is passed back to the human
+
+  # drv-030 bug 1: a rerun must regenerate the report for the code under review — the
+  # attempt's branch / reviewed commit — not whatever the shared main checkout sits on.
+  Scenario: Rerun regenerates the report for the reviewed commit
+    Given a bound BDD rung whose work is committed only on the attempt branch
+    When I rerun the acceptance rung from the board
+    Then the regenerated report matches the reviewed code and names its commit

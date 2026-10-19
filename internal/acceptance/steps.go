@@ -350,7 +350,9 @@ levels:
 `
 
 func givenGreenRung(w *World, sr *StepRun) error {
-	b, err := seedBoard(w, greenPyramid)
+	// Git-backed: bddexec.Rerun resolves the attempt branch and cuts a detached worktree
+	// at its tip (drv-030), so the rerun needs a real repo, not a loose temp dir.
+	b, err := seedRerunBoard(w, greenPyramid, seedCucumberJSON)
 	if err != nil {
 		return err
 	}
@@ -363,7 +365,7 @@ func givenGreenRung(w *World, sr *StepRun) error {
 }
 
 func givenRedRung(w *World, sr *StepRun) error {
-	b, err := seedBoard(w, redPyramid)
+	b, err := seedRerunBoard(w, redPyramid, seedCucumberJSON)
 	if err != nil {
 		return err
 	}
