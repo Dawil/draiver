@@ -74,10 +74,17 @@ const coldStartPreamble = "You are cold-starting a draiver attempt. The followin
 // stream-json process needs to continue — without re-dumping the whole brief it
 // already remembers. It is the resume-side counterpart of InjectBrief: the caller
 // (the reconcile loop's Admit step) picks one by whether bringUp spawned fresh or
-// resumed, keyed on the same session-identity split. It errors only if the prompt
-// cannot be delivered.
-func InjectResumeNudge(ctx context.Context, ticket string, p Prompter) error {
-	if err := p.Prompt(ctx, resumeNudge(ticket)); err != nil {
+// resumed, keyed on the same session-identity split.
+//
+// Priming this turn is also what brings the resumed process *online*: headless
+// `claude --resume` emits no system/init frame until it receives its first user
+// turn, so the caller injects this nudge before confirming the resume came up
+// (drvctl-056). wakeNote, when non-empty, is appended as the reason the session
+// was woken (e.g. a detached test's result landed) so the agent acts on it
+// without re-deriving its own just-done state; an empty wakeNote yields the plain
+// continuation nudge. It errors only if the prompt cannot be delivered.
+func InjectResumeNudge(ctx context.Context, ticket, wakeNote string, p Prompter) error {
+	if err := p.Prompt(ctx, resumeNudge(ticket, wakeNote)); err != nil {
 		return fmt.Errorf("protocol: inject resume nudge for %s: %w", ticket, err)
 	}
 	return nil
@@ -88,12 +95,18 @@ func InjectResumeNudge(ctx context.Context, ticket string, p Prompter) error {
 // does not expect to be re-briefed), points to `draiver brief <ticket>` as the way
 // to re-ground if it needs to, and restates the standing obligation to log as it
 // goes and hand off — claim review or escalate — before it stops. It deliberately
-// does not re-dump the spec and log (that is drvctl-016's legitimate intent).
-func resumeNudge(ticket string) string {
-	return fmt.Sprintf(
+// does not re-dump the spec and log (that is drvctl-016's legitimate intent). A
+// non-empty wakeNote (the reason this attempt was woken) is appended so a resumed
+// session acts on the new fact — e.g. a landed test-result — rather than idling.
+func resumeNudge(ticket, wakeNote string) string {
+	nudge := fmt.Sprintf(
 		"You are resuming a draiver attempt: your session context is restored, so you are not being re-briefed. Continue the work where you left off. If you need to re-ground, run `draiver brief %s` for the current spec, every decision, and any resolved escalation. Log decisions and gotchas as you go, escalate when blocked, and claim `review` or `escalate` when the work is done.",
 		ticket,
 	)
+	if wakeNote != "" {
+		nudge += "\n\n" + wakeNote
+	}
+	return nudge
 }
 
 // Decider answers a tool-permission request back to the agent. The claudecode
