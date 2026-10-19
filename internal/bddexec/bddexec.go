@@ -20,8 +20,12 @@ package bddexec
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -100,9 +104,39 @@ func lastBDDRung(p *pyramid.Pyramid) (pyramid.Level, bool) {
 // Rerun re-executes the attempt's bound BDD rung over its environment and captures
 // a fresh side-by-side artefact set. It never returns an error for an ordinary
 // red/failed outcome — those are carried in the Outcome so the board can explain
-// them; a non-nil error is reserved for a genuinely malformed pyramid or a capture
-// I/O fault the caller should surface as a 500.
-func Rerun(ctx context.Context, root store.Root, wd, ticket, att string) (Outcome, error) {
+// them; a non-nil error is reserved for a genuinely malformed pyramid, an attempt
+// with nothing to review, a worktree-cut failure, or a capture I/O fault the caller
+// should surface as a 500.
+//
+// repo is the attempt's recorded base repo (a.Repo), NOT the directory the rung runs
+// in. A rerun must regenerate the report for the code under review, so — exactly as a
+// review environment does (internal/reviewenv) — it resolves the reviewed commit (the
+// live checkout HEAD, else the attempt branch tip) and cuts a dedicated *detached*
+// worktree at that commit to run in. Running in the shared main checkout (drv-030) ran
+// the rung against whatever branch that tree happened to sit on, silently producing a
+// report for a different codebase; a detached checkout at the reviewed commit also
+// avoids mutating the agent's live coding worktree.
+func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outcome, error) {
+	wm, err := worktree.NewManager(repo)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("bddexec: worktree manager for %s: %w", repo, err)
+	}
+	key := worktree.Key{Ticket: ticket, Attempt: att}
+	commit, err := reviewedCommit(ctx, wm, key)
+	if err != nil {
+		return Outcome{}, err
+	}
+
+	// Cut a dedicated detached worktree at the reviewed commit — a clean slate against
+	// any checkout a prior rerun left, then torn down unconditionally when we return so
+	// a rerun leaves nothing behind.
+	wd := rerunWorktreePath(repo, ticket, att)
+	removeWorktree(ctx, repo, wd)
+	if err := addWorktree(ctx, repo, wd, commit); err != nil {
+		return Outcome{}, fmt.Errorf("bddexec: cut rerun worktree at %s: %w", short(commit), err)
+	}
+	defer removeWorktree(ctx, repo, wd)
+
 	lv, env, ok, err := BoundBDDRung(wd)
 	if err != nil {
 		return Outcome{}, err
@@ -150,10 +184,10 @@ func Rerun(ctx context.Context, root store.Root, wd, ticket, att string) (Outcom
 	// run's own verdict — a failing run's report is evidence worth keeping.
 	runErr := runShell(ctx, wd, lv.Run)
 
-	sha := "nocommit"
-	if s, err := worktree.HeadSHA(ctx, wd); err == nil && strings.TrimSpace(s) != "" {
-		sha = strings.TrimSpace(s)
-	}
+	// Stamp with the reviewed commit we cut the worktree at — never "nocommit". The
+	// worktree is detached at exactly this commit, so the capture names the real code
+	// under review (drv-030).
+	sha := commit
 	runKey, refs, capErr := capture(root, wd, ticket, att, lv, sha)
 	out.RunKey = runKey
 
@@ -210,6 +244,86 @@ func capture(root store.Root, wd, ticket, att string, lv pyramid.Level, sha stri
 		bddartefact.Prune(artDir, rc.Rung, rc.Env(), cfg.BDDArtefactKeep)
 	}
 	return runKey, refs, nil
+}
+
+// reviewedCommit resolves the commit under review for the attempt: the live checkout's
+// HEAD when a coding worktree still exists, else the attempt branch tip — the same
+// two-tier fallback the review env (reviewenv.reviewedCommit) and the pyramid badge
+// (web.gatherPyramidState) use, so a rerun regenerates the report for the exact code a
+// reviewer is judging, whether or not the coding worktree has been reclaimed. An
+// attempt with neither a live checkout nor a branch has nothing to rerun against — a
+// real error the caller surfaces, not a silent run against the wrong tree.
+func reviewedCommit(ctx context.Context, wm *worktree.Manager, key worktree.Key) (string, error) {
+	if wt, ok, err := wm.Locate(ctx, key); err != nil {
+		return "", fmt.Errorf("bddexec: locate worktree %s/%s: %w", key.Ticket, key.Attempt, err)
+	} else if ok {
+		sha, err := worktree.HeadSHA(ctx, wt.Path)
+		if err != nil {
+			return "", fmt.Errorf("bddexec: head of %s: %w", wt.Path, err)
+		}
+		return strings.TrimSpace(sha), nil
+	}
+	sha, ok, err := wm.BranchSHA(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("bddexec: branch sha %s/%s: %w", key.Ticket, key.Attempt, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("bddexec: attempt %s/%s has neither a live checkout nor a branch to rerun", key.Ticket, key.Attempt)
+	}
+	return strings.TrimSpace(sha), nil
+}
+
+// rerunWorktreePath is where a rerun's detached checkout lives: a dedicated base,
+// distinct from both the coding worktree (worktree.Manager's managed base) and the
+// review-env base, keyed by a hash of the repo so reruns for same-named tickets across
+// repos never collide. It falls back to the OS temp dir when the user cache dir is
+// unavailable, mirroring reviewenv.worktreePath.
+func rerunWorktreePath(repo, ticket, att string) string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	sum := sha256.Sum256([]byte(repo))
+	repoHash := hex.EncodeToString(sum[:])[:12]
+	return filepath.Join(base, "draiver", "bdd-reruns", repoHash, ticket, att)
+}
+
+// addWorktree cuts a DETACHED worktree at commit — detached precisely so it does not
+// claim the attempt's coding branch (draiver/<ticket>/<attempt>), which the coding
+// worktree may already hold. Mirrors reviewenv.addWorktree.
+func addWorktree(ctx context.Context, repo, path, commit string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+	return gitRun(ctx, repo, "worktree", "add", "--detach", path, commit)
+}
+
+// removeWorktree force-removes a rerun checkout, pruning the admin entry if the
+// directory already vanished. Best-effort: a missing/never-created worktree is not an
+// error; an empty path is a no-op. Mirrors reviewenv.removeWorktree.
+func removeWorktree(ctx context.Context, repo, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if err := gitRun(ctx, repo, "worktree", "remove", "--force", path); err != nil {
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			gitRun(ctx, repo, "worktree", "prune")
+		}
+	}
+}
+
+// gitRun runs `git -C repo args...`, folding stderr into the error for legibility.
+func gitRun(ctx context.Context, repo string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
+		}
+		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 // runShell runs a `sh -c` command string in wd and returns its run error (nil on

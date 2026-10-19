@@ -547,17 +547,16 @@ func groupByFolder(features []featureVM) []groupVM {
 	return out
 }
 
-// facetList turns the tag→count map into a sorted facet bar: most-used first, ties
-// broken by name so the order is stable.
+// facetList turns the tag→count map into a facet bar sorted alphabetically by tag
+// name. Ordering by name (not by scenario count) keeps the bar stable run-to-run as
+// counts change and makes a specific tag findable by its fixed position, rather than
+// reshuffling whenever scenario counts shift (drv-030).
 func facetList(counts map[string]int) []facetVM {
 	out := make([]facetVM, 0, len(counts))
 	for name, n := range counts {
 		out = append(out, facetVM{Name: name, Count: n})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Count != out[j].Count {
-			return out[i].Count > out[j].Count
-		}
 		return out[i].Name < out[j].Name
 	})
 	return out

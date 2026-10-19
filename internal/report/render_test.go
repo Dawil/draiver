@@ -236,3 +236,24 @@ func TestFormatDuration(t *testing.T) {
 		}
 	}
 }
+
+// TestFacetListSortsAlphabetically pins the drv-030 fix: the tag facet bar is ordered
+// by tag name, not by scenario count. The highest-count tag must not float to the
+// front — were it count-ordered, "zebra" (count 9) would lead; alphabetically "apple"
+// does — so the bar stays stable as counts shift run-to-run.
+func TestFacetListSortsAlphabetically(t *testing.T) {
+	got := facetList(map[string]int{"zebra": 9, "apple": 1, "mango": 5})
+	want := []string{"apple", "mango", "zebra"}
+	if len(got) != len(want) {
+		t.Fatalf("facetList returned %d facets, want %d", len(got), len(want))
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			names := make([]string, len(got))
+			for j, f := range got {
+				names[j] = f.Name
+			}
+			t.Fatalf("facet order = %v, want alphabetical %v", names, want)
+		}
+	}
+}
