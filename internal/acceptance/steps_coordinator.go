@@ -113,7 +113,11 @@ func thenBoardMarksCoordinatorDistinct(w *World, sr *StepRun) error {
 			return fmt.Errorf("board does not mark CAP a distinct coordinator card (missing %q)", want)
 		}
 	}
-	return shoot(w, sr, "/board", "coordinator-card", true, `[data-testid="coordinator-CAP-0001"]`, "")
+	// Screenshot the full styled board page (`/`), not the bare `/board` htmx
+	// partial: the partial has no <head>, so no stylesheet — Playwright would
+	// capture unstyled HTML. The same board.html fragment (coordinator card
+	// included) is embedded in board_page.html, so the wait selector resolves.
+	return shoot(w, sr, "/", "coordinator-card", true, `[data-testid="coordinator-CAP-0001"]`, "")
 }
 
 func thenCoordinatorCardShowsWakeAndQueue(w *World, sr *StepRun) error {
@@ -221,5 +225,7 @@ func thenEscalatedReasonRendersMarkdown(w *World, sr *StepRun) error {
 	if strings.Contains(html, "escalated to `CAP`") {
 		return fmt.Errorf("escalated reason still shows literal backticks — the drvweb-023 bug is not fixed")
 	}
-	return shoot(w, sr, "/board", "escalated-reason-markdown", true, `[data-testid="waiting-KID-0001"]`, "")
+	// Full styled page `/`, not the `/board` partial (which carries no stylesheet):
+	// the embedded board.html fragment holds the waiting-KID reason either way.
+	return shoot(w, sr, "/", "escalated-reason-markdown", true, `[data-testid="waiting-KID-0001"]`, "")
 }
