@@ -507,6 +507,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"pyramidBadge":  s.pyramidBadge,
 			"gitPosition":   s.gitPosition,
 			"paletteVars":   paletteVars,
+			"inlineMD":      s.inlineMD,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -723,6 +724,14 @@ type capabilityVM struct {
 	Overridden bool
 	Modes      []capModeVM
 	Saved      bool
+
+	// WakeChild and QueueDepth are the manager's OWN current action (drvweb-023): the
+	// child its latest in-flight `woken-by` activation names and the doorbells queued
+	// behind it. The panel surfaces the coordinator's own action line, not only the
+	// children's states — the same CoordinatorSignal the board card reads. WakeChild
+	// is empty when the manager is not currently woken.
+	WakeChild  string
+	QueueDepth int
 }
 
 // capChildVM is one row of a Capability's sub-fleet: a `wants:` child with its
@@ -806,6 +815,12 @@ func (s *Server) capability(a project.Attempt) (*capabilityVM, error) {
 	}
 
 	vm := &capabilityVM{Attempt: a}
+	// The manager's own current action line (drvweb-023): its latest in-flight
+	// activation's child + the doorbells queued behind it, derived from the same logs
+	// the board card reads — one source, shown on both surfaces.
+	sig := project.DeriveCoordinatorSignal(a, all, allEdges)
+	vm.WakeChild = sig.WakeChild
+	vm.QueueDepth = sig.QueueDepth
 	for _, child := range edges.Wants {
 		row := capChildVM{Ticket: child, Href: "/ticket/" + child}
 		if ca, ok := latest[child]; ok {
@@ -1117,6 +1132,16 @@ func (s *Server) board() (boardVM, error) {
 		a.EscalatedTo = escalated[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
 		switch a.BoardState() {
 		case project.Running:
+			// A Running coordinator (a `wants:` ticket) renders as a distinct
+			// coordinator card: surface the control plane's own wake reason (drvweb-023).
+			// The activation event and child doorbells are already on the loaded logs, so
+			// this is a pure projection — no extra read, folded on like WaitingReason.
+			if project.IsCoordinator(a.Ticket, edges) {
+				sig := project.DeriveCoordinatorSignal(a, attempts, edges)
+				a.Coordinator = true
+				a.WakeChild = sig.WakeChild
+				a.QueueDepth = sig.QueueDepth
+			}
 			vm.Running = append(vm.Running, a)
 		case project.Pending:
 			// The Pending reason is either the move-up attribution ("escalated to P")
@@ -2332,6 +2357,29 @@ func (s *Server) toHTML(md string) template.HTML {
 		return template.HTML(template.HTMLEscapeString(md))
 	}
 	return template.HTML(buf.String())
+}
+
+// inlineMD renders a short, single-line markdown string (a board card's
+// WaitingReason / wake reason — e.g. "escalated to `P`") to inline HTML, stripping
+// goldmark's block <p> wrapper so it drops cleanly into a <span>. It fixes the
+// drvweb-023 board bug where such a reason's backticks rendered literally because
+// the template interpolated the raw string instead of running it through the
+// markdown pipeline. Safety is identical to toHTML (goldmark passes no raw HTML;
+// linkPolicy enforces the scheme floor); on a convert error it falls back to the
+// HTML-escaped literal. Registered as a template func so the one-line reasons the
+// board holds as plain strings render in place without a pre-rendered VM field.
+func (s *Server) inlineMD(md string) template.HTML {
+	if md == "" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := s.md.Convert([]byte(md), &buf); err != nil {
+		return template.HTML(template.HTMLEscapeString(md))
+	}
+	out := strings.TrimSpace(buf.String())
+	out = strings.TrimPrefix(out, "<p>")
+	out = strings.TrimSuffix(out, "</p>")
+	return template.HTML(out)
 }
 
 func (s *Server) renderSpec(id string) template.HTML {

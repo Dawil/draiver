@@ -487,13 +487,16 @@
      after the swap. */}}
 {{define "capability-panel"}}<section class="capability" id="capability" data-testid="capability">
   <h2 class="capability-title">Capability <span class="capability-sub">sub-fleet</span></h2>
+  {{/* The manager's OWN current action (drvweb-023): the capability panel shows the
+       coordinator's wake reason, not only the children's states. */}}
+  <p class="capability-action" data-testid="capability-action" data-queue="{{.QueueDepth}}">{{if .WakeChild}}On it, re: <span class="coordinator-child">{{.WakeChild}}</span>{{if gt .QueueDepth 0}} <span class="coordinator-queue">· {{.QueueDepth}} queued</span>{{end}}{{else}}No active wake{{end}}</p>
   <ul class="capability-children" data-testid="capability-children">
     {{range .Children}}
     <li class="capability-child" data-testid="capability-child" data-child="{{.Ticket}}">
       <a class="capability-child-id" href="{{.Href}}">{{.Ticket}}</a>
       {{if .HasAttempt}}
         <span class="state state-{{.State}}" data-testid="capability-child-state">{{.StateLabel}}</span>
-        {{if .WaitingReason}}<span class="capability-gate" data-testid="capability-child-gate">{{.WaitingReason}}</span>{{end}}
+        {{if .WaitingReason}}<span class="capability-gate" data-testid="capability-child-gate">{{inlineMD .WaitingReason}}</span>{{end}}
       {{else}}
         <span class="capability-child-none" data-testid="capability-child-none">no attempt yet</span>
       {{end}}

@@ -188,6 +188,58 @@ func (r *Repo) ResolveBy(parent, child, att string, seq int, answer string) (eve
 	})
 }
 
+// LogBy is the downward-direction flow drvctl-054 adds to the `wants:` edge — the
+// `log` sibling of ResolveBy. A parent Capability P pushes durable direction/context
+// into a child it `wants:`, authorized *by the edge itself*: this is how a manager
+// "assigns work" (enabled children + log --by direct + resolve --by unblock). It
+// errors and writes nothing unless P's spec.md `wants:` names the child
+// (edge-authorised via LoadEdges — the same check ResolveBy gates on). On success it
+// appends the typed fact to the CHILD's log, stamped with a `parent:<P>` provenance
+// actor (not a human/agent identity), so `log`/`brief` show the parent directed it.
+//
+// The bright line is uniform with ResolveBy and enforced here, not left to the
+// caller: an edge-authorised `log --by` may only write a non-control fact
+// (gotcha/decision/note/context/…) — never a `review` or `done`, nor any other
+// verb-owned lifecycle event (see forbiddenEdgeLogType). direct-or-unblock ≠ ratify:
+// a parent structurally cannot mark a child Review→Done, because the scoped verb
+// grants no lifecycle event type. The type check runs before the edge load, so a
+// forbidden type is refused without touching the data root.
+func (r *Repo) LogBy(parent, child, att string, e event.Event) (event.Event, error) {
+	if forbiddenEdgeLogType(e.Type) {
+		return event.Event{}, fmt.Errorf("log --by cannot write a %q — edge-authorised writes are facts, never lifecycle events (direct ≠ ratify)", e.Type)
+	}
+	edges, err := project.LoadEdges(r.root, parent)
+	if err != nil {
+		return event.Event{}, err
+	}
+	if !wants(edges.Wants, child) {
+		return event.Event{}, fmt.Errorf("%s does not want %s — not authorized", parent, child)
+	}
+	e.Actor = "parent:" + parent
+	return r.AppendAt(child, att, e)
+}
+
+// forbiddenEdgeLogType reports whether t is a control/lifecycle event type an
+// edge-authorised `log --by` must never write. The bright line (drvctl-054, uniform
+// with resolve --by): edge-authorised writes are facts and resolutions only — the
+// ratification acts {review, done} and the other verb-owned lifecycle events are
+// off-limits, so a parent can direct and unblock a child but never ratify its
+// Review→Done or bypass a sibling verb (e.g. forging a `resolution` that dodges the
+// escalation-ref check). `decision` is deliberately NOT here: it is a genuine
+// log-fact — a redirect — even though logging one can reopen a Review; directing more
+// work is the opposite of ratifying.
+func forbiddenEdgeLogType(t string) bool {
+	switch t {
+	case "review", "done",
+		"created", "escalation", "resolution",
+		"enable", "disable", "supervision",
+		"archive", "unarchive",
+		"test-result", "woken-by":
+		return true
+	}
+	return false
+}
+
 // checkEscalation is the shared pre-append validation both resolve flows fold
 // through: seq must name an event on the attempt, and that event must be an open
 // escalation type. It reads the log but writes nothing, so a failed check leaves

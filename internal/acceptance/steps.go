@@ -107,6 +107,14 @@ var registry = map[string]StepFunc{
 	"a park hand-off is recorded on the worker's own log":                             thenParkRecorded,
 	"a worker with a synchronous test result and no detached launch":                  givenSyncResultNoLaunch,
 	"the worker has no async-job wake source":                                         thenNoAsyncSource,
+
+	// --- features/progressive-brief/manager-brief.feature (drvctl-053) ---
+	"a coordinator attempt that wants two children and was woken by a child escalation": givenCoordinatorWokenByChild,
+	"the brief lists each child's control-state and open escalations":                   thenBriefListsTeam,
+	"the brief injects the coordinator protocol":                                        thenBriefInjectsProtocol,
+	"the wake reason is the tail of the brief":                                          thenWakeReasonIsTail,
+	"a plain worker attempt with no wants edges":                                        givenPlainWorkerAttempt,
+	"the brief carries no manager injection":                                            thenNoManagerInjection,
 }
 
 // invokeStep runs the step definition matching text, or reports errUndefined so the

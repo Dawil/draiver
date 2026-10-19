@@ -64,6 +64,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	mergeRemote = ""
 	archiveAccepted, archiveAbandoned = false, false
 	resolveByFlag = ""
+	logByFlag = ""
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog, testDetach = false, false
 	reportJSON, reportRun, reportOut = "", "", ""
@@ -347,6 +348,78 @@ func TestResolveByReEscalationReProjects(t *testing.T) {
 	}
 	if out, _ := run(t, "--data", dir, "inbox"); strings.Contains(out, "PROJ-2") {
 		t.Errorf("re-escalated child leaked back into the human inbox: %q", out)
+	}
+}
+
+// A parent that `wants:` a child may push a durable fact into it with `log --by`;
+// the fact lands on the CHILD's log, carries the given type/body, and is stamped
+// with parent: provenance distinct from any human actor. drvctl-054 acceptance (AC1).
+func TestLogByParentDirectsChild(t *testing.T) {
+	dir := seedParentChild(t)
+	before, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	out, code := run(t, "--data", dir, "--actor", "agent:parent", "log", "PROJ-2",
+		"use the /v2 endpoint; /v1 is deprecated", "--type", "decision", "--by", "PROJ-1")
+	if code != 0 {
+		t.Fatalf("log --by exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "by PROJ-1") {
+		t.Errorf("output missing by-provenance: %q", out)
+	}
+	after, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	if len(after) != len(before)+1 {
+		t.Fatalf("log --by wrote %d events, want one more than %d", len(after), len(before))
+	}
+	last := after[len(after)-1]
+	if last.Type != "decision" || last.Body != "use the /v2 endpoint; /v1 is deprecated" {
+		t.Errorf("unexpected fact written: %+v", last)
+	}
+	if last.Actor != "parent:PROJ-1" {
+		t.Errorf("provenance actor = %q want parent:PROJ-1 (distinct from a human)", last.Actor)
+	}
+}
+
+// The bright line: `log --by` can never write a `review` or `done`, even for an
+// authorized parent — edge-authorised writes are facts, never ratification. The
+// refusal is nonzero and writes nothing. drvctl-054 acceptance (AC2).
+func TestLogByCannotRatify(t *testing.T) {
+	for _, typ := range []string{"review", "done"} {
+		dir := seedParentChild(t)
+		before, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+		_, code, err := runE(t, "--data", dir, "--actor", "agent:parent", "log", "PROJ-2",
+			"looks done to me", "--type", typ, "--by", "PROJ-1")
+		if code == 0 {
+			t.Fatalf("log --by --type %s should refuse (direct ≠ ratify)", typ)
+		}
+		if err == nil || !strings.Contains(err.Error(), typ) {
+			t.Errorf("--type %s refusal = %v, want a message naming the type", typ, err)
+		}
+		after, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+		if len(after) != len(before) {
+			t.Errorf("--type %s refusal wrote to the log: %d events, was %d", typ, len(after), len(before))
+		}
+	}
+}
+
+// An unauthorized `--by` (the parent does not `wants:` the child) is refused with a
+// nonzero exit and nothing is written — authorisation rides on the edge, exactly as
+// for resolve --by. drvctl-054 acceptance (AC3).
+func TestLogByUnauthorizedWritesNothing(t *testing.T) {
+	dir := seedParentChild(t)
+	// PROJ-3 exists but does not want PROJ-2.
+	if _, code := run(t, "--data", dir, "--actor", "human:test", "new", "PROJ-3", "--title", "Stranger", "--repo", dir); code != 0 {
+		t.Fatal("new PROJ-3 exited nonzero")
+	}
+	before, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	_, code, err := runE(t, "--data", dir, "log", "PROJ-2", "sneaky direction", "--type", "note", "--by", "PROJ-3")
+	if code == 0 {
+		t.Fatal("expected nonzero exit logging unauthorized")
+	}
+	if err == nil || !strings.Contains(err.Error(), "does not want") || !strings.Contains(err.Error(), "not authorized") {
+		t.Errorf("error = %v, want a 'does not want … not authorized' refusal", err)
+	}
+	after, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-2", "0001")
+	if len(after) != len(before) {
+		t.Errorf("unauthorized --by wrote to the log: %d events, was %d", len(after), len(before))
 	}
 }
 

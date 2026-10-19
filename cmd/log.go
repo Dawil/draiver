@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 var (
@@ -16,6 +17,7 @@ var (
 	logLinks      []string
 	logSupersedes []int
 	logTags       []string
+	logByFlag     string
 )
 
 var logCmd = &cobra.Command{
@@ -27,7 +29,12 @@ var logCmd = &cobra.Command{
 		"When a fact turns out wrong, don't append a contradicting fact — supersede the\n" +
 		"stale one with --supersedes <seq> (find its seq in `draiver recall`), so the\n" +
 		"brief's index drops it from the live set. --tag attaches opaque retrieval labels\n" +
-		"(reuse tags already visible in the index to avoid drift).",
+		"(reuse tags already visible in the index to avoid drift).\n\n" +
+		"With --by PARENT, a coordinator pushes durable direction/context into one of its\n" +
+		"children (the downward-direction flow over the `wants:` edge, the log sibling of\n" +
+		"`resolve --by`): PARENT must `wants:` TICKET, and the fact is stamped with\n" +
+		"PARENT's provenance rather than a human actor. It can only ever write a fact —\n" +
+		"never a `review` or `done` (direct ≠ ratify).",
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id, msg := args[0], args[1]
@@ -38,7 +45,7 @@ var logCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		e, att, err := appendEvent(id, event.Event{
+		ev := event.Event{
 			Type:       logType,
 			Refs:       logRefs,
 			Artefacts:  logArtefacts,
@@ -46,11 +53,31 @@ var logCmd = &cobra.Command{
 			Supersedes: logSupersedes,
 			Tags:       logTags,
 			Body:       msg,
-		})
+		}
+		if logByFlag != "" {
+			root, err := resolveRoot()
+			if err != nil {
+				return err
+			}
+			if !root.Exists(id) {
+				return fmt.Errorf("ticket %q not found under %s", id, root.Dir)
+			}
+			att, err := resolveAttempt(root, id)
+			if err != nil {
+				return err
+			}
+			written, err := repo.New(root, resolveActor()).LogBy(logByFlag, id, att, ev)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s (by %s)\n", written.Type, written.Seq, id, att, logByFlag)
+			return nil
+		}
+		written, att, err := appendEvent(id, ev)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s\n", e.Type, e.Seq, id, att)
+		fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s\n", written.Type, written.Seq, id, att)
 		return nil
 	},
 }
@@ -61,6 +88,7 @@ func init() {
 	logCmd.Flags().StringSliceVar(&logArtefacts, "artefact", nil, "path under artefacts/ this event references (repeatable)")
 	logCmd.Flags().IntSliceVar(&logSupersedes, "supersedes", nil, "seq of an event this one retires from the live set (repeatable; must exist on this attempt)")
 	logCmd.Flags().StringSliceVar(&logTags, "tag", nil, "opaque retrieval label (repeatable; no meaning to draiver)")
+	logCmd.Flags().StringVar(&logByFlag, "by", "", "log on behalf of a parent Capability that `wants:` this ticket (downward direction; facts only, never review/done)")
 	addLinkFlags(logCmd, &logURLs, &logLinks)
 	rootCmd.AddCommand(logCmd)
 }

@@ -53,6 +53,17 @@ body {
 .col-pending { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .col-pending h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
 .card .waiting { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
+.card .waiting code { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 0 3px; border-radius: 3px; }
+
+/* A coordinator card (drvweb-023): a `wants:` ticket is a manager, not an anonymous
+   running ticket. A left accent rail (the same eucalypt the running dot uses) marks
+   it at a glance; the .coordinator line beneath the meta-row carries the control
+   plane's wake reason ("manager — on it, re: C3") and, when non-empty, the derived
+   queue depth as a quiet pill. */
+.card-coordinator .card { border-left: 3px solid var(--dot-running); }
+.card .coordinator { display: block; color: var(--ink); font-size: 12px; margin-top: 5px; }
+.card .coordinator-child { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; background: color-mix(in srgb, var(--dot-running) 18%, transparent); color: var(--dot-running); padding: 0 4px; border-radius: 3px; }
+.card .coordinator-queue { color: var(--muted); }
 
 /* The card tile and its optional external "Review changes" action are siblings
    inside .card-wrap (an <a> cannot nest in the tile's <a>); the action is
@@ -348,6 +359,11 @@ body {
 .capability-sub { font-weight: 400; text-transform: none; letter-spacing: 0; }
 /* Sub-fleet: one row per `wants:` child — id, control-state badge, and (for a
    Pending child) the muted "waiting on X" gate reason, matching the board's line. */
+/* The manager's own current action line (drvweb-023), above the children: the
+   coordinator's wake reason, so the panel shows what the manager is doing, not only
+   the children's states. Reuses the card's .coordinator-child / -queue chips. */
+.capability-action { margin: 0 0 12px; font-size: 13px; color: var(--ink); }
+.capability-gate code { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 0 3px; border-radius: 3px; }
 .capability-children { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .capability-child { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .capability-child-id { color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 600; }

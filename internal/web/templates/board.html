@@ -42,7 +42,7 @@
      card swaps away). A bottom-corner external "Review changes" action appears on
      Review-column cards with a scheme-checked review link (see reviewLink). */}}
 {{define "card"}}{{$a := .}}
-<div class="card-wrap" data-testid="card-{{.Ticket}}-{{.ID}}">
+<div class="card-wrap{{if .Coordinator}} card-coordinator{{end}}" data-testid="card-{{.Ticket}}-{{.ID}}"{{if .Coordinator}} data-coordinator="true"{{end}}>
   <a class="card" data-testid="attempt-link-{{.Ticket}}-{{.ID}}" href="{{cardHref .}}">
     <span class="tid">{{.Ticket}} <span class="att">/{{.ID}}</span></span>
     <span class="title">{{.Title}}</span>
@@ -52,9 +52,15 @@
       {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
       {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
     </span>
+    {{/* Coordinator signal (drvweb-023): a `wants:` ticket is a manager, not an
+         anonymous running ticket. Surface the control plane's recorded wake reason
+         (the latest `woken-by` activation's child) and the derived queue depth. */}}
+    {{if .Coordinator}}<span class="coordinator" data-testid="coordinator-{{.Ticket}}-{{.ID}}" data-queue="{{.QueueDepth}}">{{if .WakeChild}}manager — on it, re: <span class="coordinator-child">{{.WakeChild}}</span>{{else}}manager — idle{{end}}{{if gt .QueueDepth 0}} <span class="coordinator-queue" data-testid="queue-{{.Ticket}}-{{.ID}}">· {{.QueueDepth}} queued</span>{{end}}</span>{{end}}
     {{/* WaitingReason is set only for a Pending card (board()), so this quiet
-         "waiting on X" line renders on the Pending tier alone. */}}
-    {{if .WaitingReason}}<span class="waiting" data-testid="waiting-{{.Ticket}}-{{.ID}}">{{.WaitingReason}}</span>{{end}}
+         "waiting on X" line renders on the Pending tier alone. Rendered through the
+         markdown pipeline (inlineMD) so a reason like "escalated to `P`" shows the
+         ticket id as code, not literal backticks (the drvweb-023 bug fix). */}}
+    {{if .WaitingReason}}<span class="waiting" data-testid="waiting-{{.Ticket}}-{{.ID}}">{{inlineMD .WaitingReason}}</span>{{end}}
   </a>
   <div class="card-actions">
     {{if canEnable .}}
