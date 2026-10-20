@@ -96,6 +96,30 @@ environments:
       - name: ENV_NAME
         default: review
 
+  # review-cli is a SECOND qualifying review environment (drv-032 #12/#22), for reviewing
+  # CLI changes the webui `review` env above cannot exercise. The recall work on this ticket
+  # (--tags, the ticket@attempt form, the stderr attempt-aware header) is a terminal feature,
+  # so this stands up a ttyd web terminal (tsl0922/ttyd) in a sandboxed docker container over
+  # the reviewed draiver binary and a pre-seeded board — a browser shell the reviewer drives.
+  #
+  # It COEXISTS with `review`: the per-repo `reviewEnvironment` setting names ONE env, so an
+  # operator reviewing a CLI ticket points it at `review-cli` from the attempt page (and back
+  # to `review` for UI tickets) — this entry changes no default on its own. Like `review`, it
+  # is referenced only by that setting, never by a level, so it never runs during `draiver
+  # test`; it is launched on demand from an attempt page in Review.
+  #
+  # review-env/ttyd/up.sh binds the injected DRAIVER_REVIEW_PORT and namespaces its
+  # container/image by DRAIVER_REVIEW_INSTANCE, so concurrent review envs never collide;
+  # down.sh force-removes that container (releasing the port) and healthcheck.sh HTTP-probes
+  # it. See review-env/ttyd/README.md.
+  - name: review-cli
+    up: sh review-env/ttyd/up.sh
+    down: sh review-env/ttyd/down.sh
+    healthchecks:
+      - name: ttyd-ready
+        script: sh review-env/ttyd/healthcheck.sh
+    url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+
 levels:
   - name: unit
     run: go test ./...
