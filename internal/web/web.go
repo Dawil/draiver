@@ -44,6 +44,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
@@ -462,9 +463,12 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	// closes that carve-out so body links/images/autolinks are http/https (or
 	// relative) only — the render-time scheme floor, independent of the
 	// append-time event.ValidateLink check (defense in depth).
-	md := goldmark.New(goldmark.WithParserOptions(
-		parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
-	))
+	md := goldmark.New(
+		goldmark.WithExtensions(extension.Table),
+		goldmark.WithParserOptions(
+			parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
+		),
+	)
 	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui", supDefault: project.SupervisionPassthrough}
 	// gatherPyramidState is a method, so bind it once s exists; tests overwrite the
 	// field with a stub, exactly as they do s.alive.

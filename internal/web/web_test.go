@@ -526,6 +526,67 @@ func TestLogBodyMarkdownRenderedAndSanitized(t *testing.T) {
 	}
 }
 
+// TestLogBodyPipeTableRendered proves the GFM pipe-table extension is wired into
+// the shared goldmark instance (drvweb-024): a pipe table in an event body renders
+// as a real HTML <table> with header and data cells, not the literal "|"/"---"
+// lines it used to. It also pins the scheme-floor invariant across the extension:
+// a javascript: link inside a table cell is still blanked by linkPolicy.
+func TestLogBodyPipeTableRendered(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("MD-2", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath("MD-2"), []byte("---\nid: MD-2\ntitle: Markdown\n---\n\nspec"), 0o644)
+	body := "| Col A | Col B |\n| --- | --- |\n| one | [x](javascript:alert(1)) |\n"
+	if _, err := ticketlog.Append(root, "MD-2", "0001", event.Event{Type: "note", Actor: "agent:x", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := get(t, s.Handler(), "/ticket/MD-2/0001")
+	if rr.Code != 200 {
+		t.Fatalf("GET detail = %d", rr.Code)
+	}
+	out := rr.Body.String()
+
+	// The pipe table is parsed as a table, not a paragraph: a real <table> with the
+	// header cell and a body cell, and none of the literal pipe-table syntax left over.
+	for _, want := range []string{"<table>", "<th>Col A</th>", "<td>one</td>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected rendered table fragment %q in body", want)
+		}
+	}
+	if strings.Contains(out, "| Col A | Col B |") || strings.Contains(out, "| --- | --- |") {
+		t.Errorf("pipe-table source leaked literally; table extension not applied")
+	}
+	// Scheme floor still holds inside a table cell: the javascript: destination is blanked.
+	if strings.Contains(out, "javascript:alert(1)") {
+		t.Errorf("unsanitised javascript: link leaked from a table cell")
+	}
+}
+
+// TestProseTableStyled pins the table styling served alongside the rendered
+// tables (drvweb-024): the default UA table reads as borderless, unspaced text,
+// so the stylesheet keys a minimal grid (collapsed hairline borders + a panel-2
+// header row) off the same theme tokens the rest of the prose uses. Asserting on
+// the served stylesheet keeps the rule a contract, matching the archive
+// hover-reveal and target-highlight CSS checks above.
+func TestProseTableStyled(t *testing.T) {
+	h := newServer(t)
+	css := get(t, h, "/static/style.css").Body.String()
+	for _, want := range []string{
+		".prose table { border-collapse: collapse;",
+		".prose th, .prose td { border: 1px solid var(--line);",
+		".prose th { background: var(--panel-2);",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("style.css missing prose table rule %q", want)
+		}
+	}
+}
+
 // TestFaviconServedAndWired pins the favicon contract: all three SVG variants
 // and the swap script are served from the embedded static FS, every full page
 // references the favicon by the id the script swaps, and each badged variant
