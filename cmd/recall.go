@@ -3,21 +3,26 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/repo"
+	"github.com/Dawil/draiver/internal/store"
 )
 
 var (
-	recallChain int
-	recallType  string
-	recallTags  []string
-	recallGrep  string
-	recallAll   bool
+	recallChain   int
+	recallType    string
+	recallTags    []string
+	recallGrep    string
+	recallAll     bool
+	recallTagList bool
 )
 
 var recallCmd = &cobra.Command{
@@ -28,7 +33,9 @@ var recallCmd = &cobra.Command{
 		"tags, headline); with one or more seqs it prints their full bodies and artefact\n" +
 		"pointers; with --chain it prints a fact's full supersession history, oldest to\n" +
 		"newest. Filter the index with --type, --tag (repeatable; AND), and --grep, and\n" +
-		"include retired facts with --all. It reads the same on-disk, hash-chained log\n" +
+		"include retired facts with --all; --tags lists the distinct tags in use. The\n" +
+		"positional argument accepts the ticket@attempt address form; with no @attempt it\n" +
+		"resolves to the latest attempt. It reads the same on-disk, hash-chained log\n" +
 		"`audit` trusts — offline, no daemon.",
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -39,28 +46,50 @@ var recallCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if !root.Exists(id) {
-			return fmt.Errorf("ticket %q not found under %s", id, root.Dir)
-		}
-		att, err := resolveAttempt(root, id)
+		// Parse the ticket@attempt address form through the same parser archive/ctl use
+		// (explicit @attempt wins; else --attempt / $DRAIVER_ATTEMPT / latest). Both the
+		// ticket and the resolved attempt must exist.
+		ticket, att, err := resolveCtlTarget(root, id)
 		if err != nil {
 			return err
 		}
-		events, err := repo.New(root, resolveActor()).ReadLog(id, att)
+
+		// Validate the mode-exclusive flags before writing anything. --chain and --tags
+		// are each index-level and reject stray positional seqs; --tags and --chain are
+		// mutually exclusive too.
+		chainMode := cmd.Flags().Changed("chain")
+		if recallTagList {
+			if len(seqArgs) > 0 {
+				return fmt.Errorf("--tags is an index summary; drop the positional seq(s)")
+			}
+			if chainMode {
+				return fmt.Errorf("--tags cannot be combined with --chain")
+			}
+		}
+		if chainMode && len(seqArgs) > 0 {
+			return fmt.Errorf("--chain takes the seq as its value; drop the positional seq(s)")
+		}
+
+		events, err := repo.New(root, resolveActor()).ReadLog(ticket, att)
 		if err != nil {
 			return err
 		}
 		view := kb.Fold(events)
 		out := cmd.OutOrStdout()
 
+		// A one-line context header names the resolved target so a reader can tell which
+		// attempt they are looking at. When the attempt was not chosen explicitly and the
+		// ticket has siblings, it also flags their existence and points at `attempt ls`. It
+		// goes to stderr so the stdout index/body stays clean for `| grep`-style consumers.
+		if err := writeContextHeader(cmd.ErrOrStderr(), root, ticket, att, attemptChosenExplicitly(id)); err != nil {
+			return err
+		}
+
 		// --chain: a fact's supersession history, oldest-to-newest. It takes the seq as
 		// its own value, so no positional seqs are expected alongside it.
-		if cmd.Flags().Changed("chain") {
-			if len(seqArgs) > 0 {
-				return fmt.Errorf("--chain takes the seq as its value; drop the positional seq(s)")
-			}
+		if chainMode {
 			if _, ok := view.Get(recallChain); !ok {
-				return fmt.Errorf("no event #%d on %s/%s", recallChain, id, att)
+				return fmt.Errorf("no event #%d on %s/%s", recallChain, ticket, att)
 			}
 			chain := view.Chain(recallChain)
 			for i, f := range chain {
@@ -81,7 +110,7 @@ var recallCmd = &cobra.Command{
 			for i, s := range seqs {
 				f, ok := view.Get(s)
 				if !ok {
-					return fmt.Errorf("no event #%d on %s/%s", s, id, att)
+					return fmt.Errorf("no event #%d on %s/%s", s, ticket, att)
 				}
 				if i > 0 {
 					fmt.Fprintln(out)
@@ -91,26 +120,47 @@ var recallCmd = &cobra.Command{
 			return nil
 		}
 
-		// Default: the filtered index.
-		var re *regexp.Regexp
-		if recallGrep != "" {
-			if re, err = regexp.Compile(recallGrep); err != nil {
-				return fmt.Errorf("--grep %q: %w", recallGrep, err)
-			}
+		// Both the index and --tags scope to the same filtered set of facts: live facts
+		// (or all with --all), narrowed by --type, --tag, and --grep.
+		re, err := compileGrep(recallGrep)
+		if err != nil {
+			return err
 		}
 		base := view.Live()
 		if recallAll {
 			base = view.Facts
 		}
+
+		// --tags: enumerate the distinct tags of the in-scope facts, sorted, with counts.
+		if recallTagList {
+			counts := map[string]int{}
+			for _, f := range base {
+				if !matchFilters(f, re) {
+					continue
+				}
+				for _, t := range f.Tags {
+					counts[t]++
+				}
+			}
+			if len(counts) == 0 {
+				fmt.Fprintln(out, "(no tags)")
+				return nil
+			}
+			tags := make([]string, 0, len(counts))
+			for t := range counts {
+				tags = append(tags, t)
+			}
+			sort.Strings(tags)
+			for _, t := range tags {
+				fmt.Fprintf(out, "%-16s (%d)\n", t, counts[t])
+			}
+			return nil
+		}
+
+		// Default: the filtered index.
 		var shown int
 		for _, f := range base {
-			if recallType != "" && f.Type != recallType {
-				continue
-			}
-			if !hasAllTags(f.Tags, recallTags) {
-				continue
-			}
-			if re != nil && !re.MatchString(f.Body) && !re.MatchString(f.Headline) {
+			if !matchFilters(f, re) {
 				continue
 			}
 			fmt.Fprintf(out, "%s\n", indexLine(f))
@@ -121,6 +171,67 @@ var recallCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// compileGrep compiles the --grep pattern, or returns nil when no pattern is set.
+func compileGrep(pat string) (*regexp.Regexp, error) {
+	if pat == "" {
+		return nil, nil
+	}
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return nil, fmt.Errorf("--grep %q: %w", pat, err)
+	}
+	return re, nil
+}
+
+// matchFilters reports whether a fact passes the shared index filters: --type, --tag
+// (AND), and --grep (body or headline). It is the one predicate the index and --tags
+// share, so both scope to the same facts.
+func matchFilters(f kb.Fact, re *regexp.Regexp) bool {
+	if recallType != "" && f.Type != recallType {
+		return false
+	}
+	if !hasAllTags(f.Tags, recallTags) {
+		return false
+	}
+	if re != nil && !re.MatchString(f.Body) && !re.MatchString(f.Headline) {
+		return false
+	}
+	return true
+}
+
+// attemptChosenExplicitly reports whether the user pinned the attempt rather than
+// falling through to the latest: an @attempt suffix on the positional arg, the
+// --attempt flag, or $DRAIVER_ATTEMPT. It drives whether the context header flags the
+// existence of sibling attempts (only meaningful when the attempt was NOT chosen).
+func attemptChosenExplicitly(arg string) bool {
+	if strings.ContainsRune(arg, '@') {
+		return true
+	}
+	if attemptFlag != "" {
+		return true
+	}
+	return os.Getenv("DRAIVER_ATTEMPT") != ""
+}
+
+// writeContextHeader prints the resolved `# ticket@attempt` to w. When the attempt was
+// not chosen explicitly and the ticket has more than one attempt, it extends the line
+// to state the count and point at `attempt ls`, so a reader of an implicit `recall
+// <ticket>` learns the siblings exist without a second command.
+func writeContextHeader(w io.Writer, root store.Root, ticket, att string, explicit bool) error {
+	line := fmt.Sprintf("# %s@%s", ticket, att)
+	if !explicit {
+		atts, err := attempt.List(root, ticket)
+		if err != nil {
+			return err
+		}
+		if len(atts) > 1 {
+			line += fmt.Sprintf(" — latest of %d attempts (draiver attempt ls %s)", len(atts), ticket)
+		}
+	}
+	fmt.Fprintln(w, line)
+	return nil
 }
 
 // indexLine renders one index entry: `#<seq> <type> [tags] — <headline>`, with a
@@ -194,5 +305,6 @@ func init() {
 	recallCmd.Flags().StringSliceVar(&recallTags, "tag", nil, "filter the index to facts carrying this tag (repeatable; AND)")
 	recallCmd.Flags().StringVar(&recallGrep, "grep", "", "filter the index to facts whose body or headline matches this regexp")
 	recallCmd.Flags().BoolVar(&recallAll, "all", false, "include superseded facts in the index")
+	recallCmd.Flags().BoolVar(&recallTagList, "tags", false, "list the distinct tags of the in-scope facts (sorted, with counts) instead of the index")
 	rootCmd.AddCommand(recallCmd)
 }
