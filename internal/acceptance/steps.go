@@ -90,6 +90,11 @@ var registry = map[string]StepFunc{
 	"recall answers which gotchas are known":                    thenRecallAnswersGotchas,
 	"recall answers the history of a superseded fact":           thenRecallAnswersHistory,
 
+	// --- features/attempt-page/markdown-tables.feature (drvweb-024) ---
+	"a board attempt with a markdown pipe table in an event body": givenBoardWithPipeTable,
+	"the attempt page renders the pipe table as an HTML table":    thenPageRendersPipeTable,
+	"the attempt page keeps the scheme floor inside the table":    thenPageKeepsSchemeFloorInTable,
+
 	// --- features/progressive-brief/board.feature (drv-026, AC6) ---
 	"a board attempt with a superseded fact and tags":                           givenBoardWithSupersededAndTags,
 	"the attempt page demotes the superseded fact with a link to its successor": thenPageDemotesSuperseded,
