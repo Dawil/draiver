@@ -39,9 +39,11 @@ func init() {
 		"a running review environment whose teardown does not stop it":             givenLeakingEnv,
 		"a Review attempt whose reviewEnvironment names an incomplete environment": givenIncompleteEnv,
 		"a Review attempt whose review environment declares a settable ENV_NAME":   givenParamEnv,
+		"a Review attempt whose pyramid declares two review-ready environments":    givenTwoReviewReadyEnvs,
 		"I open the attempt page":                                                  whenOpenAttemptPage,
 		"I launch the review environment":                                          whenLaunchReviewEnv,
 		"I launch the review environment with ENV_NAME set to a custom value":      whenLaunchWithEnvName,
+		"I launch both review environments":                                        whenLaunchBothEnvs,
 		"I tear the review environment down":                                       whenTearReviewEnvDown,
 		"the review-environment panel offers to launch it":                         thenPanelOffersLaunch,
 		"the environment comes up and the attempt page reveals a clickable URL":    thenUpRevealsURL,
@@ -50,6 +52,7 @@ func init() {
 		"the confirm-down healthcheck is red and the panel returns to rest":        thenTornDownToRest,
 		"the panel warns of a leak rather than reporting the environment gone":     thenLeakWarned,
 		"the panel shows a misconfiguration note and offers no launch":             thenMisconfigNote,
+		"both run concurrently with their own URLs, and tearing one down leaves the other up": thenBothRunConcurrently,
 	} {
 		if _, clash := registry[text]; clash {
 			panic("acceptance: duplicate step registration: " + text)
@@ -189,6 +192,32 @@ levels:
     run: "true"
 `
 
+// twoEnvPyramid declares TWO review-ready envs — "review" (the webui instance) and
+// "review-cli" — both backed by the same committed scripts (drv-034). Each env gets its
+// own detached review worktree, allocated port, and instance slug, so they stand up a
+// real server apiece and run concurrently without clashing. It is the self-contained
+// fixture the concurrency scenario drives (the repo's real pyramid carries only
+// "review" on this branch; see gotcha #6).
+const twoEnvPyramid = `environments:
+  - name: review
+    up: sh up.sh
+    down: sh down.sh
+    healthchecks:
+      - name: http-ready
+        script: sh healthcheck.sh
+    url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+  - name: review-cli
+    up: sh up.sh
+    down: sh down.sh
+    healthchecks:
+      - name: http-ready
+        script: sh healthcheck.sh
+    url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+levels:
+  - name: check
+    run: "true"
+`
+
 // The incomplete pyramid names an environment that is NOT review-ready (no
 // healthcheck), so the panel must render a loud misconfiguration note rather than
 // vanishing.
@@ -209,7 +238,12 @@ type reviewBoard struct {
 	mgr  *reviewenv.Manager
 	att  project.Attempt
 	env  *pyramid.Environment
+	p    *pyramid.Pyramid
 	repo string
+	// envNames is every review-ready env the fixture pyramid declares, so the
+	// scenario's force-kill cleanup tears down each one the attempt might have launched
+	// (drv-034's concurrency: more than one env can be live at once).
+	envNames []string
 }
 
 func currentReviewBoard(w *World) (*reviewBoard, error) {
@@ -328,9 +362,15 @@ func seedReviewBoard(w *World, pyramidYAML string) (*reviewBoard, error) {
 		return nil, err
 	}
 	env, _ := p.EnvironmentByName(revEnv)
+	var envNames []string
+	for i := range p.Environments {
+		if p.Environments[i].ReviewReady() == nil {
+			envNames = append(envNames, p.Environments[i].Name)
+		}
+	}
 
 	bd := &board{root: root, wd: repo, srv: ts}
-	rb := &reviewBoard{b: bd, mgr: mgr, att: att, env: env, repo: repo}
+	rb := &reviewBoard{b: bd, mgr: mgr, att: att, env: env, p: p, repo: repo, envNames: envNames}
 	w.set("board", bd) // so shoot() finds the live server
 	w.set("reviewBoard", rb)
 	return rb, nil
@@ -376,7 +416,15 @@ func launchReviewEnv(w *World, overrides map[string]string) error {
 func forceKillReviewEnv(rb *reviewBoard) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if rec, ok, err := rb.mgr.Load(rb.att.Ticket, rb.att.ID); err == nil && ok && rec.Worktree != "" {
+	names := rb.envNames
+	if len(names) == 0 && rb.env != nil {
+		names = []string{rb.env.Name}
+	}
+	for _, name := range names {
+		rec, ok, err := rb.mgr.Load(rb.att.Ticket, rb.att.ID, name)
+		if err != nil || !ok || rec.Worktree == "" {
+			continue
+		}
 		if data, err := os.ReadFile(filepath.Join(rec.Worktree, "server.pid")); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
 				if proc, err := os.FindProcess(pid); err == nil {
@@ -424,6 +472,37 @@ func givenParamEnv(w *World, sr *StepRun) error {
 	return err
 }
 
+func givenTwoReviewReadyEnvs(w *World, sr *StepRun) error {
+	_, err := seedReviewBoard(w, twoEnvPyramid)
+	return err
+}
+
+// launchReviewEnvNamed drives the real lifecycle to Up for ONE named env on the board's
+// attempt (drv-034), resolving it from the fixture pyramid. It registers the shared
+// force-kill cleanup once and returns the Up record. It is the per-env analogue of
+// launchReviewEnv, used by the concurrency scenario to stand up two envs at once.
+func launchReviewEnvNamed(w *World, name string) (reviewenv.Record, error) {
+	rb, err := currentReviewBoard(w)
+	if err != nil {
+		return reviewenv.Record{}, err
+	}
+	env, ok := rb.p.EnvironmentByName(name)
+	if !ok {
+		return reviewenv.Record{}, fmt.Errorf("no environment %q in the fixture pyramid", name)
+	}
+	w.defer_(func() { forceKillReviewEnv(rb) })
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	rec, err := rb.mgr.Launch(ctx, rb.att, env, nil)
+	if err != nil {
+		return rec, fmt.Errorf("launch %s errored: %w", name, err)
+	}
+	if rec.State != reviewenv.Up || strings.TrimSpace(rec.URL) == "" {
+		return rec, fmt.Errorf("env %s not up-with-url: state=%q message=%q", name, rec.State, rec.Message)
+	}
+	return rec, nil
+}
+
 // ---- When ----
 
 func whenOpenAttemptPage(w *World, sr *StepRun) error {
@@ -458,6 +537,22 @@ func whenLaunchWithEnvName(w *World, sr *StepRun) error {
 	return launchReviewEnv(w, map[string]string{"ENV_NAME": chosenEnvName})
 }
 
+// whenLaunchBothEnvs stands up both review-ready envs the fixture declares, stashing
+// each Up record for the concurrency assertions.
+func whenLaunchBothEnvs(w *World, sr *StepRun) error {
+	r1, err := launchReviewEnvNamed(w, "review")
+	if err != nil {
+		return err
+	}
+	r2, err := launchReviewEnvNamed(w, "review-cli")
+	if err != nil {
+		return err
+	}
+	w.set("rec-review", r1)
+	w.set("rec-review-cli", r2)
+	return nil
+}
+
 func whenTearReviewEnvDown(w *World, sr *StepRun) error {
 	rb, err := currentReviewBoard(w)
 	if err != nil {
@@ -465,7 +560,7 @@ func whenTearReviewEnvDown(w *World, sr *StepRun) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	rec, err := rb.mgr.Teardown(ctx, rb.att, "button")
+	rec, err := rb.mgr.Teardown(ctx, rb.att, rb.env.Name, "button")
 	if err != nil {
 		return fmt.Errorf("teardown errored: %w", err)
 	}
@@ -562,6 +657,67 @@ func thenLeakWarned(w *World, sr *StepRun) error {
 		return fmt.Errorf("leak message does not explain the leak: %q", rec.Message)
 	}
 	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-leak", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
+}
+
+// thenBothRunConcurrently is the drv-034 acceptance assertion: two review envs on one
+// attempt are independently parameterised and live at the same time, the attempt page
+// shows both, and tearing one down leaves the other untouched.
+func thenBothRunConcurrently(w *World, sr *StepRun) error {
+	rb, err := currentReviewBoard(w)
+	if err != nil {
+		return err
+	}
+	r1, _ := w.get("rec-review").(reviewenv.Record)
+	r2, _ := w.get("rec-review-cli").(reviewenv.Record)
+	if r1.State != reviewenv.Up || r2.State != reviewenv.Up {
+		return fmt.Errorf("both envs must be up: review=%q review-cli=%q", r1.State, r2.State)
+	}
+	if r1.Port == r2.Port || r1.Instance == r2.Instance || r1.URL == r2.URL {
+		return fmt.Errorf("the two envs are not independently parameterised: %+v vs %+v", r1, r2)
+	}
+
+	// Each running instance answers on its own URL at the same time.
+	for _, u := range []string{r1.URL, r2.URL} {
+		resp, err := http.Get(u)
+		if err != nil {
+			return fmt.Errorf("GET %q: %w", u, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("review env %q answered %d, want 200", u, resp.StatusCode)
+		}
+	}
+
+	// The attempt page lists both as independent, env-scoped panels carrying both URLs.
+	resp, err := http.Get(rb.b.url("/ticket/" + revTicket + "/" + revAtt))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	for _, want := range []string{`id="review-env-review"`, `id="review-env-review-cli"`, r1.URL, r2.URL} {
+		if !strings.Contains(html, want) {
+			return fmt.Errorf("attempt page missing %q while both envs are up", want)
+		}
+	}
+
+	// Screenshot the attempt page while BOTH envs are up — the concurrency the ticket is
+	// about, captured.
+	if err := shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-concurrent", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`); err != nil {
+		return err
+	}
+
+	// Tearing one down leaves the other running.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if rec, err := rb.mgr.Teardown(ctx, rb.att, "review", "button"); err != nil || rec.State != reviewenv.Down {
+		return fmt.Errorf("teardown review: state=%q err=%v", rec.State, err)
+	}
+	if g, err := rb.mgr.Probe(ctx, rb.att, "review-cli"); err != nil || g.State != reviewenv.Up {
+		return fmt.Errorf("tearing review down disturbed review-cli: state=%q err=%v", g.State, err)
+	}
+	return nil
 }
 
 func thenMisconfigNote(w *World, sr *StepRun) error {

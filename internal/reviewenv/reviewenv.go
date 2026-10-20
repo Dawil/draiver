@@ -191,11 +191,32 @@ func (m *Manager) logf(format string, args ...any) {
 	}
 }
 
-// Load returns the attempt's current record and whether one exists. A missing file
-// is the resting Down state, reported as ok=false with a zero Record, so callers can
-// treat "never launched" and an explicit Down record alike.
-func (m *Manager) Load(id, attempt string) (Record, bool, error) {
-	path := m.opt.Root.ReviewEnvPath(id, attempt)
+// Load returns an attempt's current record for one environment and whether one
+// exists. A missing file is the resting Down state, reported as ok=false with a zero
+// Record, so callers treat "never launched" and an explicit Down record alike.
+//
+// drv-034 dual-read back-compat: the per-env file (ReviewEnvPath) is read first; if it
+// is absent, Load falls back to the pre-drv-034 single record (ReviewEnvLegacyPath)
+// but ONLY when that legacy record's Environment matches the env being loaded — so an
+// upgraded attempt that launched one env before the upgrade keeps resolving it, while a
+// different env on the same attempt is correctly reported as never-launched. The first
+// post-upgrade save writes the per-env file, which thereafter shadows the legacy one.
+func (m *Manager) Load(id, attempt, env string) (Record, bool, error) {
+	path := m.opt.Root.ReviewEnvPath(id, attempt, env)
+	rec, ok, err := readRecord(path)
+	if err != nil || ok {
+		return rec, ok, err
+	}
+	legacy := m.opt.Root.ReviewEnvLegacyPath(id, attempt)
+	lrec, lok, lerr := readRecord(legacy)
+	if lerr != nil || !lok || lrec.Environment != env {
+		return Record{}, false, lerr
+	}
+	return lrec, true, nil
+}
+
+// readRecord reads and parses one record file. A missing file is (zero, false, nil).
+func readRecord(path string) (Record, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -210,10 +231,53 @@ func (m *Manager) Load(id, attempt string) (Record, bool, error) {
 	return rec, true, nil
 }
 
-// save writes the record atomically (temp file + rename), stamping Updated.
-func (m *Manager) save(id, attempt string, rec Record) (Record, error) {
+// loadAll returns every live review-env record for an attempt — the per-env files plus
+// the legacy single record when its Environment is not already covered by a per-env
+// file (per-env wins). It is the enumeration Sweep folds over so a reaper tick
+// considers all of an attempt's concurrent envs, not just one.
+func (m *Manager) loadAll(id, attempt string) ([]Record, error) {
+	dir := m.opt.Root.AttemptDir(id, attempt)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reviewenv: list %s: %w", dir, err)
+	}
+	seen := map[string]bool{}
+	var recs []Record
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "reviewenv-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		rec, ok, err := readRecord(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			recs = append(recs, rec)
+			seen[rec.Environment] = true
+		}
+	}
+	// Fold in the legacy single record only if a per-env file has not already shadowed
+	// the environment it names.
+	lrec, lok, err := readRecord(m.opt.Root.ReviewEnvLegacyPath(id, attempt))
+	if err != nil {
+		return nil, err
+	}
+	if lok && !seen[lrec.Environment] {
+		recs = append(recs, lrec)
+	}
+	return recs, nil
+}
+
+// save writes the record atomically (temp file + rename), stamping Updated. It always
+// writes the per-env file (keyed by env), so a first post-upgrade write shadows any
+// legacy single record for that environment.
+func (m *Manager) save(id, attempt, env string, rec Record) (Record, error) {
 	rec.Updated = m.now()
-	path := m.opt.Root.ReviewEnvPath(id, attempt)
+	path := m.opt.Root.ReviewEnvPath(id, attempt, env)
 	if err := m.opt.Root.EnsureAttemptDirs(id, attempt); err != nil {
 		return rec, err
 	}
@@ -278,7 +342,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		Started:     m.now(),
 		LastActive:  m.now(),
 	}
-	rec, err := m.save(a.Ticket, a.ID, rec)
+	rec, err := m.save(a.Ticket, a.ID, env.Name, rec)
 	if err != nil {
 		return rec, err
 	}
@@ -288,7 +352,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		return m.fail(a, rec, fmt.Sprintf("could not resolve the reviewed commit: %v", err))
 	}
 
-	instance := slug(a.Ticket, a.ID)
+	instance := slug(a.Ticket, a.ID, env.Name)
 	port, err := allocatePort()
 	if err != nil {
 		return m.fail(a, rec, fmt.Sprintf("could not allocate a port: %v", err))
@@ -316,7 +380,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		vars[name] = val
 	}
 	scriptEnv := envSlice(vars)
-	wtPath := m.worktreePath(a)
+	wtPath := m.worktreePath(a, env.Name)
 
 	rec.Instance = instance
 	rec.Port = port
@@ -325,7 +389,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	rec.Down = env.Down
 	rec.Healthchecks = env.Healthchecks
 	rec.ScriptEnv = scriptEnv
-	if rec, err = m.save(a.Ticket, a.ID, rec); err != nil {
+	if rec, err = m.save(a.Ticket, a.ID, env.Name, rec); err != nil {
 		return rec, err
 	}
 
@@ -366,7 +430,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	rec.URL = url
 	rec.Message = ""
 	rec.LastActive = m.now()
-	return m.save(a.Ticket, a.ID, rec)
+	return m.save(a.Ticket, a.ID, env.Name, rec)
 }
 
 // MarkStarting persists a Starting record synchronously — the race-closer for an
@@ -387,16 +451,17 @@ func (m *Manager) MarkStarting(a project.Attempt, env *pyramid.Environment) (Rec
 		Started:     m.now(),
 		LastActive:  m.now(),
 	}
-	return m.save(a.Ticket, a.ID, rec)
+	return m.save(a.Ticket, a.ID, env.Name, rec)
 }
 
-// fail records a launch failure, preserving the already-persisted identity fields.
+// fail records a launch failure, preserving the already-persisted identity fields. The
+// record's Environment (set before the first save) keys the per-env file.
 func (m *Manager) fail(a project.Attempt, rec Record, msg string) (Record, error) {
 	rec.State = Failed
 	rec.URL = ""
 	rec.Worktree = ""
 	rec.Message = msg
-	return m.save(a.Ticket, a.ID, rec)
+	return m.save(a.Ticket, a.ID, rec.Environment, rec)
 }
 
 // Teardown tears a review environment down: run the stored `down`, then re-run the
@@ -407,8 +472,8 @@ func (m *Manager) fail(a project.Attempt, rec Record, msg string) (Record, error
 // worked. reason is recorded for the operator (button / ticket done / idle reaper).
 //
 // Teardown is idempotent: a missing record or one already Down/Failed is a no-op.
-func (m *Manager) Teardown(ctx context.Context, a project.Attempt, reason string) (Record, error) {
-	rec, ok, err := m.Load(a.Ticket, a.ID)
+func (m *Manager) Teardown(ctx context.Context, a project.Attempt, env, reason string) (Record, error) {
+	rec, ok, err := m.Load(a.Ticket, a.ID, env)
 	if err != nil {
 		return Record{}, err
 	}
@@ -437,7 +502,7 @@ func (m *Manager) Teardown(ctx context.Context, a project.Attempt, reason string
 		rec.URL = ""
 		rec.Message = fmt.Sprintf("teardown (%s): down ran but healthcheck(s) %s still green — environment did not go away (leak)", reason, strings.Join(stillGreen, ", "))
 		m.logf("reviewenv: %s/%s LEAK — %s", a.Ticket, a.ID, rec.Message)
-		return m.save(a.Ticket, a.ID, rec)
+		return m.save(a.Ticket, a.ID, env, rec)
 	}
 
 	// Confirmed down — remove the review worktree and return to rest.
@@ -446,7 +511,7 @@ func (m *Manager) Teardown(ctx context.Context, a project.Attempt, reason string
 	rec.URL = ""
 	rec.Worktree = ""
 	rec.Message = fmt.Sprintf("torn down (%s); confirm-down healthchecks red", reason)
-	return m.save(a.Ticket, a.ID, rec)
+	return m.save(a.Ticket, a.ID, env, rec)
 }
 
 // Probe re-runs the healthchecks of an Up (or Unhealthy) env and updates the record:
@@ -454,8 +519,8 @@ func (m *Manager) Teardown(ctx context.Context, a project.Attempt, reason string
 // holds the idle reaper off); any red flips it to Unhealthy with the probe output. A
 // record in any other state is returned unchanged — there is nothing live to probe.
 // It is the read the webui status poll calls.
-func (m *Manager) Probe(ctx context.Context, a project.Attempt) (Record, error) {
-	rec, ok, err := m.Load(a.Ticket, a.ID)
+func (m *Manager) Probe(ctx context.Context, a project.Attempt, env string) (Record, error) {
+	rec, ok, err := m.Load(a.Ticket, a.ID, env)
 	if err != nil || !ok {
 		return rec, err
 	}
@@ -476,7 +541,7 @@ func (m *Manager) Probe(ctx context.Context, a project.Attempt) (Record, error) 
 		rec.Message = ""
 		rec.LastActive = m.now()
 	}
-	return m.save(a.Ticket, a.ID, rec)
+	return m.save(a.Ticket, a.ID, env, rec)
 }
 
 // Sweep is the controlplane's per-tick review-env move: it tears down every active
@@ -498,28 +563,38 @@ func (m *Manager) Sweep(ctx context.Context) ([]worktree.Key, error) {
 			continue
 		}
 		for _, att := range attempts {
-			rec, ok, err := m.Load(id, att)
+			recs, err := m.loadAll(id, att)
 			if err != nil {
 				m.logf("reviewenv: sweep load %s/%s: %v", id, att, err)
 				continue
 			}
-			if !ok || !rec.State.Active() {
+			if len(recs) == 0 {
 				continue
 			}
-			a, err := project.LoadAttempt(m.opt.Root, id, att)
-			if err != nil {
-				m.logf("reviewenv: sweep attempt %s/%s: %v", id, att, err)
-				continue
+			var a project.Attempt
+			loaded := false
+			for _, rec := range recs {
+				if !rec.State.Active() {
+					continue
+				}
+				if !loaded {
+					a, err = project.LoadAttempt(m.opt.Root, id, att)
+					if err != nil {
+						m.logf("reviewenv: sweep attempt %s/%s: %v", id, att, err)
+						break
+					}
+					loaded = true
+				}
+				reason := m.reapReason(a, rec)
+				if reason == "" {
+					continue
+				}
+				if _, err := m.Teardown(ctx, a, rec.Environment, reason); err != nil {
+					m.logf("reviewenv: sweep teardown %s/%s [%s]: %v", id, att, rec.Environment, err)
+					continue
+				}
+				reaped = append(reaped, worktree.Key{Ticket: id, Attempt: att})
 			}
-			reason := m.reapReason(a, rec)
-			if reason == "" {
-				continue
-			}
-			if _, err := m.Teardown(ctx, a, reason); err != nil {
-				m.logf("reviewenv: sweep teardown %s/%s: %v", id, att, err)
-				continue
-			}
-			reaped = append(reaped, worktree.Key{Ticket: id, Attempt: att})
 		}
 	}
 	return reaped, nil
@@ -573,10 +648,12 @@ func (m *Manager) reviewedCommit(ctx context.Context, a project.Attempt) (string
 	return sha, nil
 }
 
-// worktreePath is where this attempt's review checkout lives: a dedicated base,
-// distinct from the coding worktree, keyed by a hash of the repo so review envs for
-// same-named tickets across repos never collide.
-func (m *Manager) worktreePath(a project.Attempt) string {
+// worktreePath is where this attempt's review checkout for one environment lives: a
+// dedicated base, distinct from the coding worktree, keyed by a hash of the repo so
+// review envs for same-named tickets across repos never collide. drv-034 appends the
+// environment slug so an attempt's concurrent review envs each get their OWN checkout
+// (tearing one down removes only its worktree, never the other's).
+func (m *Manager) worktreePath(a project.Attempt, env string) string {
 	base := m.base
 	if base == "" {
 		if cache, err := os.UserCacheDir(); err == nil {
@@ -587,7 +664,7 @@ func (m *Manager) worktreePath(a project.Attempt) string {
 	}
 	sum := sha256.Sum256([]byte(a.Repo))
 	repoHash := hex.EncodeToString(sum[:])[:12]
-	return filepath.Join(base, repoHash, a.Ticket, a.ID)
+	return filepath.Join(base, repoHash, a.Ticket, a.ID, envSlug(env))
 }
 
 // addWorktree cuts a dedicated DETACHED worktree at commit — detached precisely so it
@@ -667,12 +744,29 @@ func allocatePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// slug builds a filesystem/DNS-safe instance id from the ticket and attempt:
-// lowercased, every run of non-[a-z0-9] collapsed to a single '-', trimmed. It is
-// deterministic per attempt, so one attempt's review env has one stable namespace and
-// two different attempts' never collide.
-func slug(ticket, attempt string) string {
-	raw := strings.ToLower(ticket + "-" + attempt)
+// slug builds a filesystem/DNS-safe instance id from the ticket, attempt, and
+// environment: lowercased, every run of non-[a-z0-9] collapsed to a single '-',
+// trimmed. drv-034 folds the environment in so each of an attempt's concurrent review
+// envs gets its OWN DRAIVER_REVIEW_INSTANCE (and the container/volume/DB names a script
+// derives from it never collide), while staying deterministic per (attempt, env).
+func slug(ticket, attempt, env string) string {
+	return sanitizeSlug(ticket + "-" + attempt + "-" + env)
+}
+
+// envSlug sanitises an environment name into a filesystem-safe path segment for the
+// per-env review worktree directory.
+func envSlug(env string) string {
+	s := sanitizeSlug(env)
+	if s == "" {
+		return "env"
+	}
+	return s
+}
+
+// sanitizeSlug lowercases and collapses every run of non-[a-z0-9] to a single '-',
+// trimmed — the shared filesystem/DNS-safe transform.
+func sanitizeSlug(raw string) string {
+	raw = strings.ToLower(raw)
 	var b strings.Builder
 	lastDash := false
 	for _, r := range raw {

@@ -143,7 +143,7 @@ func TestLaunchRevealsURLOnGreen(t *testing.T) {
 		t.Fatal("no reviewed commit recorded")
 	}
 	// A reload sees the same persisted Up record (rebuildable from disk alone).
-	got, ok, err := m.Load("DRV-1", "0001")
+	got, ok, err := m.Load("DRV-1", "0001", "review")
 	if err != nil || !ok || got.State != reviewenv.Up || got.URL != wantURL {
 		t.Fatalf("reload: ok=%v state=%q url=%q err=%v", ok, got.State, got.URL, err)
 	}
@@ -209,11 +209,101 @@ func TestConcurrentEnvsGetDistinctPorts(t *testing.T) {
 		t.Fatalf("two concurrent review envs produced the same url %q", r1.URL)
 	}
 	// Both are independently Up — one did not clobber the other's checkout/marker.
-	if g1, _ := m.Probe(context.Background(), a1); g1.State != reviewenv.Up {
+	if g1, _ := m.Probe(context.Background(), a1, "review"); g1.State != reviewenv.Up {
 		t.Fatalf("a1 not up after a2 launched: %q", g1.State)
 	}
-	if g2, _ := m.Probe(context.Background(), a2); g2.State != reviewenv.Up {
+	if g2, _ := m.Probe(context.Background(), a2, "review"); g2.State != reviewenv.Up {
 		t.Fatalf("a2 not up: %q", g2.State)
+	}
+}
+
+// namedMarkerEnv is markerEnv under a chosen environment name — the fixture for
+// exercising two review-ready envs on one attempt (drv-034). The marker is namespaced
+// by the injected instance (which folds the env name in), so two envs on the same
+// attempt write distinct markers.
+func namedMarkerEnv(dir, name string) *pyramid.Environment {
+	e := markerEnv(dir)
+	e.Name = name
+	return e
+}
+
+// TestConcurrentEnvsSameAttemptIndependent is the drv-034 core: one attempt runs TWO
+// review-ready environments at once, each with its own record, instance slug, port, URL
+// and worktree — and tearing one down leaves the other untouched.
+func TestConcurrentEnvsSameAttemptIndependent(t *testing.T) {
+	repo := newRepo(t)
+	root := store.Root{Dir: t.TempDir()}
+	a := seedAttempt(t, root, repo, "DRV-1", "0001")
+	markers := t.TempDir()
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
+
+	webEnv := namedMarkerEnv(markers, "review")
+	cliEnv := namedMarkerEnv(markers, "review-cli")
+
+	r1, err := m.Launch(context.Background(), a, webEnv, nil)
+	if err != nil || r1.State != reviewenv.Up {
+		t.Fatalf("launch review: state=%q err=%v msg=%q", r1.State, err, r1.Message)
+	}
+	r2, err := m.Launch(context.Background(), a, cliEnv, nil)
+	if err != nil || r2.State != reviewenv.Up {
+		t.Fatalf("launch review-cli: state=%q err=%v msg=%q", r2.State, err, r2.Message)
+	}
+
+	// Each env is independently parameterised and checked out.
+	if r1.Port == r2.Port {
+		t.Fatalf("two envs on one attempt collided on port %d", r1.Port)
+	}
+	if r1.Instance == r2.Instance {
+		t.Fatalf("two envs on one attempt share instance slug %q", r1.Instance)
+	}
+	if r1.URL == r2.URL {
+		t.Fatalf("two envs produced the same url %q", r1.URL)
+	}
+	if r1.Worktree == r2.Worktree {
+		t.Fatalf("two envs share a review worktree %q", r1.Worktree)
+	}
+
+	// Both records persisted independently and reload as Up.
+	if g, ok, _ := m.Load("DRV-1", "0001", "review"); !ok || g.State != reviewenv.Up {
+		t.Fatalf("review record not up on reload: ok=%v state=%q", ok, g.State)
+	}
+	if g, ok, _ := m.Load("DRV-1", "0001", "review-cli"); !ok || g.State != reviewenv.Up {
+		t.Fatalf("review-cli record not up on reload: ok=%v state=%q", ok, g.State)
+	}
+
+	// Tear one down; the other stays up.
+	if rec, err := m.Teardown(context.Background(), a, "review", "button"); err != nil || rec.State != reviewenv.Down {
+		t.Fatalf("teardown review: state=%q err=%v", rec.State, err)
+	}
+	if g, _ := m.Probe(context.Background(), a, "review-cli"); g.State != reviewenv.Up {
+		t.Fatalf("review-cli disturbed by tearing review down: %q", g.State)
+	}
+	if g, ok, _ := m.Load("DRV-1", "0001", "review"); !ok || g.State != reviewenv.Down {
+		t.Fatalf("review record not down after teardown: ok=%v state=%q", ok, g.State)
+	}
+}
+
+// TestLoadDualReadsLegacyRecord pins the drv-034 back-compat path: a pre-upgrade
+// single record (reviewenv.json) is still resolved by Load for the environment it
+// names, and ignored for any other env name.
+func TestLoadDualReadsLegacyRecord(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	if err := root.EnsureAttemptDirs("DRV-1", "0001"); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root.AttemptDir("DRV-1", "0001"), "reviewenv.json")
+	if err := os.WriteFile(legacy, []byte(`{"state":"up","environment":"review","url":"http://x/"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
+
+	rec, ok, err := m.Load("DRV-1", "0001", "review")
+	if err != nil || !ok || rec.State != reviewenv.Up || rec.URL != "http://x/" {
+		t.Fatalf("legacy record not dual-read: ok=%v state=%q url=%q err=%v", ok, rec.State, rec.URL, err)
+	}
+	// A different env on the same attempt must NOT resolve the legacy record.
+	if _, ok, _ := m.Load("DRV-1", "0001", "review-cli"); ok {
+		t.Fatal("legacy record wrongly resolved for a different env name")
 	}
 }
 
@@ -230,7 +320,7 @@ func TestTeardownConfirmedDown(t *testing.T) {
 	}
 	wt := up.Worktree
 
-	rec, err := m.Teardown(context.Background(), a, "button")
+	rec, err := m.Teardown(context.Background(), a, "review", "button")
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -257,7 +347,7 @@ func TestTeardownLeakDetection(t *testing.T) {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
 
-	rec, err := m.Teardown(context.Background(), a, "button")
+	rec, err := m.Teardown(context.Background(), a, "review", "button")
 	if err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -296,7 +386,7 @@ func TestReaperTripsOnIdle(t *testing.T) {
 	if reaped, err := m.Sweep(context.Background()); err != nil || len(reaped) != 0 {
 		t.Fatalf("premature reap: %v reaped=%v", err, reaped)
 	}
-	if rec, _, _ := m.Load("DRV-1", "0001"); rec.State != reviewenv.Up {
+	if rec, _, _ := m.Load("DRV-1", "0001", "review"); rec.State != reviewenv.Up {
 		t.Fatalf("env not up before idle window elapses: %q", rec.State)
 	}
 
@@ -309,7 +399,7 @@ func TestReaperTripsOnIdle(t *testing.T) {
 	if len(reaped) != 1 {
 		t.Fatalf("idle env not reaped: %v", reaped)
 	}
-	if rec, _, _ := m.Load("DRV-1", "0001"); rec.State != reviewenv.Down {
+	if rec, _, _ := m.Load("DRV-1", "0001", "review"); rec.State != reviewenv.Down {
 		t.Fatalf("state after reap = %q, want down", rec.State)
 	}
 }
@@ -330,7 +420,7 @@ func TestProbeFlipsToUnhealthy(t *testing.T) {
 	for _, e := range entries {
 		os.Remove(filepath.Join(markers, e.Name()))
 	}
-	rec, err := m.Probe(context.Background(), a)
+	rec, err := m.Probe(context.Background(), a, "review")
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}

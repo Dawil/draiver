@@ -29,6 +29,11 @@ Feature: Launch a review environment from the attempt page
     When I launch the review environment with ENV_NAME set to a custom value
     Then the running instance is parameterised by the chosen ENV_NAME
 
+  Scenario: Two review environments run at once for one attempt
+    Given a Review attempt whose pyramid declares two review-ready environments
+    When I launch both review environments
+    Then both run concurrently with their own URLs, and tearing one down leaves the other up
+
   Rule: On a review-ready attempt the panel offers and launches the environment
 
     Background:
