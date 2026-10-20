@@ -52,6 +52,7 @@ func init() {
 		"the confirm-down healthcheck is red and the panel returns to rest":        thenTornDownToRest,
 		"the panel warns of a leak rather than reporting the environment gone":     thenLeakWarned,
 		"the panel shows a misconfiguration note and offers no launch":             thenMisconfigNote,
+		"the attempt page offers each review environment with its own launch control":        thenEachEnvOffersLaunch,
 		"both run concurrently with their own URLs, and tearing one down leaves the other up": thenBothRunConcurrently,
 	} {
 		if _, clash := registry[text]; clash {
@@ -657,6 +658,33 @@ func thenLeakWarned(w *World, sr *StepRun) error {
 		return fmt.Errorf("leak message does not explain the leak: %q", rec.Message)
 	}
 	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-env-leak", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
+}
+
+// thenEachEnvOffersLaunch is the drv-034 enumeration assertion, captured as screenshot
+// evidence: an attempt whose pyramid declares two review-ready envs shows BOTH on the
+// attempt page at rest, each as its own env-scoped panel (#review-env-<slug>) carrying
+// its own Launch control — the "lists every review-ready environment, each launchable"
+// criterion, before anything is launched. The fixture's repo default (reviewEnvironment
+// = "review", decision #5) also marks that one panel's "repo default" badge, so the shot
+// doubles as evidence the default is a highlight, not a gate.
+func thenEachEnvOffersLaunch(w *World, sr *StepRun) error {
+	html, _ := w.get("page").(string)
+	for _, id := range []string{`id="review-env-review"`, `id="review-env-review-cli"`} {
+		if !strings.Contains(html, id) {
+			return fmt.Errorf("attempt page missing env-scoped panel %s — review-ready envs are not all enumerated", id)
+		}
+	}
+	// Each panel carries its own Launch control, so the operator can launch either
+	// independently: two review-ready envs ⇒ at least two up-buttons.
+	if n := strings.Count(html, `data-testid="action-review-env-up"`); n < 2 {
+		return fmt.Errorf("want a Launch control per review-ready env (≥2), found %d", n)
+	}
+	// The repo default (reviewEnvironment="review") is a highlight, not a gate: its badge
+	// shows, but review-cli (no badge) is offered all the same.
+	if !strings.Contains(html, `data-testid="review-env-default"`) {
+		return errors.New("the repo-default env carries no default badge")
+	}
+	return shoot(w, sr, "/ticket/"+revTicket+"/"+revAtt, "review-envs-available", true, `[data-testid="attempt-tab-review-env"]`, `[data-testid="attempt-tab-review-env"]`)
 }
 
 // thenBothRunConcurrently is the drv-034 acceptance assertion: two review envs on one

@@ -29,6 +29,11 @@ Feature: Launch a review environment from the attempt page
     When I launch the review environment with ENV_NAME set to a custom value
     Then the running instance is parameterised by the chosen ENV_NAME
 
+  Scenario: Every review-ready environment is offered to launch
+    Given a Review attempt whose pyramid declares two review-ready environments
+    When I open the attempt page
+    Then the attempt page offers each review environment with its own launch control
+
   Scenario: Two review environments run at once for one attempt
     Given a Review attempt whose pyramid declares two review-ready environments
     When I launch both review environments
