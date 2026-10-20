@@ -107,6 +107,9 @@ var registry = map[string]StepFunc{
 	"a park hand-off is recorded on the worker's own log":                             thenParkRecorded,
 	"a worker with a synchronous test result and no detached launch":                  givenSyncResultNoLaunch,
 	"the worker has no async-job wake source":                                         thenNoAsyncSource,
+	"a worker parked behind a detached test whose runner never landed a result":       givenLaunchedDetachedTest,
+	"an operator clears the stuck async-job wake source":                              whenOperatorClears,
+	"the cleared result is a fail the review gate does not count as green":            thenClearedResultGateSafe,
 
 	// --- features/manager-as-worker/resume-on-wake.feature (drvctl-056) ---
 	"a resumed session being given its first driving turn":                       givenResumedSessionDriven,

@@ -7,6 +7,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/wake"
 )
 
 // appendEvt is the async fixtures' tiny log-writer — `test --detach && park` and the
@@ -91,6 +92,51 @@ func TestAsyncJobSuspendsThenWakesOnResult(t *testing.T) {
 	}
 	if got := wokenByOwn(t, w.root, "WRK", att); len(got) != 1 {
 		t.Fatalf("the async wake must be idempotent — want 1 woken-by, got %d", len(got))
+	}
+}
+
+// TestAsyncJobClearedLaunchWakesWorker is drv-031's operator-inverse path: when a
+// detached runner never lands a verdict and an operator `park --clear`s the stuck
+// async-job source, the terminal FAIL result it lands (wake.AsyncLaunchFailResult)
+// is just as much a doorbell as a real pass — the reconciler authors the `woken-by`
+// and re-admits the worker to iterate. Proves the wake path is outcome-agnostic, so
+// the recovery verb hooks into the existing machinery with no new wake code.
+func TestAsyncJobClearedLaunchWakesWorker(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+
+	att := w.newTicket(t, "WRK")
+	// `draiver test --detach && draiver park`, but the detached runner died: launch +
+	// park, no result.
+	appendEvt(t, w.root, "WRK", att, event.Event{Type: "async-job", Actor: "agent:x", Rung: "unit", Body: "launched detached test"})
+	appendEvt(t, w.root, "WRK", att, event.Event{Type: "park", Actor: "agent:x", Body: "parked behind the detached test"})
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	// Tick 1: parked behind a launch that will never answer ⇒ trimmed, would sleep
+	// forever absent the operator inverse.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if broughtUp(t, w.root, "WRK", att) {
+		t.Fatal("a worker parked behind an unanswered launch must suspend to Pending")
+	}
+
+	// The operator clears it: land the exact terminal fail result `park --clear` writes
+	// (the shared drv-031 discipline), answering launch #2.
+	cleared := wake.AsyncLaunchFailResult(2, "unit", "operator park --clear")
+	cleared.Actor = "human:dave"
+	appendEvt(t, w.root, "WRK", att, cleared)
+
+	// Tick 2: the fail result is a doorbell too — the reconciler wakes the worker.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	waitFor(t, "worker woken by the operator-cleared result", func() bool { return broughtUp(t, w.root, "WRK", att) })
+	if got := wokenByOwn(t, w.root, "WRK", att); len(got) != 1 {
+		t.Fatalf("want exactly one async woken-by activation after the clear, got %d", len(got))
 	}
 }
 

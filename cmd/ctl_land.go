@@ -145,7 +145,7 @@ func loadLandContext(ctx context.Context, arg string) (*landContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	ticket, att, err := resolveCtlTarget(root, arg)
+	ticket, att, err := resolveTarget(root, arg)
 	if err != nil {
 		return nil, err
 	}
