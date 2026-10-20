@@ -14,6 +14,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/wake"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -108,13 +109,8 @@ func launchDetached(ctx context.Context, cmd *cobra.Command, wd, target string, 
 		// Land a failing result that answers it ourselves, so the worker is never
 		// parked against a source that cannot fire, and exit nonzero so `&& park`
 		// short-circuits.
-		if _, _, aerr := appendEventAt(root, key.Ticket, key.Attempt, event.Event{
-			Type:    "test-result",
-			Outcome: "fail",
-			Rung:    target,
-			Refs:    []int{launch.Seq},
-			Body:    fmt.Sprintf("Detached test runner failed to start: %v. No climb ran.", err),
-		}); aerr != nil {
+		if _, _, aerr := answerLaunchFailed(root, key.Ticket, key.Attempt, launch.Seq, target,
+			fmt.Sprintf("Detached test runner failed to start: %v. No climb ran.", err)); aerr != nil {
 			return fmt.Errorf("spawn detached test (%v); and answering the launch marker: %w", err, aerr)
 		}
 		return fmt.Errorf("spawn detached test: %w", err)
@@ -123,6 +119,15 @@ func launchDetached(ctx context.Context, cmd *cobra.Command, wd, target string, 
 	fmt.Fprintf(out, "launched detached test (rung %q) on %s/%s (async-job #%d); results will land on the log — `draiver park %s` now, you will be woken when it finishes\n",
 		target, key.Ticket, key.Attempt, launch.Seq, key.Ticket)
 	return nil
+}
+
+// answerLaunchFailed is the cmd-side adapter over wake.AsyncLaunchFailResult (the one
+// terminal-result discipline, drv-031): it stamps the operator/agent actor and runs
+// repo validation via appendEventAt. Shared by launchDetached's spawn-failure path
+// above and `draiver park --clear` of an async-job source, so neither leaves a
+// dangling wake source the worker could park against forever.
+func answerLaunchFailed(root store.Root, ticket, att string, launchSeq int, rung, body string) (event.Event, string, error) {
+	return appendEventAt(root, ticket, att, wake.AsyncLaunchFailResult(launchSeq, rung, body))
 }
 
 // detachedLogRel is the artefacts-relative path the detached runner streams its

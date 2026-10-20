@@ -32,3 +32,15 @@ Feature: Park pending own async work — detached test, then park and wake
     Scenario: A worker with only a sync test result has no async wake source
       Given a worker with a synchronous test result and no detached launch
       Then the worker has no async-job wake source
+
+  Rule: park --clear is the operator inverse that force-resolves a stuck async-job source
+
+    # drv-031: a detached runner can die without landing a verdict, leaving the worker
+    # parked against a source that will never fire. `draiver park --clear` lands the
+    # terminal fail result that answers the launch, so the worker wakes to iterate —
+    # and because the result carries Outcome=fail it can never satisfy the review gate.
+    Scenario: Clearing a stuck async-job source answers it with a gate-safe fail result
+      Given a worker parked behind a detached test whose runner never landed a result
+      When an operator clears the stuck async-job wake source
+      Then the async-job wake source is answered and no longer holds the worker parked
+      And the cleared result is a fail the review gate does not count as green

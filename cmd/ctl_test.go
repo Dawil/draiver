@@ -22,7 +22,7 @@ func TestResolveCtlTarget(t *testing.T) {
 	root := store.Root{Dir: dir}
 
 	t.Run("latest attempt", func(t *testing.T) {
-		ticket, att, err := resolveCtlTarget(root, "PROJ-1")
+		ticket, att, err := resolveTarget(root, "PROJ-1")
 		if err != nil {
 			t.Fatalf("resolve: %v", err)
 		}
@@ -32,7 +32,7 @@ func TestResolveCtlTarget(t *testing.T) {
 	})
 
 	t.Run("explicit @attempt suffix", func(t *testing.T) {
-		ticket, att, err := resolveCtlTarget(root, "PROJ-1@0001")
+		ticket, att, err := resolveTarget(root, "PROJ-1@0001")
 		if err != nil {
 			t.Fatalf("resolve: %v", err)
 		}
@@ -42,13 +42,13 @@ func TestResolveCtlTarget(t *testing.T) {
 	})
 
 	t.Run("unknown ticket", func(t *testing.T) {
-		if _, _, err := resolveCtlTarget(root, "NOPE-9"); err == nil {
+		if _, _, err := resolveTarget(root, "NOPE-9"); err == nil {
 			t.Fatal("expected an error for an unknown ticket")
 		}
 	})
 
 	t.Run("unknown attempt", func(t *testing.T) {
-		if _, _, err := resolveCtlTarget(root, "PROJ-1@9999"); err == nil {
+		if _, _, err := resolveTarget(root, "PROJ-1@9999"); err == nil {
 			t.Fatal("expected an error for an unknown attempt")
 		}
 	})

@@ -144,7 +144,7 @@ var attemptSetCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ticket, att, err := resolveCtlTarget(root, args[0])
+		ticket, att, err := resolveTarget(root, args[0])
 		if err != nil {
 			return err
 		}

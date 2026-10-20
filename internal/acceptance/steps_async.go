@@ -9,6 +9,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/wake"
@@ -250,6 +251,75 @@ func givenSyncResultNoLaunch(w *World, sr *StepRun) error {
 		return err
 	}
 	w.set("root", root)
+	return nil
+}
+
+// ---- park --clear: the operator inverse that force-resolves a stuck source (drv-031) ----
+
+// whenOperatorClears models `draiver park --clear` of an async-job source: it reads
+// the pending source and lands the exact terminal fail result the command writes —
+// wake.AsyncLaunchFailResult, the shared "answer launch N" discipline — stamped with
+// operator (human) provenance rather than an agent verdict.
+func whenOperatorClears(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	src, err := asyncSource(root)
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		return fmt.Errorf("precondition: expected a pending async-job source to clear, found none")
+	}
+	cleared := wake.AsyncLaunchFailResult(src.Ref, src.Rung,
+		"Operator `park --clear`: force-resolved the pending async-job wake source. No climb ran.")
+	cleared.Actor = "human:operator"
+	if _, err := ticketlog.Append(root, asyncTicket, asyncAtt, cleared); err != nil {
+		return err
+	}
+	return nil
+}
+
+// thenClearedResultGateSafe proves the cleared result can never satisfy the review
+// gate: it is the exact rule cmd/review.go folds — only results with Outcome != "fail"
+// map onto the pyramid's green set — so a required rung sees nothing green at HEAD and
+// the gate stays shut. The operator recovered the worker without accidentally passing
+// review.
+func thenClearedResultGateSafe(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	events, err := ticketlog.Read(root, asyncTicket, asyncAtt)
+	if err != nil {
+		return err
+	}
+
+	var cleared *event.Event
+	var green []pyramid.Result
+	for i := range events {
+		e := events[i]
+		if e.Type != "test-result" {
+			continue
+		}
+		cleared = &events[i]
+		// cmd/review.go:140 — a failing result never maps onto the gate's green set.
+		if e.Outcome != "fail" {
+			green = append(green, pyramid.Result{Rung: e.Rung, Commit: e.Commit})
+		}
+	}
+	if cleared == nil || cleared.Outcome != "fail" {
+		return fmt.Errorf("the cleared result must carry Outcome=fail, got %+v", cleared)
+	}
+
+	// Fold the (empty) green set through the real review-gate helper against a pyramid
+	// that requires the unit rung: outstanding must be non-empty ⇒ the gate refuses.
+	p := &pyramid.Pyramid{Levels: []pyramid.Level{{Name: "unit", Run: "true"}}}
+	_, outstanding := p.RequiredStatus(green, cleared.Commit)
+	if len(outstanding) == 0 {
+		return fmt.Errorf("a fail-only result satisfied the review gate — a cleared source must never read as green")
+	}
+	attachText(sr, "clear-gate-safe",
+		"$ draiver park --clear "+asyncTicket+"\n"+
+			"# lands a terminal test-result answering the launch:\n"+
+			"  outcome: fail   refs: [<launch>]   actor: human:operator\n"+
+			"# review-gate fold (cmd/review.go) excludes Outcome=fail → required rung still outstanding:\n"+
+			"  "+outstanding[0].Name+" (not green at HEAD) — the gate stays shut.")
 	return nil
 }
 

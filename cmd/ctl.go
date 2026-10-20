@@ -257,7 +257,7 @@ var ctlStatusCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			if wantTicket, wantAtt, err = resolveCtlTarget(root, args[0]); err != nil {
+			if wantTicket, wantAtt, err = resolveTarget(root, args[0]); err != nil {
 				return err
 			}
 		}
@@ -320,7 +320,7 @@ var ctlLogsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ticket, att, err := resolveCtlTarget(root, args[0])
+		ticket, att, err := resolveTarget(root, args[0])
 		if err != nil {
 			return err
 		}
@@ -340,7 +340,7 @@ func newCtlTarget(arg string) (*reconcile.Reconciler, string, string, error) {
 	if err != nil {
 		return nil, "", "", err
 	}
-	ticket, att, err := resolveCtlTarget(root, arg)
+	ticket, att, err := resolveTarget(root, arg)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -351,11 +351,15 @@ func newCtlTarget(arg string) (*reconcile.Reconciler, string, string, error) {
 	return r, ticket, att, nil
 }
 
-// resolveCtlTarget parses a `ticket[@attempt]` argument into a ticket and a
+// resolveTarget parses a `ticket[@attempt]` argument into a ticket and a
 // resolved attempt id. An explicit @attempt suffix wins; otherwise the attempt
 // falls back to --attempt / $DRAIVER_ATTEMPT / the ticket's latest. Both the
 // ticket and the attempt must exist.
-func resolveCtlTarget(root store.Root, arg string) (string, string, error) {
+//
+// It is the shared `ticket[@attempt]` parser across the CLI (ctl start/enable/…,
+// archive, attempt, park) — not ctl-specific despite its origin, hence the neutral
+// name (drv-031).
+func resolveTarget(root store.Root, arg string) (string, string, error) {
 	ticket, att := arg, ""
 	if i := strings.IndexByte(arg, '@'); i >= 0 {
 		ticket, att = arg[:i], arg[i+1:]

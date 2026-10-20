@@ -79,7 +79,7 @@ func setEnabled(cmd *cobra.Command, arg string, enable bool) error {
 	if err != nil {
 		return err
 	}
-	ticket, att, err := resolveCtlTarget(root, arg)
+	ticket, att, err := resolveTarget(root, arg)
 	if err != nil {
 		return err
 	}
