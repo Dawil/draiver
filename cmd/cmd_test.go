@@ -53,6 +53,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	recallTagList = false
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
 	newTool, newModel, newRepo, newBase = "", "", "", ""
+	newType = ""
 	dependsWants, dependsAfter, dependsRequires = nil, nil, nil
 	attemptTool, attemptModel, attemptFrom, attemptRepo, attemptBase = "", "", "", "", ""
 	attemptSetTool, attemptSetModel, attemptSetRepo, attemptSetBase = "", "", "", ""

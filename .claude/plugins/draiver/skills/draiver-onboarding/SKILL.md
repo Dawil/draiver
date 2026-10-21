@@ -77,6 +77,26 @@ mistake: don't loop back to it after each event, and — critically — don't po
 after you escalate to see whether an answer has landed (see §6). Once you're
 working, you have the context; keep going.
 
+### The codebase ledger — a repo-wide belief store to consult
+
+Your brief may carry a **`## Codebase ledger(s)`** section naming one or more
+`type: codebase` tickets bound to this repo. A codebase ledger is not a unit of
+work; it is a standing belief store *about the repo itself* — load-bearing
+architecture decisions, cross-cutting constraints, sharp edges in shared
+subsystems — that outlives any single ticket. Treat it as a library: when a
+question is about *the repo* rather than *your ticket*, read it before you go
+digging or guess:
+
+```
+draiver recall <LEDGER>              # the ledger's live index
+draiver recall <LEDGER> --tag <t>    # filter to a topic
+draiver recall <LEDGER> <seq>        # a fact's full body
+```
+
+The ledger is pulled on demand, never inlined into your brief, so consulting it
+costs nothing until you ask. If your brief shows no such section, this repo has no
+ledger bound — there is nothing to consult; carry on.
+
 ## 2. Translate the acceptance criteria into features
 
 The spec's authority over *what "done" means* lives in its **`## Acceptance
@@ -138,6 +158,36 @@ Wired through `internal/api/list.go`; see the failing case in `pager_test.go`.
 MD
 )"
 ```
+
+### Externalise codebase-level findings into the ledger
+
+§3 and §4 record what the *next worker on your ticket* needs. Some of what you
+learn is bigger than your ticket — it is true of **the repo**, and an agent on a
+*different* ticket would pay to rediscover it. That is a **codebase-level**
+observation, and it belongs in the codebase ledger (the `## Codebase ledger(s)`
+the brief named), not only in your ticket log.
+
+The test: *would this still matter to someone who never touches your ticket?* If
+yes — a load-bearing invariant, a build/test-environment constraint, a sharp edge
+in a shared subsystem — it is codebase-level. If it only makes sense inside your
+ticket's work (why *you* chose X for *this* change, a workaround local to your
+diff), it is ticket-local; keep it on your own log (§3/§4).
+
+You never write into another perspective's log. To contribute, open **your own
+attempt** on the ledger — a sovereign, scoped perspective — and log into it with
+the `ticket@attempt` address form:
+
+```
+draiver attempt new <LEDGER> --repo <repo>    # opens a fresh <LEDGER>@<attempt>
+draiver log <LEDGER>@<attempt> --type note "Scoped findings from <TICKET>."
+draiver log <LEDGER>@<attempt> --type gotcha --tag <topic> "…"
+```
+
+Name the originating ticket in that first note so the perspective's provenance is
+legible. Reuse the ledger's existing tag conventions (skim `recall <LEDGER>`
+first) so a later reader's `--tag` search finds your fact beside the related ones.
+Record the finding, not your ticket's story — the ledger is read by agents who
+will never see your ticket.
 
 ## 5. Supersede, recall, and tag — the log is a live index, not a transcript
 
@@ -367,10 +417,12 @@ draiver review <TICKET> "PR #142 opened; all tests green; covers the spec's thre
 
 ## Loop
 
-Each session: `brief` once (an index of live facts; `recall` for detail) → work —
+Each session: `brief` once (an index of live facts; `recall` for detail;
+consult the repo's **codebase ledger** when your brief names one) → work —
 including translating the spec's acceptance criteria into Gherkin features + steps
 on your branch — → `log` gotchas/decisions as you go, with self-contained first
-lines, superseding stale facts rather than duplicating them → when blocked,
+lines, superseding stale facts rather than duplicating them, externalising
+codebase-level findings into the repo's ledger → when blocked,
 `escalate` and stop (the human resolves from their board, on their own time) → when
 you fire off long self-completing work (a detached test), `launch-async && park`
 and stop (§8); the result lands on your log and wakes the attempt → when the ticket

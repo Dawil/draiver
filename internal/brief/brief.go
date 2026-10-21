@@ -87,6 +87,20 @@ func Build(root store.Root, ticket, id string) (string, error) {
 		b.WriteString(coordinatorProtocol)
 	}
 
+	// Codebase ledger pointer (drv-038): surface the repo's standing belief
+	// store(s) — the `type: codebase` tickets bound to this attempt's repo — as a
+	// library the worker can consult and contribute findings back to. Resolved
+	// repo-derived (resolution #4); listed, never inlined, so facts are pulled on
+	// demand via `recall` and cold-start cost stays flat. No match → no section →
+	// no behaviour change for a repo with no ledger bound.
+	ledgers, err := project.CodebaseLedgersFor(root, a.Repo, ticket)
+	if err != nil {
+		return "", err
+	}
+	if len(ledgers) > 0 {
+		b.WriteString(ledgerSection(ledgers))
+	}
+
 	// ## Current understanding — the index: one line per live fact, in seq order.
 	// Superseded bodies, resolved escalations, and historical events are absent; the
 	// index scales with the live-fact count, not the total event count.
@@ -116,6 +130,34 @@ func Build(root store.Root, ticket, id string) (string, error) {
 		b.WriteString(tail)
 	}
 	return b.String(), nil
+}
+
+// ledgerSection renders the `## Codebase ledger(s)` pointer block (drv-038): the
+// one-line resource header, one bullet per bound ledger, and the recall/contribute
+// instructions. It is a pointer, not a dump — the ledger's facts are pulled on
+// demand with `recall`, so this stays progressive-reveal and cold-start stays
+// cheap. Only called with a non-empty list.
+func ledgerSection(ledgers []project.CodebaseLedger) string {
+	var b strings.Builder
+	if len(ledgers) == 1 {
+		b.WriteString("## Codebase ledger for this repo\n\n")
+	} else {
+		b.WriteString("## Codebase ledgers for this repo\n\n")
+	}
+	b.WriteString("This repo has a standing **codebase ledger** — a belief store about the repo " +
+		"itself (architecture decisions, cross-cutting constraints, recurring gotchas) that " +
+		"outlives any one ticket. Consult it like a library, and contribute findings back to it:\n\n")
+	for _, l := range ledgers {
+		if l.Title != "" && l.Title != l.Ticket {
+			fmt.Fprintf(&b, "- `%s` — %s\n", l.Ticket, l.Title)
+		} else {
+			fmt.Fprintf(&b, "- `%s`\n", l.Ticket)
+		}
+	}
+	b.WriteString("\nRead one with `draiver recall <ledger>` (add `--tag <t>` to filter, a `<seq>` for a " +
+		"fact's body). It is pulled on demand, so it costs nothing until you ask. To record a " +
+		"codebase-level finding of your own, see the handbook (\"Externalise codebase-level findings\").\n\n")
+	return b.String()
 }
 
 // teamSection renders `## Your team`: one bullet per `wants:` child showing the
