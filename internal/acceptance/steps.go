@@ -153,6 +153,15 @@ var registry = map[string]StepFunc{
 	"a codebase ledger carrying a logged decision":                     givenLedgerWithDecision,
 	"recall and log operate on the ledger unchanged":                   thenRecallAndLogWorkUnchanged,
 
+		// --- features/codebase-ledger/cold-start.feature (drv-038) ---
+		"a code ticket whose repo has a bound codebase ledger and a decoy ledger on another repo":  givenCodeTicketWithLedger,
+		"the brief surfaces the bound ledger as a pointer and only that ledger":                     thenBriefSurfacesOnlyBoundLedger,
+		"a code ticket whose repo has no codebase ledger bound":                                     givenCodeTicketNoLedger,
+		"the brief carries no codebase-ledger section":                                              thenBriefHasNoLedgerSection,
+		"a codebase ledger and an agent's own scoped perspective attempt on it":                     givenLedgerWithSecondPerspective,
+		"a codebase-level finding lands on that perspective, leaving the ledger's own log intact":   thenFindingLandsOnThatPerspective,
+		"the handbook teaches reading the ledger and the ticket-local vs codebase-level write rule": thenHandbookTeachesLedger,
+
 	// --- features/progressive-brief/manager-brief.feature (drvctl-053) ---
 	"a coordinator attempt that wants two children and was woken by a child escalation": givenCoordinatorWokenByChild,
 	"the brief lists each child's control-state and open escalations":                   thenBriefListsTeam,

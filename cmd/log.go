@@ -54,30 +54,31 @@ var logCmd = &cobra.Command{
 			Tags:       logTags,
 			Body:       msg,
 		}
-		if logByFlag != "" {
-			root, err := resolveRoot()
-			if err != nil {
-				return err
-			}
-			if !root.Exists(id) {
-				return fmt.Errorf("ticket %q not found under %s", id, root.Dir)
-			}
-			att, err := resolveAttempt(root, id)
-			if err != nil {
-				return err
-			}
-			written, err := repo.New(root, resolveActor()).LogBy(logByFlag, id, att, ev)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s (by %s)\n", written.Type, written.Seq, id, att, logByFlag)
-			return nil
-		}
-		written, att, err := appendEvent(id, ev)
+		root, err := resolveRoot()
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s\n", written.Type, written.Seq, id, att)
+		// Resolve the `ticket[@attempt]` address form through the shared parser
+		// (symmetric with `recall`), so the codebase-ledger write path (drv-038) can
+		// target another ticket's scoped attempt explicitly — `draiver log CB@0002 …`.
+		// With no @attempt it falls back to --attempt / $DRAIVER_ATTEMPT / latest.
+		ticket, att, err := resolveTarget(root, id)
+		if err != nil {
+			return err
+		}
+		if logByFlag != "" {
+			written, err := repo.New(root, resolveActor()).LogBy(logByFlag, ticket, att, ev)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s (by %s)\n", written.Type, written.Seq, ticket, att, logByFlag)
+			return nil
+		}
+		written, _, err := appendEventAt(root, ticket, att, ev)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "logged %s #%d on %s/%s\n", written.Type, written.Seq, ticket, att)
 		return nil
 	},
 }
