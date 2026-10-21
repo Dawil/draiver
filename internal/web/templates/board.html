@@ -1,4 +1,19 @@
 {{define "board.html"}}
+{{/* View toggle (drv-039): switch the board between code tickets and codebase
+     ledgers. Each option is a plain link that navigates the whole page with the
+     chosen ?view= — a full load re-bakes the poll URL in board_page.html, so the
+     3s refresh stays in the chosen view (an htmx swap of this region alone could
+     not update the <main hx-get> that drives the poll). The Ledgers option carries
+     the fleet-wide ledger count and an attention dot when any ledger needs the
+     operator, so ledgers are discoverable from the code view without switching. */}}
+<nav class="board-views" data-testid="board-views" role="tablist" aria-label="Board view">
+  <a class="board-view{{if eq .View "code"}} board-view-on{{end}}" data-testid="board-view-code"
+     href="/?view=code" role="tab" aria-selected="{{if eq .View "code"}}true{{else}}false{{end}}">Code tickets</a>
+  <a class="board-view{{if eq .View "ledgers"}} board-view-on{{end}}" data-testid="board-view-ledgers"
+     href="/?view=ledgers" role="tab" aria-selected="{{if eq .View "ledgers"}}true{{else}}false{{end}}">Ledgers
+    <span class="count" data-testid="count-ledgers">{{.LedgerCount}}</span>
+    {{if gt .LedgerAttention 0}}<span class="board-view-attention" data-testid="ledgers-attention" role="img" aria-label="{{.LedgerAttention}} ledger(s) need attention" title="{{.LedgerAttention}} ledger(s) need attention">●</span>{{end}}</a>
+</nav>
 <div class="columns">
   {{/* Running and Pending share one vertical (decision #2): Pending is a quiet
        sub-section nested under Running, not a fifth column — it conserves
@@ -49,6 +64,10 @@
     <span class="meta-row">
       {{template "session-dot" .}}
       {{template "pyramid-badge" .}}
+      {{/* A codebase ledger (drv-037/drv-039) is a belief store, not a unit of work:
+           mark it so a card surfacing into the code view's Stuck column, or sitting
+           in the ledgers view, reads as a ledger rather than an ordinary ticket. */}}
+      {{if eq .Type "codebase"}}<span class="ledger-badge" data-testid="ledger-badge-{{.Ticket}}-{{.ID}}" title="codebase ledger">ledger</span>{{end}}
       {{if .Tool}}<span class="tool">{{.Tool}}</span>{{end}}
       {{if gt (len .OpenEscalations) 0}}<span class="badge">{{len .OpenEscalations}} open</span>{{end}}
     </span>

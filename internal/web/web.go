@@ -269,8 +269,15 @@ func cardHref(a project.Attempt) string {
 // of the POST, so the two can never disagree about which cards are actionable. The
 // write path loads without the runtime bits, so handleEnable must re-derive Live/
 // Desired (fillRuntime) before this check or the POST fires for a buttonless card.
+//
+// A codebase ledger (drv-037) is never enabled — it has no actuation loop — so it
+// is excluded explicitly (drv-039). restingState already rewrites its log state
+// Running→Pending, so the a.State==Running arm would never fire for one in any
+// case; the type guard makes that intent robust rather than incidental, and gives
+// the write path the same single gate to refuse an enable POST against a ledger.
 func canEnable(a project.Attempt) bool {
-	return a.State == project.Running && !a.Enabled && !a.Live && !a.Desired
+	return a.Type != project.TypeCodebase &&
+		a.State == project.Running && !a.Enabled && !a.Live && !a.Desired
 }
 
 // canArchive reports whether an attempt's card should show the archive affordance
@@ -590,6 +597,59 @@ type boardVM struct {
 	NeedsMe []project.Attempt
 	Review  []project.Attempt
 	Done    []project.Attempt
+
+	// View is the board filter in force (drv-039): "code" (the default — code
+	// tickets, plus any codebase ledger in an attention state) or "ledgers" (only
+	// codebase ledgers). It drives the toggle's active state and the poll URL baked
+	// into board_page.html's <main hx-get>, so a 3s refresh stays in the same view.
+	View string
+	// LedgerCount is every non-archived codebase ledger (regardless of the current
+	// view), and LedgerAttention how many of them are in an attention state — both
+	// shown on the Ledgers toggle so the operator sees ledgers exist (and need them)
+	// without first switching into that view.
+	LedgerCount     int
+	LedgerAttention int
+	// StuckTotal and ReviewTotal are the GLOBAL attention tally across both views —
+	// every non-archived attempt of either type, not just the view-filtered columns.
+	// The favicon reads these (not len(NeedsMe)/len(Review)) so switching to the
+	// ledgers view can never drop a code ticket's Stuck/Review signal from the tab
+	// icon (drv-039).
+	StuckTotal  int
+	ReviewTotal int
+}
+
+// boardView is the board's type filter (drv-039). It is parsed from the `?view=`
+// query and stored on boardVM as a plain string for the templates.
+type boardView string
+
+const (
+	viewCode    boardView = "code"    // the default: code tickets + attention-state ledgers
+	viewLedgers boardView = "ledgers" // only codebase ledgers
+)
+
+// parseView resolves the raw `?view=` query value to a known board view, defaulting
+// to the code-ticket view for an absent or unrecognised value — so a hand-typed or
+// stale URL degrades to the ordinary board rather than erroring.
+func parseView(raw string) boardView {
+	if boardView(strings.TrimSpace(raw)) == viewLedgers {
+		return viewLedgers
+	}
+	return viewCode
+}
+
+// viewFromCurrentURL recovers the board view from htmx's HX-Current-URL header —
+// the page the operator is actually looking at — for a POST that carries no view of
+// its own (the archive form). Absent or unparseable, it falls back to the code view.
+func viewFromCurrentURL(r *http.Request) boardView {
+	cur := r.Header.Get("HX-Current-URL")
+	if cur == "" {
+		return viewCode
+	}
+	u, err := url.Parse(cur)
+	if err != nil {
+		return viewCode
+	}
+	return parseView(u.Query().Get("view"))
 }
 
 // Favicon variants. The <head> is never re-rendered by htmx, so the board
@@ -607,9 +667,9 @@ const (
 // flash on load) and drives the per-refresh HX-Trigger event.
 func (vm boardVM) FaviconHref() string {
 	switch {
-	case len(vm.NeedsMe) > 0:
+	case vm.StuckTotal > 0:
 		return faviconStuck
-	case len(vm.Review) > 0:
+	case vm.ReviewTotal > 0:
 		return faviconReview
 	default:
 		return faviconPlain
@@ -638,7 +698,10 @@ func emitFaviconTrigger(w http.ResponseWriter, vm boardVM) {
 // The favicon is a nicety, so a board-scan error degrades to plain rather than
 // failing the whole detail page.
 func (s *Server) faviconHref() string {
-	vm, err := s.board()
+	// The favicon tracks GLOBAL attention (StuckTotal/ReviewTotal), which board()
+	// tallies over every attempt regardless of view, so the view passed here is
+	// immaterial — use the default code view.
+	vm, err := s.board(viewCode)
 	if err != nil {
 		return faviconPlain
 	}
@@ -1103,7 +1166,15 @@ type indexVM struct {
 	FaviconHref string
 }
 
-func (s *Server) board() (boardVM, error) {
+// isAttention reports whether a board state is one the human is asked to act on —
+// an open escalation (Stuck) or a review claim (Review). A codebase ledger
+// surfaces into the code-ticket view only in one of these states (drv-039), and
+// the favicon badges on the same two.
+func isAttention(st project.State) bool {
+	return st == project.NeedsMe || st == project.Review
+}
+
+func (s *Server) board(view boardView) (boardVM, error) {
 	attempts, err := project.LoadAll(s.root)
 	if err != nil {
 		return boardVM{}, err
@@ -1126,6 +1197,7 @@ func (s *Server) board() (boardVM, error) {
 	// folded under the same config default the capability panel resolves against.
 	escalated := project.DeriveEscalated(attempts, edges, s.supDefault)
 	var vm boardVM
+	vm.View = string(view)
 	for _, a := range attempts {
 		// An archived attempt lands in no column — that is the whole board effect of
 		// archive: the card stops being emitted (see DeriveArchived / handleArchive).
@@ -1135,7 +1207,40 @@ func (s *Server) board() (boardVM, error) {
 		a.Desired = desired[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
 		a.Live = s.attemptLive(a)
 		a.EscalatedTo = escalated[project.Ref{Ticket: a.Ticket, Attempt: a.ID}]
-		switch a.BoardState() {
+		bs := a.BoardState()
+		isLedger := a.Type == project.TypeCodebase
+
+		// Global tallies, computed over EVERY non-archived attempt before the view
+		// filter drops any — so the favicon (StuckTotal/ReviewTotal) and the Ledgers
+		// toggle (LedgerCount/LedgerAttention) read the whole fleet, not the subset
+		// the current view happens to render (drv-039).
+		if isAttention(bs) {
+			if bs == project.NeedsMe {
+				vm.StuckTotal++
+			} else {
+				vm.ReviewTotal++
+			}
+		}
+		if isLedger {
+			vm.LedgerCount++
+			if isAttention(bs) {
+				vm.LedgerAttention++
+			}
+		}
+
+		// View filter (drv-039). Ledgers view: codebase ledgers only. Code view: code
+		// tickets always, plus a ledger only once it hits an attention state — so a
+		// resting Parked ledger stays off the code board but an open-escalation one
+		// still surfaces through the normal Stuck path.
+		if view == viewLedgers {
+			if !isLedger {
+				continue
+			}
+		} else if isLedger && !isAttention(bs) {
+			continue
+		}
+
+		switch bs {
 		case project.Running:
 			// A Running coordinator (a `wants:` ticket) renders as a distinct
 			// coordinator card: surface the control plane's own wake reason (drvweb-023).
@@ -1153,9 +1258,16 @@ func (s *Server) board() (boardVM, error) {
 			// or the forward-gate "waiting on X" peek — the two ways an attempt lands
 			// Pending. A moved-up child is Running-in-log, so WaitingReason would read
 			// "waiting to start"; the escalated reason is the truthful one.
-			if a.EscalatedTo != "" {
+			//
+			// A codebase ledger is a third case (drv-039): it is log-Pending by its
+			// resting state (drv-037 restingState), not waiting on any gate, so the
+			// "waiting on X" peek would be a lie — label it as the Parked rest instead.
+			switch {
+			case isLedger:
+				a.WaitingReason = "parked — codebase ledger"
+			case a.EscalatedTo != "":
 				a.WaitingReason = project.EscalatedReason(a.EscalatedTo)
-			} else {
+			default:
 				a.WaitingReason = project.WaitingReason(a.Ticket, attempts, edges)
 			}
 			vm.Pending = append(vm.Pending, a)
@@ -1206,7 +1318,7 @@ func (s *Server) fillRuntime(a *project.Attempt) error {
 }
 
 func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {
-	vm, err := s.board()
+	vm, err := s.board(parseView(r.URL.Query().Get("view")))
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1215,7 +1327,7 @@ func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
-	vm, err := s.board()
+	vm, err := s.board(parseView(r.URL.Query().Get("view")))
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1248,7 +1360,7 @@ func (s *Server) handleCacheRollup(w http.ResponseWriter, r *http.Request) {
 // board state — a channel of its own, independent of the log poll (which
 // self-cancels on a Done attempt and does not exist on the attempts index).
 func (s *Server) handleFaviconState(w http.ResponseWriter, r *http.Request) {
-	vm, err := s.board()
+	vm, err := s.board(viewCode)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1676,7 +1788,10 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	// Re-render the whole board region: the archived card is gone (board() skips it)
 	// and the column counts reflect the removal in one htmx swap. Keep the favicon in
 	// sync like handleBoardPartial — archiving a Stuck card can change the variant.
-	vm, err := s.board()
+	// Render in the operator's CURRENT view (drv-039) — read off HX-Current-URL, since
+	// the archive POST carries no view of its own — so archiving a ledger from the
+	// ledgers view does not flip the board back to code tickets under the operator.
+	vm, err := s.board(viewFromCurrentURL(r))
 	if err != nil {
 		s.fail(w, err)
 		return
