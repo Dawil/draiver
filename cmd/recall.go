@@ -26,7 +26,7 @@ var (
 )
 
 var recallCmd = &cobra.Command{
-	Use:   "recall TICKET [SEQ...]",
+	Use:   "recall <ticket[@attempt]> [SEQ...]",
 	Short: "Pull facts from an attempt's log on demand — the read side of the fold",
 	Long: "recall is the deterministic read surface over the knowledge fold the brief\n" +
 		"indexes (drv-026). With no seq it prints the index of live facts (seq, type,\n" +
