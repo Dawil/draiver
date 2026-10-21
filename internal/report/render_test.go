@@ -181,6 +181,43 @@ func TestRenderByReferenceDoesNotInline(t *testing.T) {
 	}
 }
 
+// TestImageEmbedRendersVisible guards the fix for the "screenshots never show in
+// the report" bug: an image embed must render inside an OPEN <details> and must NOT
+// carry loading="lazy". A lazy <img> inside a closed <details> stays display:none,
+// so the browser never loads it (naturalWidth=0) — the reviewer sees a 📎 label and
+// no picture. Both the self-contained and by-reference renders must keep images
+// eagerly loadable and expanded.
+func TestImageEmbedRendersVisible(t *testing.T) {
+	r := mustParse(t, sample)
+	renders := map[string]string{
+		"self-contained": "",
+		"by-reference":   "ref",
+	}
+	for name, mode := range renders {
+		opts := Options{Title: name}
+		if mode == "ref" {
+			opts.Resolve = func(ref EmbeddingRef) string { return "/asset" }
+		}
+		out, err := Render(r, opts)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", name, err)
+		}
+		doc := string(out)
+		// The screenshot <img> must not be lazy — a lazy image in a collapsed
+		// container never loads.
+		if strings.Contains(doc, `loading="lazy"`) {
+			t.Errorf("%s: image embed is loading=\"lazy\" — it will not load inside a collapsed <details>", name)
+		}
+		// The image's wrapping <details> must be open so the picture is visible.
+		if !strings.Contains(doc, "<details open>") {
+			t.Errorf("%s: no open <details> wrapping an image embed — screenshots stay hidden behind a closed toggle", name)
+		}
+		if !strings.Contains(doc, "<img") {
+			t.Errorf("%s: expected an <img> for the screenshot embed", name)
+		}
+	}
+}
+
 func TestLargeEmbeddingDoesNotBreak(t *testing.T) {
 	// ~3 MB of base64 payload — the standalone-download heavy case.
 	big := strings.Repeat("A", 3<<20)

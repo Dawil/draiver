@@ -133,9 +133,14 @@
         {{if .Embeds}}
         <div class="embeds">
           {{range .Embeds}}
-          <details>
+          {{/* Image embeds render open so screenshots are visible evidence, not
+               hidden behind a closed <details> (which keeps them display:none).
+               loading="lazy" is omitted deliberately: a lazy <img> inside a
+               collapsed scenario/embed never enters the viewport, so it never
+               loads — the reviewer sees a 📎 label and no picture. */}}
+          <details{{if .IsImage}} open{{end}}>
             <summary>📎 {{.Name}}</summary>
-            {{if .IsImage}}<img loading="lazy" alt="{{.Name}}" src="{{.Src}}">
+            {{if .IsImage}}<img alt="{{.Name}}" decoding="async" src="{{.Src}}">
             {{else if .IsText}}<pre class="text-embed">{{.Text}}</pre>
             {{else if .Download}}<a class="download" download href="{{.Src}}">Download {{.Name}}</a>
             {{end}}

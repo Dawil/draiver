@@ -476,7 +476,9 @@ func TestBoardPollNeverQuiesces(t *testing.T) {
 	h := s.Handler()
 
 	page := get(t, h, "/").Body.String()
-	for _, want := range []string{`hx-get="/board"`, `hx-trigger="every 3s"`} {
+	// The poll URL now carries the active view (drv-039); the default board is the
+	// code view, so the idle board polls /board?view=code.
+	for _, want := range []string{`hx-get="/board?view=code"`, `hx-trigger="every 3s"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("idle board must keep polling; missing %q", want)
 		}
@@ -679,16 +681,18 @@ func TestFaviconServedAndWired(t *testing.T) {
 // nothing pending, Review badge with only reviews, Stuck badge whenever anything
 // is blocked — even alongside reviews.
 func TestFaviconHrefPrecedence(t *testing.T) {
-	one := []project.Attempt{{}}
+	// FaviconHref reads the GLOBAL attention tally (StuckTotal/ReviewTotal, drv-039),
+	// not the view-filtered columns, so the tab icon stays correct even on the
+	// ledgers view where a code ticket's Stuck/Review signal is off the columns.
 	for _, c := range []struct {
 		name string
 		vm   boardVM
 		want string
 	}{
 		{"idle", boardVM{}, "/static/favicon.svg"},
-		{"review only", boardVM{Review: one}, "/static/favicon-review.svg"},
-		{"stuck only", boardVM{NeedsMe: one}, "/static/favicon-stuck.svg"},
-		{"stuck outranks review", boardVM{NeedsMe: one, Review: one}, "/static/favicon-stuck.svg"},
+		{"review only", boardVM{ReviewTotal: 1}, "/static/favicon-review.svg"},
+		{"stuck only", boardVM{StuckTotal: 1}, "/static/favicon-stuck.svg"},
+		{"stuck outranks review", boardVM{StuckTotal: 1, ReviewTotal: 1}, "/static/favicon-stuck.svg"},
 	} {
 		if got := c.vm.FaviconHref(); got != c.want {
 			t.Errorf("%s: FaviconHref() = %q, want %q", c.name, got, c.want)
@@ -1988,10 +1992,10 @@ func TestRestartContextResolvesAndRestarts(t *testing.T) {
 
 	out := rr.Body.String()
 	for _, want := range []string{
-		"state-Running",               // badge leaves Stuck
-		`data-testid="resolved-2"`,    // escalation flips to resolved
+		"state-Running",                // badge leaves Stuck
+		`data-testid="resolved-2"`,     // escalation flips to resolved
 		`data-testid="restart-result"`, // the OOB outcome banner rode along
-		`data-kind="ok"`,              // ...reporting success
+		`data-kind="ok"`,               // ...reporting success
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("restart live fragment missing %q\n%s", want, out)
@@ -2374,4 +2378,86 @@ func TestGroupInt(t *testing.T) {
 			t.Errorf("groupInt(%d) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
+}
+
+// TestBoardCodebaseLedgerView pins drv-039's web contract: a codebase ledger
+// renders with no play/enable control and a ledger marker; the default code view
+// hides a resting (Parked) ledger but still surfaces one with an open escalation
+// through the Stuck path; the ledgers view shows only ledgers; and the toggle
+// carries the fleet-wide ledger count + an attention dot. Code tickets are
+// untouched — the ordinary card keeps its enable button.
+func TestBoardCodebaseLedgerView(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	mk := func(id, typeLine string, events ...event.Event) {
+		if err := root.EnsureAttemptDirs(id, "0001"); err != nil {
+			t.Fatal(err)
+		}
+		spec := "---\nid: " + id + "\ntitle: " + id + "\n" + typeLine + "---\n\n# " + id + "\n"
+		if err := os.WriteFile(root.SpecPath(id), []byte(spec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ticketlog.Append(root, id, "0001", event.Event{Type: "created", Actor: "a", Body: "start"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			if _, err := ticketlog.Append(root, id, "0001", e); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mk("ORD-1", "")                    // ordinary ticket → Running, enable button
+	mk("LED-REST", "type: codebase\n") // resting ledger → Parked (Pending)
+	mk("LED-ESC", "type: codebase\n",  // ledger with an open escalation → Needs-me
+		event.Event{Type: "escalation", Actor: "agent:x", Body: "which trunk is authoritative?"})
+
+	s, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	has := func(where, body, sub string) {
+		t.Helper()
+		if !strings.Contains(body, sub) {
+			t.Errorf("%s: missing %q", where, sub)
+		}
+	}
+	hasNot := func(where, body, sub string) {
+		t.Helper()
+		if strings.Contains(body, sub) {
+			t.Errorf("%s: unexpectedly contains %q", where, sub)
+		}
+	}
+
+	// --- code view (default): ledgers absent unless in an attention state ---
+	code := get(t, h, "/?view=code").Body.String()
+	has("code view", code, `data-testid="attempt-link-ORD-1-0001"`)
+	has("code view", code, `data-testid="enable-btn-ORD-1-0001"`) // code ticket unchanged
+	hasNot("code view", code, `data-testid="card-LED-REST-0001"`) // resting ledger hidden
+	has("code view", code, `data-testid="card-LED-ESC-0001"`)     // escalation surfaces
+	has("code view", code, `data-testid="ledger-badge-LED-ESC-0001"`)
+	hasNot("code view", code, `data-testid="enable-btn-LED-ESC-0001"`) // never enablable
+	has("code view", code, `data-testid="count-ledgers">2<`)           // both ledgers tallied
+	has("code view", code, `data-testid="ledgers-attention"`)          // one needs attention
+	has("code view", code, `data-testid="board-view-code"`)
+
+	// --- ledgers view: only ledgers, both shown, code ticket absent ---
+	led := get(t, h, "/?view=ledgers").Body.String()
+	has("ledgers view", led, `data-testid="card-LED-REST-0001"`)
+	has("ledgers view", led, `data-testid="card-LED-ESC-0001"`)
+	hasNot("ledgers view", led, `data-testid="card-ORD-1-0001"`)
+	hasNot("ledgers view", led, `data-testid="enable-btn-LED-REST-0001"`)
+	has("ledgers view", led, "parked — codebase ledger") // Parked rest, not a gate reason
+	has("ledgers view", led, `data-testid="ledger-badge-LED-REST-0001"`)
+
+	// The poll URL is baked with the active view so a 3s refresh stays put.
+	page := get(t, h, "/?view=ledgers").Body.String()
+	has("ledgers page", page, `hx-get="/board?view=ledgers"`)
+
+	// An unknown view degrades to the code view rather than erroring.
+	bad := get(t, h, "/?view=bogus")
+	if bad.Code != 200 {
+		t.Fatalf("GET /?view=bogus = %d, want 200", bad.Code)
+	}
+	has("bogus view", bad.Body.String(), `data-testid="attempt-link-ORD-1-0001"`)
 }

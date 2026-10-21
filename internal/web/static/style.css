@@ -149,6 +149,36 @@ body {
    one. The waratah crimson is a hue apart from the rust reserved for Stuck. */
 .session-error { background: var(--dot-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dot-error) 60%, transparent); }
 .badge { font-size: 11px; color: var(--alert); border: 1px solid var(--alert); border-radius: 999px; padding: 0 7px; }
+
+/* Ledger badge (drv-039): a quiet pill marking a codebase ledger (a belief store,
+   not a unit of work) on its card — in the ledgers view, or when an open-escalation
+   ledger surfaces into the code view's Stuck column. Muted, hue apart from the
+   crimson .badge, so it reads as identity, not alarm. */
+.ledger-badge {
+  font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 7px; letter-spacing: .04em;
+}
+
+/* Board view toggle (drv-039): the code-tickets / ledgers switch above the columns.
+   Two tabs; the active one takes the accent underline. Each is a full-page link, so
+   the poll URL in board_page.html is re-baked per view. */
+.board-views {
+  display: flex; gap: 6px; padding: 14px 24px 0; align-items: center;
+}
+.board-view {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--muted); text-decoration: none;
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px;
+}
+.board-view:hover { border-color: var(--accent); color: var(--ink); }
+.board-view-on {
+  color: var(--ink); border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.board-view-on .count { background: var(--panel); }
+/* Attention dot on the Ledgers tab: a ledger needs the operator (Needs-me/Review),
+   in the Stuck crimson so it reads with the same urgency as the Stuck column. */
+.board-view-attention { color: var(--alert); font-size: 10px; line-height: 1; }
 /* Test-pyramid badge (drvweb-021). A compact pill of rungs (unit ✓ · integration ✓)
    surfacing the highest logged rung whose commit == current HEAD. Green when it
    describes HEAD; muted with a "stale" flag when the last recorded result predates
