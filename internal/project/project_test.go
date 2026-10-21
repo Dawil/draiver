@@ -152,6 +152,166 @@ func TestEnableDisableDoNotChangeState(t *testing.T) {
 	}
 }
 
+// TestNormalizeType is drv-037 decision #4: absent defaults to the ordinary
+// ticket type, the two known values pass through, and anything else is rejected
+// (reject-unknown, so a typo fails loudly instead of degrading to a plain ticket).
+func TestNormalizeType(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", TypeTicket, false},
+		{"   ", TypeTicket, false},
+		{"ticket", TypeTicket, false},
+		{"codebase", TypeCodebase, false},
+		{"  codebase  ", TypeCodebase, false},
+		{"code", "", true},    // the spec's original name is not a known value
+		{"codbase", "", true}, // a typo
+		{"CODEBASE", "", true},
+		{"ledger", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got, err := NormalizeType(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("NormalizeType(%q) = %q, want error", c.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeType(%q) errored: %v", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("NormalizeType(%q) = %q want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRestingState is drv-037's type-aware control fold: an ordinary ticket's
+// derived state is untouched, while a codebase ledger rests Parked (Pending) and
+// has no Done — its Running and Done both collapse to Pending, and Needs-me /
+// Review pass through so it still surfaces via the normal state machine.
+func TestRestingState(t *testing.T) {
+	cases := []struct {
+		name       string
+		state      State
+		ticketType string
+		want       State
+	}{
+		{"ticket running stays running", Running, TypeTicket, Running},
+		{"ticket done stays done", Done, TypeTicket, Done},
+		{"ticket needs-me stays needs-me", NeedsMe, TypeTicket, NeedsMe},
+		{"codebase running rests parked", Running, TypeCodebase, Pending},
+		{"codebase done is excluded, collapses to parked", Done, TypeCodebase, Pending},
+		{"codebase needs-me surfaces via the normal machine", NeedsMe, TypeCodebase, NeedsMe},
+		{"codebase review passes through", Review, TypeCodebase, Review},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := restingState(c.state, c.ticketType); got != c.want {
+				t.Errorf("restingState(%q, %q) = %q want %q", c.state, c.ticketType, got, c.want)
+			}
+		})
+	}
+}
+
+// TestLoadAttemptCodebaseLedger is the end-to-end drv-037 fold: a type: codebase
+// spec loads with Type codebase and rests Parked (Pending) even though its log is
+// bare (no done/escalation); it is not enabled; an open escalation still surfaces
+// Needs-me; and a stray `done` does not close it (no Done transition). An unknown
+// type is rejected at load.
+func TestLoadAttemptCodebaseLedger(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "LEDGER-1"
+	if err := root.EnsureAttemptDirs(id, "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: LEDGER-1\ntitle: The Codebase\ntype: codebase\n---\n\n# The Codebase"), 0o644)
+	os.WriteFile(root.AttemptMetaPath(id, "0001"), []byte("---\nid: 0001\nticket: LEDGER-1\nrepo: /tmp/x\nbase: main\n---\n"), 0o644)
+	ticketlog.Append(root, id, "0001", event.Event{Type: "created", Actor: "a"})
+
+	a, err := LoadAttempt(root, id, "0001")
+	if err != nil {
+		t.Fatalf("LoadAttempt: %v", err)
+	}
+	if a.Type != TypeCodebase {
+		t.Errorf("Type = %q want %q", a.Type, TypeCodebase)
+	}
+	if a.State != Pending {
+		t.Errorf("resting state = %q want Pending (Parked)", a.State)
+	}
+	if a.Enabled {
+		t.Errorf("a freshly-authored ledger must not be enabled")
+	}
+
+	// A stray done must not close a ledger — the Done transition is excluded.
+	ticketlog.Append(root, id, "0001", event.Event{Type: "done", Actor: "a", Body: "tried to close"})
+	a, err = LoadAttempt(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.State == Done {
+		t.Errorf("a codebase ledger reached Done — the transition must be excluded")
+	}
+	if a.State != Pending {
+		t.Errorf("ledger after a stray done = %q want Pending (still Parked)", a.State)
+	}
+
+	// An open escalation still surfaces Needs-me via the normal state machine.
+	ticketlog.Append(root, id, "0001", event.Event{Type: "escalation", Actor: "a", Body: "which trunk?"})
+	a, err = LoadAttempt(root, id, "0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.State != NeedsMe {
+		t.Errorf("ledger with open escalation = %q want Needs me", a.State)
+	}
+}
+
+// TestLoadAttemptRejectsUnknownType: a hand-edited bad type: fails loudly at load,
+// exactly as unparseable frontmatter does, rather than silently loading as ordinary.
+func TestLoadAttemptRejectsUnknownType(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "BAD-1"
+	if err := root.EnsureAttemptDirs(id, "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: BAD-1\ntitle: Oops\ntype: codbase\n---\n\n# Oops"), 0o644)
+	os.WriteFile(root.AttemptMetaPath(id, "0001"), []byte("---\nid: 0001\nticket: BAD-1\nrepo: /tmp/x\nbase: main\n---\n"), 0o644)
+	ticketlog.Append(root, id, "0001", event.Event{Type: "created", Actor: "a"})
+
+	if _, err := LoadAttempt(root, id, "0001"); err == nil {
+		t.Fatal("LoadAttempt accepted an unknown ticket type; want reject-unknown error")
+	}
+}
+
+// TestLoadAttemptDefaultsToTicket: a spec with no type: loads as an ordinary ticket
+// and behaves exactly as today — Running resting state, serialisation unaffected.
+func TestLoadAttemptDefaultsToTicket(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PLAIN-1"
+	if err := root.EnsureAttemptDirs(id, "0001"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(root.SpecPath(id), []byte("---\nid: PLAIN-1\ntitle: Plain\n---\n\n# Plain"), 0o644)
+	os.WriteFile(root.AttemptMetaPath(id, "0001"), []byte("---\nid: 0001\nticket: PLAIN-1\nrepo: /tmp/x\nbase: main\n---\n"), 0o644)
+	ticketlog.Append(root, id, "0001", event.Event{Type: "created", Actor: "a"})
+
+	a, err := LoadAttempt(root, id, "0001")
+	if err != nil {
+		t.Fatalf("LoadAttempt: %v", err)
+	}
+	if a.Type != TypeTicket {
+		t.Errorf("Type = %q want %q (default)", a.Type, TypeTicket)
+	}
+	if a.State != Running {
+		t.Errorf("ordinary ticket resting state = %q want Running", a.State)
+	}
+}
+
 func TestLoadAllReturnsOneCardPerAttemptWithIndependentState(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	id := "PROJ-1"

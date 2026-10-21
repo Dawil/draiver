@@ -135,6 +135,24 @@ var registry = map[string]StepFunc{
 	"a session resumed because its detached test landed a result on its own log": givenResumedByAsyncResult,
 	"the driving turn tells the agent to read that result and hand off":          thenWakeNudgeNamesResult,
 
+	// --- features/codebase-ledger/type.feature (drv-037) ---
+	"a ticket authored with no type field":                             givenTicketNoType,
+	"it loads as an ordinary ticket resting in Running":                thenLoadsAsOrdinaryTicketRunning,
+	"a codebase ledger authored with type codebase":                    givenCodebaseLedger,
+	"the ledger rests in Parked and is not enabled":                    thenLedgerRestsParkedNotEnabled,
+	"the reconciler never admits the ledger":                           thenReconcilerNeverAdmits,
+	"a codebase ledger with a stray done event and then an archive":    givenLedgerStrayDoneArchive,
+	"the ledger never reaches Done and rests Parked":                   thenLedgerNeverDoneRestsParked,
+	"the ledger is taken off the board by the archive":                 thenLedgerTakenOffBoard,
+	"a codebase ledger with an open escalation":                        givenLedgerOpenEscalation,
+	"the ledger surfaces as Needs-me":                                  thenLedgerSurfacesNeedsMe,
+	"a codebase ledger at rest alongside an ordinary running ticket":   givenLedgerAndOrdinary,
+	"the rollup counts the ordinary ticket but not the resting ledger": thenRollupCountsOrdinaryNotLedger,
+	"a spec hand-edited with an unknown type":                          givenSpecUnknownType,
+	"loading the ticket is rejected with a clear message":              thenLoadingRejectedClearly,
+	"a codebase ledger carrying a logged decision":                     givenLedgerWithDecision,
+	"recall and log operate on the ledger unchanged":                   thenRecallAndLogWorkUnchanged,
+
 	// --- features/progressive-brief/manager-brief.feature (drvctl-053) ---
 	"a coordinator attempt that wants two children and was woken by a child escalation": givenCoordinatorWokenByChild,
 	"the brief lists each child's control-state and open escalations":                   thenBriefListsTeam,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/config"
+	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -21,6 +22,7 @@ var (
 	newTeam     string
 	newAssignee string
 	newSpecFile string
+	newType     string
 	newTool     string
 	newModel    string
 	newRepo     string
@@ -52,9 +54,16 @@ the imported frontmatter do (ambiguous). A rejected new writes nothing.`,
 			return fmt.Errorf("ticket %q already exists", id)
 		}
 
+		// Resolve the ticket type before any side effect (drv-037): an unknown
+		// --type is rejected here, near the author, writing no orphan ticket. An
+		// absent --type resolves to the default ordinary ticket.
+		ticketType, err := project.NormalizeType(newType)
+		if err != nil {
+			return err
+		}
 		// Build (and validate the title of) the spec, and validate --repo, before
 		// any side effect: a rejected `new` must leave no orphan ticket dir behind.
-		spec, err := buildSpec(id)
+		spec, err := buildSpec(id, ticketType)
 		if err != nil {
 			return err
 		}
@@ -151,7 +160,7 @@ const errNoBase = "a base branch is required: the repo is on a detached HEAD so 
 // Title sources, treated as XOR (a source is "set" only when non-empty after
 // trimming): spec frontmatter title, and --title. Neither → error (no more
 // silent id fallback); both → error (ambiguous); exactly one → use it.
-func buildSpec(id string) ([]byte, error) {
+func buildSpec(id, ticketType string) ([]byte, error) {
 	flagTitle := strings.TrimSpace(newTitle)
 
 	if newSpecFile != "" {
@@ -160,23 +169,31 @@ func buildSpec(id string) ([]byte, error) {
 			return nil, fmt.Errorf("read spec: %w", err)
 		}
 		specTitle := strings.TrimSpace(frontmatterTitle(data))
+		var titled []byte
 		switch {
 		case specTitle == "" && flagTitle == "":
 			return nil, fmt.Errorf("%s", errNoTitle)
 		case specTitle != "" && flagTitle != "":
 			return nil, fmt.Errorf("title set by both --title (%q) and the spec's frontmatter (%q); pass only one", flagTitle, specTitle)
 		case flagTitle != "":
-			return injectTitle(data, flagTitle), nil
+			titled = injectTitle(data, flagTitle)
 		default:
-			return data, nil
+			titled = data
 		}
+		// An explicit --type codebase on an imported spec injects the type; the
+		// default ordinary ticket leaves the imported frontmatter untouched, so a
+		// type-less import stays serialised exactly as its file (AC#1).
+		if ticketType == project.TypeCodebase {
+			return injectType(titled, ticketType), nil
+		}
+		return titled, nil
 	}
 
 	// Scaffold path: the only possible title source is --title.
 	if flagTitle == "" {
 		return nil, fmt.Errorf("%s", errNoTitle)
 	}
-	return scaffoldSpec(id, flagTitle), nil
+	return scaffoldSpec(id, flagTitle, ticketType), nil
 }
 
 // yamlLine renders a single `key: value` frontmatter line with the value encoded
@@ -206,13 +223,19 @@ func optionalSpecLine(key, val, example string) string {
 }
 
 // scaffoldSpec renders a fresh spec.md with identity frontmatter and a stub body.
-func scaffoldSpec(id, title string) []byte {
+// A codebase ledger (drv-037) carries an explicit `type: codebase` line; an
+// ordinary ticket writes none, so it serialises byte-identically to a pre-drv-037
+// scaffold (AC#1).
+func scaffoldSpec(id, title, ticketType string) []byte {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "id: %s\n", id)
 	// title/project/team/assignee are free-text (title and the latter three are
 	// user-supplied flags), so each goes through yamlLine to stay valid YAML.
 	b.WriteString(yamlLine("title", title) + "\n")
+	if ticketType == project.TypeCodebase {
+		fmt.Fprintf(&b, "type: %s\n", ticketType)
+	}
 	// project/team/assignee are optional board-grouping metadata. When set they
 	// render as real lines; when unset they render as commented examples so a
 	// hand-editor sees the key and a sample rather than a mute blank line.
@@ -291,8 +314,40 @@ func injectTitle(data []byte, title string) []byte {
 	return []byte("---\n" + strings.Join(lines, "\n") + rest[end:])
 }
 
+// injectType returns data with a `type:` frontmatter key set to ticketType,
+// replacing any existing type line (mirroring injectTitle's framing). It is called
+// only for an explicit non-default type on an imported spec, so overwriting the
+// file's own type is the intended "the flag wins" behaviour. A file with no
+// frontmatter gets a fresh block prepended.
+func injectType(data []byte, ticketType string) []byte {
+	s := string(data)
+	typeLine := "type: " + ticketType
+	if !strings.HasPrefix(s, "---\n") {
+		return []byte("---\n" + typeLine + "\n---\n\n" + s)
+	}
+	rest := s[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return []byte("---\n" + typeLine + "\n---\n\n" + s)
+	}
+	lines := strings.Split(rest[:end], "\n")
+	replaced := false
+	for i, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), "type:") {
+			lines[i] = typeLine
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lines = append([]string{typeLine}, lines...)
+	}
+	return []byte("---\n" + strings.Join(lines, "\n") + rest[end:])
+}
+
 func init() {
 	newCmd.Flags().StringVar(&newTitle, "title", "", "human-readable ticket title (required unless --spec's frontmatter carries a title:)")
+	newCmd.Flags().StringVar(&newType, "type", "", "ticket type: `ticket` (default, an ordinary unit of work) or `codebase` (a belief ledger — never enabled, rests Parked, never Done)")
 	newCmd.Flags().StringVar(&newProject, "project", "", "project field")
 	newCmd.Flags().StringVar(&newTeam, "team", "", "team field")
 	newCmd.Flags().StringVar(&newAssignee, "assignee", "", "assignee field")
