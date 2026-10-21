@@ -44,6 +44,13 @@ export DRAIVER_CONFIG="$CONFIG"
 "$BIN" review DUMMY-2 "seeded review claim for $ENV_NAME" --url "http://example.test/compare/main...dummy" >/dev/null 2>&1 || true
 "$BIN" new    DUMMY-3 --title "$ENV_NAME: needs a human"  --repo "$PWD" --base main >/dev/null 2>&1 || true
 "$BIN" escalate DUMMY-3 "seeded question for $ENV_NAME?" >/dev/null 2>&1 || true
+# drv-039: a couple of `type: codebase` ledgers so the reviewer can see the new ledger
+# rendering — a resting one (gated to Parked by drv-037, so it only shows in the Ledgers
+# view) and an escalated one (Needs-me, surfacing into the code view and lighting the
+# Ledgers attention dot). Exercises both the default-hidden and the attention path.
+"$BIN" new    LEDGER-1 --title "$ENV_NAME: resting codebase ledger" --repo "$PWD" --base main --type codebase >/dev/null 2>&1 || true
+"$BIN" new    LEDGER-2 --title "$ENV_NAME: ledger needs a human"    --repo "$PWD" --base main --type codebase >/dev/null 2>&1 || true
+"$BIN" escalate LEDGER-2 "which trunk is authoritative for $ENV_NAME?" >/dev/null 2>&1 || true
 
 # Launch the webui backgrounded with output redirected (so draiver's CombinedOutput does
 # not block on the inherited pipe), record its pid for down.sh, then wait until the port

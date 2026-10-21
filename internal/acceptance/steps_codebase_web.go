@@ -117,7 +117,10 @@ func thenLedgerCardNoPlayNoDone(w *World, sr *StepRun) error {
 	}
 	attachText(sr, "ledger-no-play-no-done",
 		"the codebase ledger LED-1 renders with no play/enable button and no Done (accept) affordance")
-	return nil
+	// Evidence: screenshot the full styled ledgers view (the `/` page, not the bare
+	// `/board` htmx partial — the partial has no <head>, so no stylesheet) showing the
+	// ledger card as the operator sees it, with no play control and no Done tick.
+	return shoot(w, sr, "/?view=ledgers", "ledger-no-play-no-done", true, `[data-testid="card-LED-1-0001"]`, "")
 }
 
 func thenLedgerCardMarkedParked(w *World, sr *StepRun) error {
@@ -157,7 +160,9 @@ func thenCodeViewHidesRestingLedger(w *World, sr *StepRun) error {
 	}
 	attachText(sr, "code-view-hides-ledger",
 		"the code view shows ORD-1 and omits the resting ledger LED-1")
-	return nil
+	// Evidence: the full styled code view — the ordinary ticket present, the resting
+	// ledger absent (it stays in the ledgers view until it needs attention).
+	return shoot(w, sr, "/?view=code", "code-view-hides-ledger", true, `[data-testid="attempt-link-ORD-1-0001"]`, "")
 }
 
 func thenLedgersViewShowsOnlyLedgers(w *World, sr *StepRun) error {
@@ -200,7 +205,9 @@ func thenCodeViewSurfacesEscalatedLedger(w *World, sr *StepRun) error {
 	}
 	attachText(sr, "code-view-surfaces-escalated-ledger",
 		"an open-escalation ledger surfaces in the code view's Stuck column, marked a ledger")
-	return nil
+	// Evidence: the full styled code view with the escalated ledger surfaced into the
+	// Stuck column and the Ledgers toggle lit — the normal Needs-me attention path.
+	return shoot(w, sr, "/?view=code", "code-view-surfaces-escalated-ledger", true, `[data-testid="card-LED-1-0001"]`, "")
 }
 
 func thenLedgersToggleShowsAttention(w *World, sr *StepRun) error {
@@ -234,5 +241,7 @@ func thenOrdinaryKeepsPlayControl(w *World, sr *StepRun) error {
 	}
 	attachText(sr, "ordinary-keeps-play",
 		"the ordinary code ticket ORD-1 still renders its play/enable control — no regression")
-	return nil
+	// Evidence: the full styled code view — the ordinary ticket keeps its play/enable
+	// control exactly as today (no regression).
+	return shoot(w, sr, "/?view=code", "ordinary-keeps-play", true, `[data-testid="enable-btn-ORD-1-0001"]`, "")
 }
