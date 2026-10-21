@@ -49,6 +49,14 @@ func Resolve(flagVal string) (Root, error) {
 // spans all of them.
 func (r Root) ControllerPath() string { return filepath.Join(r.Dir, "controller.json") }
 
+// RecallMetricsPath is the root-level, append-only observability sink `recall`
+// writes one line to per invocation (drv-036): which ticket/attempt was read, the
+// read mode, and the seqs it surfaced. It is deliberately root-level (one sink across
+// all tickets, so per-ticket and per-fact counts fold from a single file) and out of
+// any attempt's hash chain — it is a read-side side-channel, never truth, rebuildable
+// and safe to delete. `recall` writes it best-effort; `recall-stats` folds it.
+func (r Root) RecallMetricsPath() string { return filepath.Join(r.Dir, "recall-metrics.jsonl") }
+
 // --- ticket-level paths (shared across attempts) ---
 
 // TicketDir is the folder for a ticket id.

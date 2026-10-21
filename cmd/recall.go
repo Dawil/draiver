@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/kb"
+	"github.com/Dawil/draiver/internal/recallmetric"
 	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
 )
@@ -92,12 +93,15 @@ var recallCmd = &cobra.Command{
 				return fmt.Errorf("no event #%d on %s/%s", recallChain, ticket, att)
 			}
 			chain := view.Chain(recallChain)
+			surfaced := make([]int, 0, len(chain))
 			for i, f := range chain {
 				if i > 0 {
 					fmt.Fprintln(out)
 				}
 				writeFactBody(out, f)
+				surfaced = append(surfaced, f.Seq)
 			}
+			recordRecall(root, ticket, att, recallmetric.ModeChain, surfaced)
 			return nil
 		}
 
@@ -117,6 +121,7 @@ var recallCmd = &cobra.Command{
 				}
 				writeFactBody(out, f)
 			}
+			recordRecall(root, ticket, att, recallmetric.ModeSeq, seqs)
 			return nil
 		}
 
@@ -158,19 +163,35 @@ var recallCmd = &cobra.Command{
 		}
 
 		// Default: the filtered index.
-		var shown int
+		var surfaced []int
 		for _, f := range base {
 			if !matchFilters(f, re) {
 				continue
 			}
 			fmt.Fprintf(out, "%s\n", indexLine(f))
-			shown++
+			surfaced = append(surfaced, f.Seq)
 		}
-		if shown == 0 {
+		if len(surfaced) == 0 {
 			fmt.Fprintln(out, "(no matching facts)")
 		}
+		recordRecall(root, ticket, att, recallmetric.ModeIndex, surfaced)
 		return nil
 	},
+}
+
+// recordRecall appends one line to the root-level recall-metrics sink naming what this
+// invocation surfaced (drv-036). It is a side-channel: any sink error is swallowed, so
+// instrumentation can never change recall's output or exit (AC4). The `--tags` summary
+// and flag-validation errors return before reaching here and are deliberately not
+// recorded — they surface no individual facts to rank.
+func recordRecall(root store.Root, ticket, att, mode string, seqs []int) {
+	_ = recallmetric.Append(root, recallmetric.Record{
+		Actor:   resolveActor(),
+		Ticket:  ticket,
+		Attempt: att,
+		Mode:    mode,
+		Seqs:    seqs,
+	})
 }
 
 // compileGrep compiles the --grep pattern, or returns nil when no pattern is set.
