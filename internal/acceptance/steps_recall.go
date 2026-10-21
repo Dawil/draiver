@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/audit"
 	"github.com/Dawil/draiver/internal/brief"
 	"github.com/Dawil/draiver/internal/cucumber"
@@ -246,6 +248,140 @@ func thenRecallByTagFilters(w *World, sr *StepRun) error {
 	attachText(sr, "recall-tag-auth",
 		"$ draiver recall "+recTicket+" --tag auth\n"+recallIndexLines(authFacts)+
 			"\n# the db-tagged fact is equally live; the tag only filters search:\n$ draiver recall "+recTicket+"\n"+recallIndexLines(view.Live()))
+	return nil
+}
+
+// ---- recall-attempt-aware.feature: --tags + @attempt + sibling awareness (drv-032) ----
+
+// recallTagCounts renders `draiver recall --tags`: the distinct tags of the given
+// facts, sorted alphabetically, each with the count of facts carrying it — the same
+// shape the CLI prints. It returns the sorted tag list and the rendered block.
+func recallTagCounts(facts []kb.Fact) ([]string, string) {
+	counts := map[string]int{}
+	for _, f := range facts {
+		for _, t := range f.Tags {
+			counts[t]++
+		}
+	}
+	tags := make([]string, 0, len(counts))
+	for t := range counts {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+	var b strings.Builder
+	if len(tags) == 0 {
+		b.WriteString("(no tags)\n")
+	}
+	for _, t := range tags {
+		fmt.Fprintf(&b, "%-16s (%d)\n", t, counts[t])
+	}
+	return tags, b.String()
+}
+
+// thenRecallTagsSorted asserts recall --tags enumerates the distinct live tags in
+// alphabetical order with correct per-tag counts. givenTwoTaggedFacts seeds one
+// auth-tagged and one db-tagged live fact, so the tag set is [auth db], each count 1.
+func thenRecallTagsSorted(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	view, err := kbView(root)
+	if err != nil {
+		return err
+	}
+	tags, rendered := recallTagCounts(view.Live())
+	if len(tags) != 2 || tags[0] != "auth" || tags[1] != "db" {
+		return fmt.Errorf("recall --tags not sorted distinct [auth db], got %v", tags)
+	}
+	if !strings.Contains(rendered, "auth             (1)") || !strings.Contains(rendered, "db               (1)") {
+		return fmt.Errorf("recall --tags counts wrong:\n%s", rendered)
+	}
+	attachText(sr, "recall-tags", "$ draiver recall "+recTicket+" --tags\n"+rendered)
+	return nil
+}
+
+// kbViewAtt folds a named attempt's log (kbView is fixed to recAtt); recall's
+// @attempt address form reads exactly this per-attempt log.
+func kbViewAtt(root store.Root, att string) (kb.View, error) {
+	events, err := ticketlog.Read(root, recTicket, att)
+	if err != nil {
+		return kb.View{}, err
+	}
+	return kb.Fold(events), nil
+}
+
+// givenTwoAttempts seeds recTicket with attempts 0001 and 0002, each carrying a fact
+// unique to it, so recall's address form can be shown to target one independent of the
+// other and the sibling-awareness header has something to flag.
+func givenTwoAttempts(w *World, sr *StepRun) error {
+	root, err := seedKBData(w) // creates attempt 0001
+	if err != nil {
+		return err
+	}
+	if err := root.EnsureAttemptDirs(recTicket, "0002"); err != nil {
+		return err
+	}
+	// Each attempt opens with its genesis #1, so the distinguishing note lands at #2 —
+	// the same shape a real attempt's log has.
+	for att, body := range map[string]string{"0001": "lives on attempt one", "0002": "lives on attempt two"} {
+		if _, err := ticketlog.Append(root, recTicket, att, event.Event{Type: "created", Actor: "agent:acceptance", Body: "attempt " + att + " started"}); err != nil {
+			return err
+		}
+		if _, err := ticketlog.Append(root, recTicket, att, event.Event{Type: "note", Actor: "agent:acceptance", Body: body}); err != nil {
+			return err
+		}
+	}
+	w.set("root", root)
+	return nil
+}
+
+// thenRecallAddressTargetsAttempt asserts the ticket@attempt address form reads the
+// addressed attempt's log and no other.
+func thenRecallAddressTargetsAttempt(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	one, err := kbViewAtt(root, "0001")
+	if err != nil {
+		return err
+	}
+	two, err := kbViewAtt(root, "0002")
+	if err != nil {
+		return err
+	}
+	f1, ok1 := one.Get(2)
+	f2, ok2 := two.Get(2)
+	if !ok1 || !strings.Contains(f1.Body, "attempt one") {
+		return fmt.Errorf("recall %s@0001 did not target attempt 0001: %+v", recTicket, f1)
+	}
+	if !ok2 || !strings.Contains(f2.Body, "attempt two") {
+		return fmt.Errorf("recall %s@0002 did not target attempt 0002: %+v", recTicket, f2)
+	}
+	attachText(sr, "recall-at-attempt",
+		"$ draiver recall "+recTicket+"@0001\n# "+recTicket+"@0001\n"+recallIndexLines(one.Live())+
+			"\n$ draiver recall "+recTicket+"@0002\n# "+recTicket+"@0002\n"+recallIndexLines(two.Live()))
+	return nil
+}
+
+// thenRecallFlagsSiblings asserts an implicit recall resolves to the latest attempt and
+// that recall has the data (attempt.List / attempt.Latest) to name the resolved target
+// and flag the siblings in its context header.
+func thenRecallFlagsSiblings(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	atts, err := attempt.List(root, recTicket)
+	if err != nil {
+		return err
+	}
+	if len(atts) != 2 || atts[0] != "0001" || atts[1] != "0002" {
+		return fmt.Errorf("attempt.List = %v, want [0001 0002] sorted", atts)
+	}
+	latest, ok, err := attempt.Latest(root, recTicket)
+	if err != nil {
+		return err
+	}
+	if !ok || latest != "0002" {
+		return fmt.Errorf("attempt.Latest = %q (ok=%v), want 0002", latest, ok)
+	}
+	header := fmt.Sprintf("# %s@%s — latest of %d attempts (draiver attempt ls %s)", recTicket, latest, len(atts), recTicket)
+	attachText(sr, "recall-sibling-header",
+		"$ draiver recall "+recTicket+"   # no @attempt — resolves to the latest\n"+header+
+			"\n# (on stderr; the stdout index below stays clean for piping)")
 	return nil
 }
 

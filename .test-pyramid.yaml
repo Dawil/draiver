@@ -96,6 +96,32 @@ environments:
       - name: ENV_NAME
         default: review
 
+  # review-cli is a SECOND qualifying review environment (drv-032 #12/#22), for reviewing
+  # CLI changes the webui `review` env above cannot exercise. The recall work on this ticket
+  # (--tags, the ticket@attempt form, the stderr attempt-aware header) is a terminal feature,
+  # so this stands up a ttyd web terminal (tsl0922/ttyd) in a sandboxed docker container over
+  # the reviewed draiver binary and a pre-seeded board — a browser shell the reviewer drives.
+  #
+  # It COEXISTS with `review`: drv-034 offers EVERY review-ready env (Up + Down + a
+  # healthcheck) on the attempt page, each with its own launch control, concurrently
+  # runnable — so `review-cli` and the webui `review` are both offered side by side with no
+  # per-repo switch. The per-repo `reviewEnvironment` setting no longer gates which envs
+  # appear; it only highlights one as the default (and still drives the loud-misconfiguration
+  # note if it names a missing/non-ready env). Like `review`, this env is bound to no level,
+  # so it never runs during `draiver test`; it is launched on demand from an attempt in Review.
+  #
+  # review-env/ttyd/up.sh binds the injected DRAIVER_REVIEW_PORT and namespaces its
+  # container/image by DRAIVER_REVIEW_INSTANCE, so concurrent review envs never collide;
+  # down.sh force-removes that container (releasing the port) and healthcheck.sh HTTP-probes
+  # it. See review-env/ttyd/README.md.
+  - name: review-cli
+    up: sh review-env/ttyd/up.sh
+    down: sh review-env/ttyd/down.sh
+    healthchecks:
+      - name: ttyd-ready
+        script: sh review-env/ttyd/healthcheck.sh
+    url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
+
 levels:
   - name: unit
     run: go test ./...

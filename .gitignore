@@ -37,3 +37,4 @@ node_modules/
 # misc
 .DS_Store
 *.log
+/review-env/ttyd/.build/

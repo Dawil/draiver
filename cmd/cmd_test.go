@@ -50,6 +50,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	logURLs, logLinks, reviewURLs, reviewLinks = nil, nil, nil, nil
 	logSupersedes, logTags = nil, nil
 	recallChain, recallType, recallGrep, recallAll, recallTags = 0, "", "", false, nil
+	recallTagList = false
 	newTitle, newProject, newTeam, newAssignee, newSpecFile = "", "", "", "", ""
 	newTool, newModel, newRepo, newBase = "", "", "", ""
 	dependsWants, dependsAfter, dependsRequires = nil, nil, nil

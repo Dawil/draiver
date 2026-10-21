@@ -80,6 +80,12 @@ var registry = map[string]StepFunc{
 	"an attempt with two facts tagged differently":               givenTwoTaggedFacts,
 	"recall filtered by a tag returns only the matching fact":    thenRecallByTagFilters,
 
+	// --- features/progressive-brief/recall-attempt-aware.feature (drv-032) ---
+	"recall --tags lists the distinct tags sorted alphabetically with counts":          thenRecallTagsSorted,
+	"a ticket with two attempts each carrying a distinct fact":                         givenTwoAttempts,
+	"recall of the ticket@attempt address targets that attempt independently":          thenRecallAddressTargetsAttempt,
+	"recall of the ticket alone resolves to the latest attempt and flags its siblings": thenRecallFlagsSiblings,
+
 	// --- features/progressive-brief/cold-start.feature (drv-026, AC7) ---
 	"a busy attempt with many superseded facts":                givenBusyAttempt,
 	"the brief is materially smaller than a full-log replay":   thenBriefSmallerThanReplay,
