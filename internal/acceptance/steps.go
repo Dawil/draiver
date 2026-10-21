@@ -80,6 +80,13 @@ var registry = map[string]StepFunc{
 	"an attempt with two facts tagged differently":               givenTwoTaggedFacts,
 	"recall filtered by a tag returns only the matching fact":    thenRecallByTagFilters,
 
+	// --- features/recall-instrumentation/baseline.feature (drv-036) ---
+	"an attempt whose facts are recalled a few times":                   givenRecalledAttempt,
+	"each recall is recorded with the ticket and the facts it surfaced": thenEachRecallRecorded,
+	"the records fold into per-ticket and per-fact recall counts":       thenFoldsToCounts,
+	"recording is best-effort and never changes what recall surfaces":   thenBestEffortNoChange,
+	"the counts are retrievable offline from the on-disk sink":          thenCountsRetrievableOffline,
+
 	// --- features/progressive-brief/recall-attempt-aware.feature (drv-032) ---
 	"recall --tags lists the distinct tags sorted alphabetically with counts":          thenRecallTagsSorted,
 	"a ticket with two attempts each carrying a distinct fact":                         givenTwoAttempts,
