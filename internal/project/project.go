@@ -30,10 +30,41 @@ const (
 	Done    State = "Done"     // closed
 )
 
+// Ticket types (drv-037). The type carries identity — what a ticket *is* —
+// distinct from State, which carries what is happening to it. A TypeTicket is an
+// ordinary unit of work (the default, so every pre-drv-037 ticket is one); a
+// TypeCodebase is a belief *ledger* for a codebase, not a unit of work, so it
+// never actuates (no enable, no reconciler run), rests Parked, and never reaches
+// Done — see NormalizeType and restingState. See docs/belief-store.md.
+const (
+	TypeTicket   = "ticket"
+	TypeCodebase = "codebase"
+)
+
+// NormalizeType resolves a raw `type:` frontmatter value to a known ticket type.
+// An absent value defaults to TypeTicket, so every existing ticket (which carries
+// no `type:`) is an ordinary ticket and serialises identically. Any value that is
+// neither known type is rejected with an error (drv-037 decision #4: reject-unknown,
+// so a typo like `codbase` fails loudly at author/load time rather than silently
+// degrading a ledger to an ordinary ticket).
+func NormalizeType(raw string) (string, error) {
+	switch strings.TrimSpace(raw) {
+	case "":
+		return TypeTicket, nil
+	case TypeTicket:
+		return TypeTicket, nil
+	case TypeCodebase:
+		return TypeCodebase, nil
+	default:
+		return "", fmt.Errorf("unknown ticket type %q: want %q or %q", raw, TypeTicket, TypeCodebase)
+	}
+}
+
 // SpecMeta is the identity carried in a ticket's spec.md frontmatter.
 type SpecMeta struct {
 	ID       string `yaml:"id"`
 	Title    string `yaml:"title"`
+	Type     string `yaml:"type"` // ticket (default) | codebase — see NormalizeType (drv-037)
 	Project  string `yaml:"project"`
 	Team     string `yaml:"team"`
 	Assignee string `yaml:"assignee"`
@@ -45,6 +76,7 @@ type Attempt struct {
 	Ticket   string
 	ID       string // attempt id
 	Title    string // from ticket spec
+	Type     string // ticket (default) | codebase — the ticket's identity (drv-037)
 	Assignee string
 	Tool     string // from attempt.md
 	Model    string
@@ -160,6 +192,38 @@ func Derive(events []event.Event) (State, []event.Event) {
 		return Review, open
 	default:
 		return Running, open
+	}
+}
+
+// restingState folds a ticket's type into its event-derived control state (drv-037).
+// For an ordinary ticket it is the identity — the log-derived state stands. For a
+// codebase ledger it rewrites two cases of the normal state machine:
+//
+//   - Running (the default resting state) → Pending. A ledger has no setpoint and
+//     no actuation loop, so its resting state is Parked (Pending, the resting but
+//     non-finalised state): it must not look Running, so the reconciler — which
+//     admits precisely log-Running enabled attempts — never picks it up, and the
+//     Running/attention rollups (which tally only Done/Review/Running/Needs-me)
+//     never count it. This is the one place Pending is named in the *log* tier
+//     rather than as Control's read-time projection; it is safe precisely because
+//     a ledger is never desired, so there is no admission for a log-Pending to
+//     black-hole (contrast Control's note).
+//   - Done → Pending. A ledger never converges — belief accrues indefinitely — so
+//     the Done transition is excluded: a stray `done` collapses back to the Parked
+//     rest rather than closing the ledger. Its only terminal state is Archived
+//     (DeriveArchived, an orthogonal axis, is unaffected and still works).
+//
+// Needs-me (an open escalation) and Review pass through unchanged: a ledger still
+// surfaces to the human through the normal state machine.
+func restingState(state State, ticketType string) State {
+	if ticketType != TypeCodebase {
+		return state
+	}
+	switch state {
+	case Running, Done:
+		return Pending
+	default:
+		return state
 	}
 }
 
@@ -282,9 +346,14 @@ func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
 	if title == "" {
 		title = ticket
 	}
+	ticketType, err := NormalizeType(spec.Type)
+	if err != nil {
+		return Attempt{}, fmt.Errorf("ticket %s: %w", ticket, err)
+	}
 	state, open := Derive(events)
+	state = restingState(state, ticketType)
 	return Attempt{
-		Ticket: ticket, ID: id, Title: title, Assignee: spec.Assignee,
+		Ticket: ticket, ID: id, Title: title, Type: ticketType, Assignee: spec.Assignee,
 		Tool: am.Tool, Model: am.Model, Repo: am.Repo, Base: am.Base,
 		State: state, Enabled: DeriveEnabled(events), Archived: DeriveArchived(events),
 		Supervision: DeriveSupervision(events),
