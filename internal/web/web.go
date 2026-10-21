@@ -562,9 +562,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/push", s.handleGitPush)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/sync", s.handleGitSync)
-	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/up", s.handleReviewEnvUp)
-	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/down", s.handleReviewEnvDown)
-	mux.HandleFunc("GET /ticket/{id}/{attempt}/review-env/status", s.handleReviewEnvStatus)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/{env}/up", s.handleReviewEnvUp)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/{env}/down", s.handleReviewEnvDown)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/review-env/{env}/status", s.handleReviewEnvStatus)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/repo-settings", s.handleRepoSettings)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)
@@ -699,12 +699,13 @@ type detailVM struct {
 	// non-nil; its HasRuns is false (and the section hidden) until drv-017's capture
 	// has written a run for the attempt. Built by s.reportPanel.
 	Report *reportPanelVM
-	// ReviewEnv drives the review-environment panel (drv-020): launch/teardown of a
-	// live, clickable instance of the feature under review. It is non-nil only when
-	// the visibility gate holds — the attempt is in Review, the repo names a
-	// reviewEnvironment, and that environment is review-ready — so the panel is absent
-	// on every other attempt. Built by s.reviewEnvPanel.
-	ReviewEnv *reviewEnvVM
+	// ReviewEnv drives the review-environment surface (drv-020, drv-034): one
+	// launch/teardown panel per review-ready environment the attempt's pyramid declares,
+	// each a live, clickable instance of the feature under review. It is non-nil only on
+	// an attempt in Review with at least one review-ready env to offer (or a
+	// misconfigured reviewEnvironment default to flag), so the surface is absent on every
+	// other attempt. Built by s.reviewEnvSurface.
+	ReviewEnv *reviewEnvsVM
 }
 
 // capabilityVM drives the "capability-panel" partial (drvweb-017): a Capability's
@@ -1359,7 +1360,7 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 	// result (gate not held, or an I/O hiccup reading config/pyramid) simply renders
 	// nothing. The git read behind it is bounded by a background context, matching
 	// pyramidBadge.
-	vm.ReviewEnv = s.reviewEnvPanel(context.Background(), a)
+	vm.ReviewEnv = s.reviewEnvSurface(context.Background(), a)
 	return vm, nil
 }
 

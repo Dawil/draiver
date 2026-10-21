@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,29 +13,63 @@ import (
 	"github.com/Dawil/draiver/internal/reviewenv"
 )
 
-// reviewEnvVM drives the attempt page's "review-env-panel" partial (drv-020): the
-// launch/teardown controls for a long-lived, clickable instance of the feature under
-// review. It is the UI face of the reviewenv lifecycle — the panel reads the
-// persisted Record and renders the one of six lifecycle states the env is in, with
-// the URL revealed only while Up.
+// reviewEnvsVM is the attempt page's whole review-environment surface (drv-034): one
+// independent panel per review-ready environment the pyramid declares, plus an
+// optional loud-misconfiguration note when the per-repo reviewEnvironment setting names
+// a declared-but-unusable env. It replaces the single-valued drv-020 panel: an attempt
+// in Review now lists EVERY review-ready env and launches/opens/tears-down each one
+// concurrently and independently.
 //
-// The panel is offered only when the spec's three-part visibility gate holds —
-// State==Review, the repo's resolved reviewEnvironment is set, and that environment
-// is review-ready (up+down+≥1 healthcheck). A nil *reviewEnvVM renders nothing, the
-// gate's "not offered" outcome; a VM with Misconfigured=true renders a diagnostic
-// note (no Up button) for the one in-Review-but-misconfigured case, so a typo'd
-// reviewEnvironment fails loudly rather than vanishing silently.
+// A nil *reviewEnvsVM renders nothing (the gate's "not offered" outcome: not in Review,
+// no pyramid, and nothing to flag). Envs is the ordered (by name) set of per-env
+// panels; Misconfigured, when non-nil, is the single note for a bad reviewEnvironment
+// setting so a typo still fails loudly rather than vanishing.
+type reviewEnvsVM struct {
+	Attempt       project.Attempt
+	Envs          []*reviewEnvVM
+	Misconfigured *reviewEnvVM
+}
+
+// Panels is the full render list: every review-ready env panel, then the
+// misconfiguration note (if any), so the template ranges one sequence.
+func (v *reviewEnvsVM) Panels() []*reviewEnvVM {
+	if v == nil {
+		return nil
+	}
+	out := append([]*reviewEnvVM(nil), v.Envs...)
+	if v.Misconfigured != nil {
+		out = append(out, v.Misconfigured)
+	}
+	return out
+}
+
+// reviewEnvVM drives one "review-env-panel" partial (drv-020, drv-034): the
+// launch/teardown controls for a single long-lived, clickable instance of the feature
+// under review. It is the UI face of one env's reviewenv lifecycle — the panel reads
+// that env's persisted Record and renders the one of six lifecycle states it is in,
+// with the URL revealed only while Up. A VM with Misconfigured=true renders a
+// diagnostic note (no Up button) for the per-repo-setting-names-a-bad-env case.
 type reviewEnvVM struct {
 	Attempt project.Attempt
-	// EnvName is the repo's resolved reviewEnvironment — the .test-pyramid.yaml
-	// environment this panel launches.
+	// EnvName is the .test-pyramid.yaml environment name this panel launches — used
+	// both as the display name and as the {env} path segment its POST/poll routes carry.
 	EnvName string
-	// Misconfigured is true when the attempt is in Review and reviewEnvironment is
-	// set, but names an environment that is absent or not review-ready. Reason carries
-	// the human-facing explanation (pyramid.Environment.ReviewReady's message, or
-	// "no such environment"). The panel then shows the note and no launch control.
+	// EnvSlug is a DOM/CSS-safe stem of EnvName (drv-034), making each concurrent
+	// panel's element id and htmx target unique (#review-env-<slug>).
+	EnvSlug string
+	// IsDefault marks the env the per-repo reviewEnvironment setting names — surfaced as
+	// an optional highlight only; it no longer gates which envs are offered (drv-034).
+	IsDefault bool
+	// Misconfigured is true when the per-repo reviewEnvironment is set but names an
+	// environment that is absent or not review-ready. Reason carries the human-facing
+	// explanation (pyramid.Environment.ReviewReady's message, or "no such environment").
+	// The panel then shows the note and no launch control.
 	Misconfigured bool
 	Reason        string
+	// Missing marks a placeholder VM for a per-env re-render whose env no longer
+	// resolves (gate dropped, env removed): the panel renders as the hidden placeholder
+	// keyed to EnvSlug so the htmx swap clears just that panel.
+	Missing bool
 	// State is the lifecycle phase read from the persisted Record (Down when none
 	// exists). StateLabel is its human-facing summary.
 	State      reviewenv.State
@@ -90,42 +125,116 @@ func reviewEnvStateLabel(s reviewenv.State) string {
 	}
 }
 
-// projectReviewEnv is the pure gate+projection: it folds the attempt, the resolved
-// reviewEnvironment name, the loaded pyramid, and the current Record into the panel
-// VM. It is I/O-free so the visibility gate is exhaustively unit-testable off canned
-// inputs (mirroring projectPyramid).
+// reviewEnvSlug is a DOM/CSS-safe stem of an environment name: lowercased, every run
+// of non-[a-z0-9] collapsed to a single '-', trimmed. It gives each concurrent panel a
+// unique element id (#review-env-<slug>) and htmx target without assuming env names are
+// already identifier-safe.
+func reviewEnvSlug(name string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+		} else if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	if s == "" {
+		return "env"
+	}
+	return s
+}
+
+// projectReviewEnvs is the pure gate+projection for the whole surface (drv-034): it
+// folds the attempt, the per-repo default name, the loaded pyramid, and a per-env
+// record loader into the set of panels. It is I/O-free beyond the injected loadRec so
+// the enumeration is exhaustively unit-testable off canned inputs (mirroring
+// projectPyramid).
 //
-// It returns nil — render nothing — whenever the panel is not offered: a non-Review
-// attempt, or a repo with no reviewEnvironment set. When reviewEnvironment IS set on
-// a Review attempt but names a missing or non-review-ready environment, it returns a
-// Misconfigured VM (the loud-failure note). Otherwise it returns the live panel VM
-// projected from rec (a zero Record / hasRec=false is the resting Down state).
-func projectReviewEnv(a project.Attempt, envName string, p *pyramid.Pyramid, rec reviewenv.Record, hasRec bool) *reviewEnvVM {
-	if a.State != project.Review || envName == "" {
+// It returns nil — render nothing — for a non-Review attempt, or a Review attempt with
+// no review-ready env to offer and no misconfigured default to flag. Otherwise it lists
+// EVERY review-ready env (ordered by name), marks the one the default names, and
+// appends the loud-misconfiguration note when the default names a missing or
+// non-review-ready env. loadRec returns the persisted Record for one env name.
+func projectReviewEnvs(a project.Attempt, defaultName string, p *pyramid.Pyramid, loadRec func(env string) (reviewenv.Record, bool)) *reviewEnvsVM {
+	if a.State != project.Review {
 		return nil
 	}
-	vm := &reviewEnvVM{Attempt: a, EnvName: envName}
+	vm := &reviewEnvsVM{Attempt: a}
 
-	// The named environment must exist in the pyramid and be review-ready, else the
-	// panel is a diagnostic note rather than a launcher — the selection-time validation
-	// surfaced where the operator set it.
+	// No readable pyramid: the only thing to show is the misconfiguration note, and only
+	// when a default is set (so a repo that names an env we cannot resolve fails loudly
+	// rather than silently offering nothing).
 	if p == nil {
-		vm.Misconfigured = true
-		vm.Reason = "no .test-pyramid.yaml environment named " + envName + " is reachable"
-		return vm
-	}
-	env, ok := p.EnvironmentByName(envName)
-	if !ok {
-		vm.Misconfigured = true
-		vm.Reason = "no environment named " + envName + " in .test-pyramid.yaml"
-		return vm
-	}
-	if err := env.ReviewReady(); err != nil {
-		vm.Misconfigured = true
-		vm.Reason = err.Error()
-		return vm
+		if defaultName != "" {
+			vm.Misconfigured = newReviewEnvMisconfig(a, defaultName,
+				"no .test-pyramid.yaml environment named "+defaultName+" is reachable")
+			return vm
+		}
+		return nil
 	}
 
+	// Enumerate every review-ready env the pyramid declares, ordered by name for a
+	// deterministic render.
+	names := make([]string, 0, len(p.Environments))
+	ready := map[string]*pyramid.Environment{}
+	for i := range p.Environments {
+		env := &p.Environments[i]
+		if env.ReviewReady() == nil {
+			names = append(names, env.Name)
+			ready[env.Name] = env
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		rec, hasRec := loadRec(name)
+		panel := projectReviewEnvPanel(a, ready[name], rec, hasRec)
+		panel.IsDefault = name == defaultName
+		vm.Envs = append(vm.Envs, panel)
+	}
+
+	// The per-repo default, when set, still drives the loud-misconfiguration note if it
+	// names an env that is missing or not review-ready (preserving drv-020's gate as a
+	// setting-validation surface). A default that resolves to a review-ready env is
+	// already in the list and merely highlighted.
+	if defaultName != "" {
+		if _, isReady := ready[defaultName]; !isReady {
+			reason := "no environment named " + defaultName + " in .test-pyramid.yaml"
+			if env, ok := p.EnvironmentByName(defaultName); ok {
+				if err := env.ReviewReady(); err != nil {
+					reason = err.Error()
+				}
+			}
+			vm.Misconfigured = newReviewEnvMisconfig(a, defaultName, reason)
+		}
+	}
+
+	if len(vm.Envs) == 0 && vm.Misconfigured == nil {
+		return nil
+	}
+	return vm
+}
+
+// newReviewEnvMisconfig builds the loud-failure note panel for a reviewEnvironment that
+// names a missing or non-review-ready env.
+func newReviewEnvMisconfig(a project.Attempt, envName, reason string) *reviewEnvVM {
+	return &reviewEnvVM{
+		Attempt:       a,
+		EnvName:       envName,
+		EnvSlug:       reviewEnvSlug(envName),
+		Misconfigured: true,
+		Reason:        reason,
+	}
+}
+
+// projectReviewEnvPanel projects one resolved, review-ready environment plus its
+// current Record into a panel VM (a zero Record / hasRec=false is the resting Down
+// state). The caller has already confirmed the env is review-ready.
+func projectReviewEnvPanel(a project.Attempt, env *pyramid.Environment, rec reviewenv.Record, hasRec bool) *reviewEnvVM {
+	vm := &reviewEnvVM{Attempt: a, EnvName: env.Name, EnvSlug: reviewEnvSlug(env.Name)}
 	state := reviewenv.Down
 	if hasRec && rec.State != "" {
 		state = rec.State
@@ -204,71 +313,99 @@ func (s *Server) reviewEnvManager() *reviewenv.Manager {
 	return reviewenv.New(opt)
 }
 
-// resolveReviewEnv gathers the gate inputs for an attempt: the repo's resolved
-// reviewEnvironment name, the matching *pyramid.Environment, and the loaded pyramid.
-// ok is false when there is no repo, no reviewEnvironment set, or the pyramid cannot
-// be read — the same best-effort degradation the pyramid badge has. A set-but-invalid
-// reviewEnvironment is NOT an ok=false here: it returns ok=true with env=nil so the
-// caller can render the misconfiguration note (projectReviewEnv decides). envName is
-// returned even when env is nil, so the note can name it.
-func (s *Server) resolveReviewEnv(ctx context.Context, a project.Attempt) (envName string, env *pyramid.Environment, p *pyramid.Pyramid, ok bool) {
+// reviewEnvGate gathers the enumeration inputs for an attempt: the repo's optional
+// reviewEnvironment default (an optional highlight since drv-034, no longer a gate) and
+// the loaded pyramid. A config read error or no repo yields a blank default; a pyramid
+// that cannot be read yields p=nil — the same best-effort degradation the pyramid badge
+// has.
+func (s *Server) reviewEnvGate(ctx context.Context, a project.Attempt) (defaultName string, p *pyramid.Pyramid) {
 	if a.Repo == "" {
-		return "", nil, nil, false
+		return "", nil
 	}
-	cfg, err := config.Load("")
-	if err != nil {
-		return "", nil, nil, false
+	if cfg, err := config.Load(""); err == nil {
+		defaultName = cfg.RepoSettings(a.Repo).ReviewEnvironment
 	}
-	envName = cfg.RepoSettings(a.Repo).ReviewEnvironment
-	if envName == "" {
-		return "", nil, nil, false
+	if st, ok := s.pyramidGit(ctx, a); ok {
+		p = st.Pyramid
 	}
-	st, gotState := s.pyramidGit(ctx, a)
-	if !gotState || st.Pyramid == nil {
-		// reviewEnvironment is set but we cannot read the pyramid: ok=true with a nil
-		// pyramid so projectReviewEnv renders the "unreachable" note rather than nothing.
-		return envName, nil, nil, true
-	}
-	p = st.Pyramid
-	if e, found := p.EnvironmentByName(envName); found {
-		env = e
-	}
-	return envName, env, p, true
+	return defaultName, p
 }
 
-// reviewEnvPanel projects an attempt into the review-env panel VM, gathering the gate
-// inputs (config + pyramid) and the current lifecycle Record. It is best-effort
-// presentation like pyramidBadge: a nil result renders nothing. ctx bounds the git
-// read behind s.pyramidGit.
-func (s *Server) reviewEnvPanel(ctx context.Context, a project.Attempt) *reviewEnvVM {
+// reviewEnvSurface projects an attempt into the whole review-env surface VM (drv-034):
+// one panel per review-ready env plus an optional misconfiguration note. It is
+// best-effort presentation like pyramidBadge — a nil result renders nothing. ctx bounds
+// the git read behind s.pyramidGit.
+func (s *Server) reviewEnvSurface(ctx context.Context, a project.Attempt) *reviewEnvsVM {
 	if a.State != project.Review {
 		return nil
 	}
-	envName, _, p, ok := s.resolveReviewEnv(ctx, a)
-	if !ok {
-		return nil
+	defaultName, p := s.reviewEnvGate(ctx, a)
+	mgr := s.reviewEnvManager()
+	load := func(env string) (reviewenv.Record, bool) {
+		rec, ok, err := mgr.Load(a.Ticket, a.ID, env)
+		if err != nil {
+			return reviewenv.Record{}, false
+		}
+		return rec, ok
 	}
-	rec, hasRec, err := s.reviewEnvManager().Load(a.Ticket, a.ID)
+	return projectReviewEnvs(a, defaultName, p, load)
+}
+
+// resolveReviewEnvReady resolves one named environment for a handler and confirms it is
+// a declared, review-ready env on the attempt's pyramid. ok is false (the loud-
+// misconfiguration refusal, now per-env) when there is no repo, the pyramid cannot be
+// read, the name is not declared, or the env is not review-ready.
+func (s *Server) resolveReviewEnvReady(ctx context.Context, a project.Attempt, name string) (*pyramid.Environment, bool) {
+	if a.Repo == "" || strings.TrimSpace(name) == "" {
+		return nil, false
+	}
+	_, p := s.reviewEnvGate(ctx, a)
+	if p == nil {
+		return nil, false
+	}
+	env, found := p.EnvironmentByName(name)
+	if !found || env.ReviewReady() != nil {
+		return nil, false
+	}
+	return env, true
+}
+
+// renderReviewEnvPanel re-renders ONE env's panel fragment — the one-element outerHTML
+// swap every review-env POST/poll returns (drv-034 scopes the swap to the named env, so
+// one panel updating never disturbs a sibling). A nil VM (the env no longer resolves or
+// the gate dropped) renders the empty placeholder keyed to that env's id so the htmx
+// swap clears just that panel rather than leaving a stale one.
+func (s *Server) renderReviewEnvPanel(w http.ResponseWriter, ctx context.Context, a project.Attempt, envName string) {
+	s.render(w, "review-env-panel", s.reviewEnvPanelFor(ctx, a, envName))
+}
+
+// reviewEnvPanelFor builds the single-env panel VM used by the per-env POST/poll
+// re-render. It resolves the named review-ready env and projects its current record; a
+// name that no longer resolves yields a placeholder VM (right id, Missing=true) so the
+// swap clears the panel without erroring.
+func (s *Server) reviewEnvPanelFor(ctx context.Context, a project.Attempt, envName string) *reviewEnvVM {
+	if a.State != project.Review {
+		return &reviewEnvVM{Attempt: a, EnvSlug: reviewEnvSlug(envName), Missing: true}
+	}
+	env, ok := s.resolveReviewEnvReady(ctx, a, envName)
+	if !ok {
+		return &reviewEnvVM{Attempt: a, EnvName: envName, EnvSlug: reviewEnvSlug(envName), Missing: true}
+	}
+	rec, hasRec, err := s.reviewEnvManager().Load(a.Ticket, a.ID, envName)
 	if err != nil {
 		hasRec = false
 	}
-	return projectReviewEnv(a, envName, p, rec, hasRec)
+	return projectReviewEnvPanel(a, env, rec, hasRec)
 }
 
-// renderReviewEnvPanel re-renders the review-env panel fragment for an attempt — the
-// one-element outerHTML swap every review-env POST/poll returns. A nil VM (the gate
-// no longer holds) renders the empty placeholder so the htmx swap clears the panel
-// rather than leaving a stale one.
-func (s *Server) renderReviewEnvPanel(w http.ResponseWriter, ctx context.Context, a project.Attempt) {
-	s.render(w, "review-env-panel", s.reviewEnvPanel(ctx, a))
-}
-
-// handleReviewEnvUp launches a review environment (POST
-// /ticket/{id}/{attempt}/review-env/up). Launch is slow (cut a worktree, run `up`,
-// confirm healthchecks), so this is async: it writes Starting synchronously, spawns
-// Launch on a background context that outlives the request, and returns the panel in
-// the starting state — which then self-polls the status route until the env goes up
-// (URL revealed) or failed. A click on an already-active env is an idempotent no-op.
+// handleReviewEnvUp launches a named review environment (POST
+// /ticket/{id}/{attempt}/review-env/{env}/up). Launch is slow (cut a worktree, run
+// `up`, confirm healthchecks), so this is async: it writes Starting synchronously,
+// spawns Launch on a background context that outlives the request, and returns that
+// env's panel in the starting state — which then self-polls the status route until the
+// env goes up (URL revealed) or failed. A click on an already-active env is an
+// idempotent no-op. The {env} segment names which of the attempt's review-ready envs to
+// launch; it is validated against the pyramid, so a bogus name is a 400, not a 500.
 func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -276,6 +413,7 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	att := r.PathValue("attempt")
+	envName := r.PathValue("env")
 	if !s.root.AttemptExists(id, att) {
 		http.NotFound(w, r)
 		return
@@ -285,18 +423,19 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	// Re-check the full visibility gate server-side: the affordance only renders
-	// behind it, so a POST that bypasses it (not Review, no/invalid reviewEnvironment)
-	// is a bad request, not a 500 from Launch.
-	_, env, _, ok := s.resolveReviewEnv(r.Context(), a)
-	if !ok || env == nil || env.ReviewReady() != nil || a.State != project.Review {
-		http.Error(w, "draiver: no review-ready environment is configured for this attempt in Review", http.StatusBadRequest)
+	// Re-check the gate server-side, now per-env: the affordance only renders behind it,
+	// so a POST naming an env that is not a declared, review-ready env on this attempt's
+	// pyramid is a bad request (writing nothing), not a 500 from Launch.
+	env, ok := s.resolveReviewEnvReady(r.Context(), a, envName)
+	if !ok || a.State != project.Review {
+		http.Error(w, "draiver: not a declared, review-ready environment for this attempt in Review", http.StatusBadRequest)
 		return
 	}
 	mgr := s.reviewEnvManager()
-	// Idempotent: a launch already in motion or up is left alone — re-render and return.
-	if rec, has, lerr := mgr.Load(id, att); lerr == nil && has && (rec.State == reviewenv.Starting || rec.State == reviewenv.Up) {
-		s.renderReviewEnvPanel(w, r.Context(), a)
+	// Idempotent: a launch of THIS env already in motion or up is left alone — re-render
+	// and return (a sibling env's state is untouched).
+	if rec, has, lerr := mgr.Load(id, att, envName); lerr == nil && has && (rec.State == reviewenv.Starting || rec.State == reviewenv.Up) {
+		s.renderReviewEnvPanel(w, r.Context(), a, envName)
 		return
 	}
 	// Read the launch form's per-param values BEFORE spawning the goroutine — the
@@ -310,7 +449,7 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	// bring-up mid-`up`. The goroutine persists the outcome (up+url / failed); the
 	// panel's status poll surfaces it.
 	go mgr.Launch(context.Background(), a, env, overrides)
-	s.renderReviewEnvPanel(w, r.Context(), a)
+	s.renderReviewEnvPanel(w, r.Context(), a, envName)
 }
 
 // reviewEnvOverrides reads the launch form's per-param inputs (field name
@@ -341,11 +480,12 @@ func reviewEnvOverrides(r *http.Request, env *pyramid.Environment) map[string]st
 	return out
 }
 
-// handleReviewEnvDown tears a review environment down (POST
-// /ticket/{id}/{attempt}/review-env/down). Unlike up this is synchronous: Teardown
-// runs `down` then the confirm-down healthchecks and returns the terminal state —
-// down (confirmed gone) or teardown-failed (a leak) — which is exactly the result the
-// reviewer needs to see, surfaced in the one swapped fragment.
+// handleReviewEnvDown tears a named review environment down (POST
+// /ticket/{id}/{attempt}/review-env/{env}/down). Unlike up this is synchronous:
+// Teardown runs `down` then the confirm-down healthchecks for THAT env and returns its
+// terminal state — down (confirmed gone) or teardown-failed (a leak) — surfaced in the
+// one swapped fragment, leaving any sibling env untouched. The {env} segment is
+// validated so a bogus name is a 400 that writes nothing (the per-env refusal).
 func (s *Server) handleReviewEnvDown(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
@@ -353,6 +493,7 @@ func (s *Server) handleReviewEnvDown(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	att := r.PathValue("attempt")
+	envName := r.PathValue("env")
 	if !s.root.AttemptExists(id, att) {
 		http.NotFound(w, r)
 		return
@@ -362,21 +503,27 @@ func (s *Server) handleReviewEnvDown(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if _, err := s.reviewEnvManager().Teardown(r.Context(), a, "button"); err != nil {
+	if _, ok := s.resolveReviewEnvReady(r.Context(), a, envName); !ok {
+		http.Error(w, "draiver: not a declared, review-ready environment for this attempt", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.reviewEnvManager().Teardown(r.Context(), a, envName, "button"); err != nil {
 		s.fail(w, err)
 		return
 	}
-	s.renderReviewEnvPanel(w, r.Context(), a)
+	s.renderReviewEnvPanel(w, r.Context(), a, envName)
 }
 
 // handleReviewEnvStatus is the webui status poll (GET
-// /ticket/{id}/{attempt}/review-env/status): the panel self-polls it while the env is
-// in motion. It runs Probe — which re-checks the healthchecks of an up/unhealthy env
-// and bumps LastActive, so a reviewer watching the panel holds the idle reaper off —
-// then re-renders the panel from the refreshed record.
+// /ticket/{id}/{attempt}/review-env/{env}/status): a panel self-polls it while its env
+// is in motion. It runs Probe for THAT env — which re-checks its healthchecks and bumps
+// LastActive, so a reviewer watching the panel holds the idle reaper off — then
+// re-renders that env's panel from the refreshed record. A bogus env name renders the
+// placeholder (the swap clears the panel) rather than erroring the poll loop.
 func (s *Server) handleReviewEnvStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	att := r.PathValue("attempt")
+	envName := r.PathValue("env")
 	if !s.root.AttemptExists(id, att) {
 		http.NotFound(w, r)
 		return
@@ -388,6 +535,6 @@ func (s *Server) handleReviewEnvStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// Probe is a no-op for a record that is not up/unhealthy, so a Starting env (driven
 	// by the launch goroutine) is simply re-read, and a Down/Failed one is unchanged.
-	s.reviewEnvManager().Probe(r.Context(), a)
-	s.renderReviewEnvPanel(w, r.Context(), a)
+	s.reviewEnvManager().Probe(r.Context(), a, envName)
+	s.renderReviewEnvPanel(w, r.Context(), a, envName)
 }
