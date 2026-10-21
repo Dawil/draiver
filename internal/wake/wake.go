@@ -19,6 +19,7 @@ package wake
 import (
 	"fmt"
 
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -56,12 +57,42 @@ const asyncJobType = "async-job"
 // the parked worker.
 const testResultType = "test-result"
 
+// AsyncLaunchFailResult returns the single terminal `test-result` that force-answers
+// an async-job launch marker (seq launchSeq, target rung rung) without a real climb:
+// Outcome "fail" (so the review gate at cmd/review.go never counts it green) and Refs
+// pointing back at the launch so the async pass pairs it with the launch it closes.
+// It is the ONE "land a terminal result answering launch N" discipline (drv-031) —
+// the event *shape* that must stay in lockstep across callers that leave no dangling
+// wake source: `draiver park --clear` of an async-job source, launchDetached's
+// spawn-failure path, and a future reconciler liveness-reap (the automatic half).
+// Each caller stamps the Actor and appends via its own path (operator actor for the
+// CLI, the spine actor for the reconciler), so the shape stays here while provenance
+// stays with the caller.
+func AsyncLaunchFailResult(launchSeq int, rung, body string) event.Event {
+	return event.Event{
+		Type:    testResultType,
+		Outcome: "fail",
+		Rung:    rung,
+		Refs:    []int{launchSeq},
+		Body:    body,
+	}
+}
+
 // Source is one reason a parked attempt can be woken again. Desc is a
 // human-facing summary recorded in the park event so a resuming agent (and the
 // board) can see what the attempt is waiting on.
+//
+// Ref and Rung are the machine-readable anchor the operator inverse `park --clear`
+// (drv-031) force-resolves against: Ref is the log seq this source derives from
+// (the async-job launch marker), and Rung the target rung copied onto the terminal
+// `test-result` a cleared async-job lands. Both are zero/empty for sources with no
+// single log anchor (the `wants` source), and the park guard itself ignores them —
+// it only cares whether any source exists.
 type Source struct {
 	Kind Kind
 	Desc string
+	Ref  int
+	Rung string
 }
 
 // Pending returns the wake sources currently able to re-wake ticket/att. An
@@ -153,9 +184,11 @@ func pendingAsyncJob(root store.Root, ticket, att string) (*Source, error) {
 		return nil, err
 	}
 	lastLaunch := 0
+	lastRung := ""
 	for _, e := range events {
 		if e.Type == asyncJobType && e.Seq > lastLaunch {
 			lastLaunch = e.Seq
+			lastRung = e.Rung
 		}
 	}
 	if lastLaunch == 0 {
@@ -169,5 +202,7 @@ func pendingAsyncJob(root store.Root, ticket, att string) (*Source, error) {
 	return &Source{
 		Kind: AsyncJob,
 		Desc: "a detached test is running; its result will land on this log and wake the attempt",
+		Ref:  lastLaunch, // the launch marker `park --clear` answers with a terminal result.
+		Rung: lastRung,   // copied onto that terminal result (drv-031).
 	}, nil
 }

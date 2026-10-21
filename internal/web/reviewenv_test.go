@@ -65,6 +65,24 @@ func weakPyramid() *pyramid.Pyramid {
 	}
 }
 
+// twoReviewReadyPyramid declares TWO review-ready envs ("review" + "review-cli"), each a
+// marker-backed stand-in namespaced by the injected instance+port — the drv-034 fixture
+// for driving two concurrent review envs on one attempt. Each env's marker is named by
+// its own DRAIVER_REVIEW_INSTANCE (which folds the env name in), so the two never clash.
+func twoReviewReadyPyramid(markerDir string) *pyramid.Pyramid {
+	mk := func(name string) pyramid.Environment {
+		marker := filepath.Join(markerDir, "$"+reviewenv.EnvInstance+".$"+reviewenv.EnvPort)
+		return pyramid.Environment{
+			Name:         name,
+			Up:           "touch " + marker,
+			Down:         "rm -f " + marker,
+			Healthchecks: []pyramid.Healthcheck{{Name: "marker", Script: "test -f " + marker}},
+			URL:          "http://127.0.0.1:${" + reviewenv.EnvPort + "}/",
+		}
+	}
+	return &pyramid.Pyramid{Environments: []pyramid.Environment{mk("review"), mk("review-cli")}}
+}
+
 // serverWithReviewEnv seeds a Review attempt on repo, points the repo's
 // reviewEnvironment config at `envName`, and returns a server whose git layer is the
 // supplied stub — so the visibility gate renders off a canned pyramid with no real
@@ -139,11 +157,28 @@ func TestReviewEnvVisibilityGate(t *testing.T) {
 		}
 	})
 
-	t.Run("no reviewEnvironment set renders no panel", func(t *testing.T) {
+	t.Run("no reviewEnvironment set still enumerates review-ready envs", func(t *testing.T) {
+		// drv-034: the per-repo reviewEnvironment is no longer a gate — a Review attempt
+		// lists every review-ready env the pyramid declares regardless of the setting.
 		s := serverWithReviewEnv(t, "/mock/repo", "", ready, project.Review)
 		body := get(t, s.Handler(), "/ticket/PROJ-9/0001").Body.String()
+		if !strings.Contains(body, `data-testid="review-env"`) {
+			t.Error("with a review-ready env in the pyramid the panel must appear even when reviewEnvironment is unset")
+		}
+		if !strings.Contains(body, `data-testid="action-review-env-up"`) {
+			t.Error("the enumerated review-ready env should offer a Launch button")
+		}
+		// With no default set, no panel is flagged as the repo default.
+		if strings.Contains(body, `data-testid="review-env-default"`) {
+			t.Error("no reviewEnvironment set, so no panel should be marked the repo default")
+		}
+	})
+
+	t.Run("a non-Review attempt offers nothing even with review-ready envs", func(t *testing.T) {
+		s := serverWithReviewEnv(t, "/mock/repo", "", ready, project.Running)
+		body := get(t, s.Handler(), "/ticket/PROJ-9/0001").Body.String()
 		if strings.Contains(body, `data-testid="review-env"`) {
-			t.Error("with no reviewEnvironment set the panel must not appear")
+			t.Error("a non-Review attempt must not offer the review-env surface")
 		}
 	})
 
@@ -197,7 +232,7 @@ func TestReviewEnvUpThreadsParamOverride(t *testing.T) {
 	h := s.Handler()
 
 	form := "param:ENV_NAME=custom-value"
-	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-9/0001/review-env/up", strings.NewReader(form))
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-9/0001/review-env/review/up", strings.NewReader(form))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -348,9 +383,16 @@ func seedReviewRepo(t *testing.T, p *pyramid.Pyramid) (*Server, store.Root, proj
 	return s, root, a
 }
 
+// postReviewEnv drives the per-env route (drv-034): /review-env/{env}/{verb}. Every
+// current caller acts on the "review" env the fixtures declare.
 func postReviewEnv(t *testing.T, h http.Handler, verb string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-9/0001/review-env/"+verb, nil)
+	return postReviewEnvNamed(t, h, "review", verb)
+}
+
+func postReviewEnvNamed(t *testing.T, h http.Handler, env, verb string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/ticket/PROJ-9/0001/review-env/"+env+"/"+verb, nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
@@ -358,7 +400,12 @@ func postReviewEnv(t *testing.T, h http.Handler, verb string) *httptest.Response
 
 func getReviewEnvStatus(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
 	t.Helper()
-	return get(t, h, "/ticket/PROJ-9/0001/review-env/status")
+	return getReviewEnvStatusNamed(t, h, "review")
+}
+
+func getReviewEnvStatusNamed(t *testing.T, h http.Handler, env string) *httptest.ResponseRecorder {
+	t.Helper()
+	return get(t, h, "/ticket/PROJ-9/0001/review-env/"+env+"/status")
 }
 
 // TestReviewEnvLifecycleOverHTTP drives the whole panel seam through real HTTP: launch
@@ -375,8 +422,8 @@ func TestReviewEnvLifecycleOverHTTP(t *testing.T) {
 	if up.Code != 200 {
 		t.Fatalf("POST up = %d: %s", up.Code, up.Body.String())
 	}
-	if !strings.Contains(up.Body.String(), `review-env/status`) {
-		t.Error("starting panel should self-poll the status route")
+	if !strings.Contains(up.Body.String(), `review-env/review/status`) {
+		t.Error("starting panel should self-poll the per-env status route")
 	}
 
 	// Poll status until up (URL revealed) or failed.
@@ -412,6 +459,91 @@ func TestReviewEnvLifecycleOverHTTP(t *testing.T) {
 	if !strings.Contains(db, `data-testid="action-review-env-up"`) {
 		t.Errorf("a down env should offer Launch again; panel:\n%s", db)
 	}
+}
+
+// upAndWaitNamed launches a named review env over HTTP and polls its per-env status
+// route until the URL is revealed (or the deadline). Returns the final panel fragment.
+func upAndWaitNamed(t *testing.T, h http.Handler, env string) string {
+	t.Helper()
+	up := postReviewEnvNamed(t, h, env, "up")
+	if up.Code != 200 {
+		t.Fatalf("POST %s up = %d: %s", env, up.Code, up.Body.String())
+	}
+	var last string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		last = getReviewEnvStatusNamed(t, h, env).Body.String()
+		if strings.Contains(last, `data-testid="review-env-url"`) {
+			return last
+		}
+		if strings.Contains(last, "launch failed") {
+			t.Fatalf("%s launch failed:\n%s", env, last)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("%s never came up; last panel:\n%s", env, last)
+	return ""
+}
+
+// extractReviewURL pulls the clickable URL out of a single rendered panel fragment.
+func extractReviewURL(t *testing.T, panel string) string {
+	t.Helper()
+	const marker = `data-testid="review-env-url" href="`
+	i := strings.Index(panel, marker)
+	if i < 0 {
+		t.Fatalf("panel carries no review-env-url:\n%s", panel)
+	}
+	rest := panel[i+len(marker):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		t.Fatalf("malformed review-env-url attribute")
+	}
+	return rest[:j]
+}
+
+// TestReviewEnvsConcurrentPerAttempt is the drv-034 acceptance core at the web seam: an
+// attempt whose pyramid declares two review-ready envs lists both as independent panels,
+// runs both at once (each with its own healthcheck-gated URL), and tearing one down
+// leaves the other up — all scoped by the {env} path segment.
+func TestReviewEnvsConcurrentPerAttempt(t *testing.T) {
+	markers := t.TempDir()
+	s, _, _ := seedReviewRepo(t, twoReviewReadyPyramid(markers))
+	h := s.Handler()
+
+	// The attempt page lists BOTH review-ready envs as independent, env-scoped panels.
+	page := get(t, h, "/ticket/PROJ-9/0001").Body.String()
+	for _, want := range []string{`id="review-env-review"`, `id="review-env-review-cli"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("attempt page missing per-env panel %q", want)
+		}
+	}
+
+	// Launch both; each comes up independently and reveals its own URL.
+	webURL := extractReviewURL(t, upAndWaitNamed(t, h, "review"))
+	cliURL := extractReviewURL(t, upAndWaitNamed(t, h, "review-cli"))
+	if webURL == cliURL {
+		t.Fatalf("two concurrent review envs produced the same URL %q", webURL)
+	}
+
+	// Both running at once: a fresh page render shows both URLs.
+	page = get(t, h, "/ticket/PROJ-9/0001").Body.String()
+	if !strings.Contains(page, webURL) || !strings.Contains(page, cliURL) {
+		t.Fatalf("page does not show both running envs' URLs (web=%q cli=%q)", webURL, cliURL)
+	}
+
+	// Tearing one down does not disturb the other.
+	down := postReviewEnvNamed(t, h, "review", "down")
+	if down.Code != 200 {
+		t.Fatalf("POST review down = %d: %s", down.Code, down.Body.String())
+	}
+	if strings.Contains(down.Body.String(), `data-testid="review-env-url"`) {
+		t.Error("a torn-down env must not show a URL")
+	}
+	cliStatus := getReviewEnvStatusNamed(t, h, "review-cli").Body.String()
+	if !strings.Contains(cliStatus, `data-testid="review-env-url"`) {
+		t.Fatalf("tearing review down disturbed review-cli:\n%s", cliStatus)
+	}
+	postReviewEnvNamed(t, h, "review-cli", "down") // best-effort cleanup
 }
 
 // TestReviewEnvUpRejectedWhenNotGated pins that a POST that bypasses the UI gate (an

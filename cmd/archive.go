@@ -38,10 +38,10 @@ var archiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		// resolveCtlTarget parses `ticket[@attempt]` (explicit @attempt wins, else
+		// resolveTarget parses `ticket[@attempt]` (explicit @attempt wins, else
 		// --attempt / $DRAIVER_ATTEMPT / latest) and errors — writing nothing — for a
 		// missing ticket or attempt, matching the enable/disable/merge verbs.
-		ticket, att, err := resolveCtlTarget(root, args[0])
+		ticket, att, err := resolveTarget(root, args[0])
 		if err != nil {
 			return err
 		}
@@ -83,7 +83,7 @@ var unarchiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		ticket, att, err := resolveCtlTarget(root, args[0])
+		ticket, att, err := resolveTarget(root, args[0])
 		if err != nil {
 			return err
 		}

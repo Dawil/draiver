@@ -212,7 +212,7 @@ func TestRecallAtAttemptAddressForm(t *testing.T) {
 		t.Errorf("@0002 did not target attempt 0002:\n%s", two)
 	}
 
-	// @attempt wins over --attempt (resolveCtlTarget's precedence).
+	// @attempt wins over --attempt (resolveTarget's precedence).
 	win, _ := run(t, "--data", dir, "--attempt", "0002", "recall", "PROJ-1@0001")
 	if !strings.Contains(win, "lives on attempt one") {
 		t.Errorf("@0001 should win over --attempt 0002:\n%s", win)

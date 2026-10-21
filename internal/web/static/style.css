@@ -204,6 +204,16 @@ body {
 .prose pre { background: var(--panel-2); padding: 12px; border-radius: 8px; overflow-x: auto; }
 .prose code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
 
+/* GFM pipe tables (drvweb-024): the default UA table renders as unspaced,
+   borderless text that barely reads as a table. Minimal grid styling keyed to
+   the same --line/--panel-2 tokens the rest of the prose uses — hairline cell
+   borders, a quiet panel-2 header row, and zebra striping so rows stay
+   scannable. border-collapse folds the cell borders into single hairlines. */
+.prose table { border-collapse: collapse; margin: 10px 0; font-size: 13px; }
+.prose th, .prose td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+.prose th { background: var(--panel-2); font-weight: 600; }
+.prose tbody tr:nth-child(even) { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+
 /* Tabbed top section (drv-021): the former stack of full-width panels folded into
    one bordered card. The tablist is a quiet pill row on panel-2; the selected tab
    reads as a raised pill. Panels are plain [hidden]-toggled by the page script. */

@@ -68,6 +68,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	logByFlag = ""
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog, testDetach = false, false
+	parkClear = false
 	reportJSON, reportRun, reportOut = "", "", ""
 	reportInline, reportDemo = true, false
 	t.Setenv("DRAIVER_ATTEMPT", "")

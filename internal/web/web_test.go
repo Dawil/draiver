@@ -567,6 +567,26 @@ func TestLogBodyPipeTableRendered(t *testing.T) {
 	}
 }
 
+// TestProseTableStyled pins the table styling served alongside the rendered
+// tables (drvweb-024): the default UA table reads as borderless, unspaced text,
+// so the stylesheet keys a minimal grid (collapsed hairline borders + a panel-2
+// header row) off the same theme tokens the rest of the prose uses. Asserting on
+// the served stylesheet keeps the rule a contract, matching the archive
+// hover-reveal and target-highlight CSS checks above.
+func TestProseTableStyled(t *testing.T) {
+	h := newServer(t)
+	css := get(t, h, "/static/style.css").Body.String()
+	for _, want := range []string{
+		".prose table { border-collapse: collapse;",
+		".prose th, .prose td { border: 1px solid var(--line);",
+		".prose th { background: var(--panel-2);",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("style.css missing prose table rule %q", want)
+		}
+	}
+}
+
 // TestFaviconServedAndWired pins the favicon contract: all three SVG variants
 // and the swap script are served from the embedded static FS, every full page
 // references the favicon by the id the script swaps, and each badged variant

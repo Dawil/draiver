@@ -14,12 +14,15 @@ container.
 
 ## Driving it from the board (the intended path)
 
-`reviewEnvironment` is a single per-repo setting naming one env, so on the
-attempt page's repo-settings panel, point **`reviewEnvironment` at
-`review-cli`** (set it back to `review` for UI tickets). Then use the
-review-environment panel on an attempt in Review to launch it: draiver cuts a
-review worktree at the reviewed commit, injects a free `DRAIVER_REVIEW_PORT` and
-a unique `DRAIVER_REVIEW_INSTANCE`, runs `up.sh`, confirms readiness with
+Because `review-cli` is review-ready (`up` + `down` + a healthcheck), drv-034
+offers it **automatically** on any attempt page in Review, alongside the webui
+`review` env — each with its own launch control, and both can run at once. No
+per-repo switch is needed; the per-repo `reviewEnvironment` setting only
+*highlights* a default (and flags a misconfiguration if it names a missing env).
+
+Launch it from the review-environment panel: draiver cuts a review worktree at
+the reviewed commit, injects a free `DRAIVER_REVIEW_PORT` and a unique
+`DRAIVER_REVIEW_INSTANCE`, runs `up.sh`, confirms readiness with
 `healthcheck.sh`, and only then reveals the URL. Teardown runs `down.sh` and
 re-probes the port to confirm the env is gone.
 

@@ -49,7 +49,7 @@ var recallCmd = &cobra.Command{
 		// Parse the ticket@attempt address form through the same parser archive/ctl use
 		// (explicit @attempt wins; else --attempt / $DRAIVER_ATTEMPT / latest). Both the
 		// ticket and the resolved attempt must exist.
-		ticket, att, err := resolveCtlTarget(root, id)
+		ticket, att, err := resolveTarget(root, id)
 		if err != nil {
 			return err
 		}

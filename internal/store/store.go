@@ -5,10 +5,13 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Root is a resolved data-root directory holding one folder per ticket.
@@ -84,16 +87,66 @@ func (r Root) StatePath(id, attempt string) string {
 	return filepath.Join(r.AttemptDir(id, attempt), "state.md")
 }
 
-// ReviewEnvPath is an attempt's review-environment lifecycle record (drv-020): the
-// persistent, out-of-band state the controlplane tracks for a launched review env
-// between requests — down / starting / up+url / teardown-failed, plus the allocated
-// port, instance slug, reviewed commit, and review worktree path. Like
+// ReviewEnvPath is one review-environment lifecycle record for an attempt (drv-020,
+// drv-034): the persistent, out-of-band state the controlplane tracks for a launched
+// review env between requests — down / starting / up+url / teardown-failed, plus the
+// allocated port, instance slug, reviewed commit, and review worktree path. Like
 // DesiredMarkerPath it is rebuildable runtime state, not part of the hash chain, and
 // lives at the attempt root (alongside state.md) so it survives a session flush that
-// clears the session/ dir but is reclaimed when the whole attempt is. A missing file
-// means "no review env has ever been launched for this attempt" (the Down state).
-func (r Root) ReviewEnvPath(id, attempt string) string {
+// clears the session/ dir but is reclaimed when the whole attempt is.
+//
+// drv-034 keys the record by (attempt, environment) so one attempt can run several
+// review envs concurrently — each environment the pyramid declares gets its own file,
+// named reviewenv-<sanitized>-<hash6>.json. The hash of the RAW environment name
+// guarantees uniqueness even when two names sanitise to the same slug (env names are
+// only validated unique+non-blank, so arbitrary characters are possible); the slug
+// keeps the filename legible. A missing file means "this env has never been launched
+// for this attempt" (the Down state).
+func (r Root) ReviewEnvPath(id, attempt, env string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), reviewEnvFile(env))
+}
+
+// ReviewEnvLegacyPath is the pre-drv-034 single-record path (reviewenv.json), kept so
+// the per-env Load can dual-read: a per-env file first, then this legacy file iff its
+// recorded Environment matches the name being loaded. A first post-upgrade write lands
+// in the per-env path and shadows this, so the legacy file is read-only migration tail.
+func (r Root) ReviewEnvLegacyPath(id, attempt string) string {
 	return filepath.Join(r.AttemptDir(id, attempt), "reviewenv.json")
+}
+
+// reviewEnvFile builds the per-env record filename. The 6-hex SHA-256 prefix of the
+// raw env name is the uniqueness guarantee; the sanitised slug is cosmetic legibility.
+func reviewEnvFile(env string) string {
+	sum := sha256.Sum256([]byte(env))
+	h := hex.EncodeToString(sum[:])[:6]
+	return "reviewenv-" + sanitizeEnvSlug(env) + "-" + h + ".json"
+}
+
+// sanitizeEnvSlug lowercases an env name and collapses every run of non-[a-z0-9] to a
+// single '-', trimmed and length-capped — a filesystem-safe, legible stem. It is NOT a
+// uniqueness key (two names can collapse to the same slug); reviewEnvFile pairs it with
+// a hash of the raw name for that.
+func sanitizeEnvSlug(env string) string {
+	raw := strings.ToLower(strings.TrimSpace(env))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+		} else if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	s := strings.Trim(b.String(), "-")
+	if len(s) > 40 {
+		s = strings.Trim(s[:40], "-")
+	}
+	if s == "" {
+		s = "env"
+	}
+	return s
 }
 
 // DesiredMarkerPath is an attempt's transient imperative desired-marker: the

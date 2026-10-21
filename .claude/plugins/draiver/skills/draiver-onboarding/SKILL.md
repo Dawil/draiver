@@ -40,6 +40,18 @@ own logging onto the human. The one verb that is *theirs*, not yours, is
 Assume you cannot see the human in real time — you communicate by writing events
 they will read on the board, not by chatting.
 
+## Where you work
+
+Your session already runs **inside your attempt's isolated git worktree** — the
+directory you start in *is* that worktree, checked out on your attempt branch
+(`draiver/<TICKET>/<attempt>`). Work there and nowhere else: do **not** `cd` to an
+absolute repo path, and do not edit files outside your current directory.
+
+The brief's `Repo:` line is **not** a directory to work in. It names the
+**source** working tree your worktree was cut from, which is checked out on the
+base branch (e.g. `main`). `cd`-ing there means editing, committing, and pushing
+on the base branch — bypassing review entirely. Stay in your worktree.
+
 ## 1. Cold-start from the brief — once per session, at the start
 
 The first thing every session does — whether you are the first agent on the
@@ -318,6 +330,12 @@ push or open a PR. You push, exactly as you run `git commit` yourself.
 - **Ambiguous** — several remotes with no `primary_remote` set, or a
   `primary_remote` that isn't in `git remote` — **do not guess a remote.**
   Escalate (§6): pushing to the wrong forge is worse than asking.
+
+Before you push, **confirm you are on your attempt branch**: `git branch
+--show-current` must print `draiver/<TICKET>/<attempt>`, never the base branch
+(e.g. `main`). If it prints the base branch you are not in your worktree, and a
+push would send the base branch straight to the remote — bypassing review. **Stop
+and escalate (§6)** instead of pushing.
 
 ```
 git push -u <remote> HEAD
