@@ -9,19 +9,19 @@ import (
 )
 
 var briefCmd = &cobra.Command{
-	Use:   "brief TICKET",
+	Use:   "brief <ticket[@attempt]>",
 	Short: "Replay spec + an attempt's log into a context blob for a fresh agent",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		id := args[0]
 		root, err := resolveRoot()
 		if err != nil {
 			return err
 		}
-		if !root.Exists(id) {
-			return fmt.Errorf("ticket %q not found under %s", id, root.Dir)
-		}
-		att, err := resolveAttempt(root, id)
+		// Resolve the `ticket[@attempt]` address form through the shared parser the
+		// rest of the CLI uses (log/recall/ctl/archive): an explicit @attempt wins,
+		// else --attempt / $DRAIVER_ATTEMPT / the latest. This lets a brief address a
+		// named attempt as <TICKET>@<slug> the same way recall/log do (drv-040).
+		id, att, err := resolveTarget(root, args[0])
 		if err != nil {
 			return err
 		}

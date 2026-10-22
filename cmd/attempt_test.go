@@ -163,6 +163,63 @@ func TestAttemptSetUnwedgesMerge(t *testing.T) {
 	}
 }
 
+// drv-040: `attempt new --name <slug>` creates an attempt addressable as
+// <TICKET>@<slug>, which recall and log both resolve to; a bad slug or a
+// collision is refused and writes nothing.
+func TestAttemptNewNamed(t *testing.T) {
+	dir := newTicket(t) // PROJ-1/0001
+	root := store.Root{Dir: dir}
+
+	out, code := run(t, "--data", dir, "attempt", "new", "PROJ-1", "--name", "mine", "--repo", dir)
+	if code != 0 {
+		t.Fatalf("attempt new --name exited %d: %s", code, out)
+	}
+	if !strings.Contains(out, "mine") {
+		t.Errorf("attempt new --name output missing the slug id:\n%s", out)
+	}
+	if !root.AttemptExists("PROJ-1", "mine") {
+		t.Fatal("named attempt dir not created")
+	}
+
+	// `log PROJ-1@mine` resolves the @-address and writes to that attempt.
+	if _, code := run(t, "--data", dir, "log", "PROJ-1@mine", "on mine", "--type", "note"); code != 0 {
+		t.Fatalf("log PROJ-1@mine exited %d", code)
+	}
+	ev, _ := ticketlog.Read(root, "PROJ-1", "mine")
+	if len(ev) != 2 || ev[len(ev)-1].Body != "on mine" {
+		t.Errorf("log did not land on @mine: %+v", ev)
+	}
+	// 0001 is untouched — the @-address targeted the named attempt independently.
+	if one, _ := ticketlog.Read(root, "PROJ-1", "0001"); len(one) != 1 {
+		t.Errorf("0001 should be untouched, got %d events", len(one))
+	}
+
+	// `recall PROJ-1@mine` resolves to the named attempt and surfaces its fact.
+	rout, code := run(t, "--data", dir, "recall", "PROJ-1@mine")
+	if code != 0 {
+		t.Fatalf("recall PROJ-1@mine exited %d: %s", code, rout)
+	}
+	if !strings.Contains(rout, "on mine") {
+		t.Errorf("recall @mine did not surface its fact:\n%s", rout)
+	}
+
+	// A colliding --name is refused and writes nothing new.
+	if _, code := run(t, "--data", dir, "attempt", "new", "PROJ-1", "--name", "mine", "--repo", dir); code == 0 {
+		t.Error("expected nonzero exit re-creating name 'mine'")
+	}
+	// A slug that would break the layout / @-address is refused before any write.
+	if _, code := run(t, "--data", dir, "attempt", "new", "PROJ-1", "--name", "a/b", "--repo", dir); code == 0 {
+		t.Error("expected nonzero exit for a slug with a path separator")
+	}
+	if _, code := run(t, "--data", dir, "attempt", "new", "PROJ-1", "--name", "a@b", "--repo", dir); code == 0 {
+		t.Error("expected nonzero exit for a slug with an '@'")
+	}
+	// Still exactly 0001 and mine — no refused call left an attempt behind.
+	if ids, _ := root.ListAttempts("PROJ-1"); len(ids) != 2 {
+		t.Errorf("refused named creations left attempts behind: %v", ids)
+	}
+}
+
 func TestDefaultAttemptIsLatest(t *testing.T) {
 	dir := newTicket(t)
 	run(t, "--data", dir, "attempt", "new", "PROJ-1", "--repo", dir) // 0002 becomes latest

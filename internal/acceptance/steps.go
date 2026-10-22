@@ -87,6 +87,14 @@ var registry = map[string]StepFunc{
 	"recording is best-effort and never changes what recall surfaces":   thenBestEffortNoChange,
 	"the counts are retrievable offline from the on-disk sink":          thenCountsRetrievableOffline,
 
+	// --- features/named-attempt/create.feature (drv-040) ---
+	"a ticket with no attempts yet":                                                            givenBareTicket,
+	"a ticket with a named attempt \"repo-facts\"":                                             givenTicketWithNamedAttempt,
+	"an attempt named \"repo-facts\" is addressable as ticket@repo-facts and passes audit":     thenNamedAttemptAddressable,
+	"a subsequent unnamed attempt is still numbered 0001":                                      thenUnnamedStillAutoNumbers,
+	"re-using the name \"repo-facts\" is refused and leaves the existing attempt untouched":    thenCollidingNameRefused,
+	"a name with a path separator, an at-sign, or whitespace is refused and writes nothing":    thenUnsafeNameRefused,
+
 	// --- features/progressive-brief/recall-attempt-aware.feature (drv-032) ---
 	"recall --tags lists the distinct tags sorted alphabetically with counts":          thenRecallTagsSorted,
 	"a ticket with two attempts each carrying a distinct fact":                         givenTwoAttempts,
