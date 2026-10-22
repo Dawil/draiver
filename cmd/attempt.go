@@ -18,6 +18,7 @@ var (
 	attemptRepo  string
 	attemptBase  string
 	attemptFrom  string
+	attemptName  string
 
 	attemptSetTool  string
 	attemptSetModel string
@@ -82,6 +83,7 @@ var attemptNewCmd = &cobra.Command{
 			Base:  base,
 			Actor: resolveActor(),
 			From:  attemptFrom,
+			Name:  attemptName,
 		})
 		if err != nil {
 			return err
@@ -209,6 +211,7 @@ func init() {
 	attemptNewCmd.Flags().StringVar(&attemptRepo, "repo", "", "required (unless inherited via --from): local path to the git working tree this attempt targets")
 	attemptNewCmd.Flags().StringVar(&attemptBase, "base", "", "branch this attempt lands back into (default: inherited via --from, else the repo's current branch)")
 	attemptNewCmd.Flags().StringVar(&attemptFrom, "from", "", "record provenance: this attempt branches from attempt <id>")
+	attemptNewCmd.Flags().StringVar(&attemptName, "name", "", "name this attempt <slug> instead of auto-numbering it: its id becomes the slug, addressed as <TICKET>@<slug> (e.g. a codebase ledger's per-contributor perspective)")
 	attemptSetCmd.Flags().StringVar(&attemptSetTool, "tool", "", "coding-agent tool (e.g. claude-code, aider, codex)")
 	attemptSetCmd.Flags().StringVar(&attemptSetModel, "model", "", "model (e.g. opus-4.8)")
 	attemptSetCmd.Flags().StringVar(&attemptSetRepo, "repo", "", "local path to the git working tree this attempt targets")

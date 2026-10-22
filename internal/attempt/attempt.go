@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -63,6 +64,14 @@ type New struct {
 	Actor string
 	From  string
 	TS    time.Time // zero → now
+
+	// Name, when non-empty, is used verbatim as the new attempt's id (so its
+	// address is <TICKET>@<Name>) instead of the next auto-number. It lets a
+	// ticket open a named perspective — e.g. a codebase ledger's per-contributor
+	// attempt repo-facts@drv-040 — whose provenance lives in its address (drv-040).
+	// It is validated (ValidateName) before any side effect and must not collide
+	// with an existing attempt. Empty → auto-number exactly as before.
+	Name string
 }
 
 // ErrRepoRequired is returned by Create when asked to mint an attempt with no
@@ -72,6 +81,34 @@ type New struct {
 // funnels through, so no caller can mint a repo-less attempt; the commands layer
 // this with an earlier, friendlier message.
 var ErrRepoRequired = errors.New("a repo path is required: set --repo to the local git working tree this attempt targets")
+
+// ValidateName reports whether a slug is usable as an attempt id. A named attempt
+// becomes a directory under attempts/ and is addressed as <TICKET>@<name>, so the
+// slug must be a single, non-traversing path segment that the `@`-address parser
+// (resolveTarget splits on the first '@') can round-trip. It rejects, before any
+// side effect, the exact shapes the on-disk layout or the address form cannot
+// survive: empty, the `.`/`..` traversal names, a path separator, an `@`, or any
+// whitespace. The check lives beside Create — the one chokepoint every creation
+// path funnels through — so no caller can mint an unaddressable attempt.
+func ValidateName(name string) error {
+	if name == "" {
+		return errors.New("attempt name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("attempt name %q is not a valid id (reserved path segment)", name)
+	}
+	for _, r := range name {
+		switch {
+		case r == '/' || r == '\\':
+			return fmt.Errorf("attempt name %q must not contain a path separator", name)
+		case r == '@':
+			return fmt.Errorf("attempt name %q must not contain '@' (reserved for the ticket@attempt address form)", name)
+		case unicode.IsSpace(r):
+			return fmt.Errorf("attempt name %q must not contain whitespace", name)
+		}
+	}
+	return nil
+}
 
 // Create allocates the next attempt id on a ticket, writes attempt.md, ensures
 // the attempt's dirs, appends the genesis "created" event, and returns the meta.
@@ -88,6 +125,20 @@ func Create(root store.Root, ticket string, n New) (Meta, error) {
 	if n.Repo == "" {
 		return Meta{}, ErrRepoRequired
 	}
+	// A named attempt (drv-040) uses its slug as the id instead of an auto-number.
+	// Both the slug's shape and a collision with an existing attempt are checked
+	// here, before any directory is created, so a rejected named Create writes
+	// nothing. The exclusive os.Mkdir in the loop below is still the race-safe
+	// guard; this pre-check only buys a clearer error than a bare EEXIST.
+	named := n.Name != ""
+	if named {
+		if err := ValidateName(n.Name); err != nil {
+			return Meta{}, err
+		}
+		if root.AttemptExists(ticket, n.Name) {
+			return Meta{}, fmt.Errorf("attempt: %s@%s already exists", ticket, n.Name)
+		}
+	}
 	// Base is optional and stored trimmed. It records the branch this attempt lands
 	// back into; when omitted the commands layer defaults it to the bound repo's
 	// current branch, but a hand-made or legacy attempt may carry none.
@@ -101,15 +152,26 @@ func Create(root store.Root, ticket string, n New) (Meta, error) {
 	}
 	ts = ts.UTC().Truncate(time.Second)
 
-	const maxRetries = 8
+	// A named attempt has exactly one candidate id (its slug), so there is nothing
+	// to retry: a claim collision is a hard error, not a bump to the next number.
+	maxRetries := 8
+	if named {
+		maxRetries = 1
+	}
 	for i := 0; i < maxRetries; i++ {
-		id, err := nextID(root, ticket)
-		if err != nil {
-			return Meta{}, err
+		id := n.Name
+		if !named {
+			var err error
+			if id, err = nextID(root, ticket); err != nil {
+				return Meta{}, err
+			}
 		}
 		// Claim the id exclusively; a concurrent creator racing the same id fails here.
 		if err := os.Mkdir(root.AttemptDir(ticket, id), 0o755); err != nil {
 			if errors.Is(err, fs.ErrExist) {
+				if named {
+					return Meta{}, fmt.Errorf("attempt: %s@%s already exists", ticket, id)
+				}
 				continue
 			}
 			return Meta{}, fmt.Errorf("attempt: claim %s: %w", id, err)

@@ -56,6 +56,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	newType = ""
 	dependsWants, dependsAfter, dependsRequires = nil, nil, nil
 	attemptTool, attemptModel, attemptFrom, attemptRepo, attemptBase = "", "", "", "", ""
+	attemptName = ""
 	attemptSetTool, attemptSetModel, attemptSetRepo, attemptSetBase = "", "", "", ""
 	inboxMine = false
 	ctlLogsFollow, ctlLogsJSON = false, false

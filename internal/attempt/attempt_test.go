@@ -281,6 +281,119 @@ func TestLoadMetaRecomputesDerivedMetricsFromRaw(t *testing.T) {
 	}
 }
 
+// A named attempt (drv-040) uses its slug verbatim as the id, is addressable and
+// loadable by that id, gets its own genesis event, and does not perturb the
+// auto-numbering of unnamed attempts created alongside it.
+func TestCreateNamedAttempt(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+
+	named, err := Create(root, id, New{Repo: "/repo", Actor: "agent:x", Name: "repo-facts"})
+	if err != nil {
+		t.Fatalf("create named: %v", err)
+	}
+	if named.ID != "repo-facts" {
+		t.Fatalf("named id = %q want repo-facts", named.ID)
+	}
+	if !root.AttemptExists(id, "repo-facts") {
+		t.Fatal("named attempt dir not created")
+	}
+	// Loadable and chained like any attempt: one genesis event at seq 1.
+	events, err := ticketlog.Read(root, id, "repo-facts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "created" || events[0].Seq != 1 {
+		t.Errorf("named genesis wrong: %+v", events)
+	}
+	m, err := LoadMeta(root, id, "repo-facts")
+	if err != nil || m.ID != "repo-facts" || m.Repo != "/repo" {
+		t.Errorf("named meta = %+v err=%v", m, err)
+	}
+
+	// Auto-numbering is unperturbed by the non-numeric slug: the next unnamed
+	// attempt is still 0001, and a named one alongside it does not bump the count.
+	auto, err := Create(root, id, New{Repo: "/repo", Actor: "agent:y"})
+	if err != nil {
+		t.Fatalf("create auto: %v", err)
+	}
+	if auto.ID != "0001" {
+		t.Fatalf("auto id = %q want 0001 (slug must not perturb auto-numbering)", auto.ID)
+	}
+}
+
+// A --name colliding with an existing attempt id (named or numbered) is refused,
+// and the rejected call leaves the existing attempt untouched and adds nothing.
+func TestCreateNamedAttemptCollision(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "agent:x", Name: "mine"}); err != nil {
+		t.Fatal(err)
+	}
+	// Collide with the named attempt.
+	if _, err := Create(root, id, New{Repo: "/other", Actor: "agent:y", Name: "mine"}); err == nil {
+		t.Error("expected collision error re-creating name 'mine'")
+	}
+	// Collide with an auto-numbered id by name.
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "agent:z"}); err != nil {
+		t.Fatal(err) // 0001
+	}
+	if _, err := Create(root, id, New{Repo: "/repo", Actor: "agent:z", Name: "0001"}); err == nil {
+		t.Error("expected collision error naming an attempt '0001'")
+	}
+	// Only the two originals survive; no rejected call wrote an attempt.
+	ids, _ := List(root, id)
+	if len(ids) != 2 {
+		t.Errorf("attempts = %v want exactly the two originals", ids)
+	}
+	// The surviving named attempt kept its original repo (collision wrote nothing).
+	if m, _ := LoadMeta(root, id, "mine"); m.Repo != "/repo" {
+		t.Errorf("collision clobbered existing attempt: repo=%q want /repo", m.Repo)
+	}
+}
+
+// A --name whose characters would break the on-disk layout or the @-address
+// parsing is refused before anything is written.
+func TestCreateNamedAttemptRejectsBadSlug(t *testing.T) {
+	root := store.Root{Dir: t.TempDir()}
+	id := "PROJ-1"
+	if err := root.EnsureTicketDir(id); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"a/b", `a\b`, "a@b", "a b", "has\ttab", "..", "."} {
+		if _, err := Create(root, id, New{Repo: "/repo", Actor: "agent:x", Name: bad}); err == nil {
+			t.Errorf("Create(name=%q) succeeded, want rejection", bad)
+		}
+	}
+	// A name of "" means "unnamed" and must still auto-number, not error out.
+	if a, err := Create(root, id, New{Repo: "/repo", Actor: "agent:x", Name: ""}); err != nil || a.ID != "0001" {
+		t.Errorf("empty name should auto-number: id=%q err=%v", a.ID, err)
+	}
+	// Nothing but that one auto-numbered attempt was written.
+	if ids, _ := List(root, id); len(ids) != 1 {
+		t.Errorf("bad-slug creations left attempts behind: %v", ids)
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	for _, ok := range []string{"mine", "repo-facts", "drv-040", "v1.2", "A_b.3"} {
+		if err := ValidateName(ok); err != nil {
+			t.Errorf("ValidateName(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "a/b", `a\b`, "a@b", "a b", "a\tb", "a\nb"} {
+		if err := ValidateName(bad); err == nil {
+			t.Errorf("ValidateName(%q) = nil, want error", bad)
+		}
+	}
+}
+
 func TestCreateRejectsUnknownTicket(t *testing.T) {
 	root := store.Root{Dir: t.TempDir()}
 	if _, err := Create(root, "NOPE-1", New{Repo: "/repo", Actor: "a"}); err == nil {
