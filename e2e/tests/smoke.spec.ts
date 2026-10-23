@@ -10,9 +10,24 @@ test.describe("board shell", () => {
     }
   });
 
-  test("ships the self-contained polling script (no CDN)", async ({ page }) => {
-    const res = await page.request.get("/static/htmx.min.js");
-    expect(res.ok()).toBeTruthy();
-    expect(res.headers()["content-type"]).toContain("javascript");
+  test("ships the self-contained polling scripts (no CDN)", async ({ page }) => {
+    // htmx and the idiomorph morph extension (drvweb-025) are both self-hosted
+    // from /static — the board's CSP/offline posture rules out a CDN.
+    for (const asset of ["/static/htmx.min.js", "/static/idiomorph-ext.min.js"]) {
+      const res = await page.request.get(asset);
+      expect(res.ok(), `${asset} should be served locally`).toBeTruthy();
+      expect(res.headers()["content-type"]).toContain("javascript");
+    }
+
+    // No <script> on the board page points at an external origin.
+    await page.goto("/");
+    const externalScripts = await page
+      .locator("script[src]")
+      .evaluateAll((els) =>
+        els
+          .map((e) => (e as HTMLScriptElement).getAttribute("src") || "")
+          .filter((src) => /^(https?:)?\/\//.test(src)),
+      );
+    expect(externalScripts).toEqual([]);
   });
 });

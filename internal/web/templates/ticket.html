@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/style.css">
   {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
+  <script src="/static/idiomorph-ext.min.js"></script>
   <script src="/static/favicon.js" defer></script>
   <script src="/static/reltime.js" defer></script>
 </head>
@@ -258,7 +259,7 @@
       <div id="restart-result" class="restart-result" data-testid="restart-result" hidden></div>
 
       <div class="log-region" data-testid="log-region" data-order="newest"
-        {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-swap="innerHTML"{{end}}>
+        {{- if .Polls}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/live" hx-trigger="every 3s" hx-ext="morph" hx-swap="morph:innerHTML"{{end}}>
         {{template "attempt-log" .}}
       </div>
     </section>
@@ -332,8 +333,8 @@
     (function () {
       // The order toggle only flips VISUAL order: the DOM is always oldest-first
       // and CSS (flex-direction) reverses it. Order state lives on the log-region
-      // element, which htmx's innerHTML swap preserves, so polling never disturbs
-      // the reader's chosen order.
+      // element itself — the morph swap morphs only its children, never the region
+      // node — so polling never disturbs the reader's chosen order.
       var toggle = document.querySelector('[data-testid="log-order-toggle"]');
       var region = document.querySelector('[data-testid="log-region"]');
       if (!toggle || !region) return;
@@ -345,72 +346,22 @@
       });
     })();
 
-    (function () {
-      // Keep focus in a resolve textarea across the 3s log poll. The log region
-      // is an htmx innerHTML swap; hx-preserve keeps the textarea NODE and its
-      // typed value, but htmx moves that node into the freshly-rendered content,
-      // and detaching/re-attaching an element blurs it and drops the caret — so
-      // every ~3s the cursor jumps out mid-sentence. We snapshot the focused
-      // resolve input (id + selection) just before the swap and, the instant
-      // htmx puts the new content in place (afterSwap, before the browser
-      // paints), refocus it and restore the caret/selection. Running
-      // synchronously inside afterSwap means the round-trip never reaches a
-      // frame, so it is seamless — no visible flicker. preventScroll keeps the
-      // refocus from yanking the page, matching the deep-link handler's
-      // don't-move-the-reader stance.
-      var region = document.querySelector('[data-testid="log-region"]');
-      if (!region) return;
-      function resolveInput(el) {
-        return el && el.classList && el.classList.contains('resolve-input') ? el : null;
-      }
-      var pending = null;
-      document.body.addEventListener('htmx:beforeSwap', function (e) {
-        if (e.target !== region) return;
-        var el = resolveInput(document.activeElement);
-        pending = el ? { id: el.id, start: el.selectionStart, end: el.selectionEnd, dir: el.selectionDirection } : null;
-      });
-      document.body.addEventListener('htmx:afterSwap', function (e) {
-        if (e.target !== region || !pending) return;
-        var el = pending.id ? document.getElementById(pending.id) : null;
-        if (resolveInput(el)) {
-          el.focus({ preventScroll: true });
-          // The escalation may still be open (input present) but stale/unknown
-          // selection offsets throw; ignore so a missing caret never breaks focus.
-          try { el.setSelectionRange(pending.start, pending.end, pending.dir); } catch (_) {}
-        }
-        pending = null;
-      });
-    })();
+    {{/* drvweb-025: two poll-era workarounds were retired here once the log region
+         switched from innerHTML to morph (idiomorph):
 
-    (function () {
-      // Deep-link support: /ticket/{id}/{attempt}#event-{seq} scrolls to and
-      // highlights that entry. Native :target handles the initial load, but the
-      // log region is an htmx innerHTML poll (task-008): each swap replaces the
-      // <li id="event-N"> nodes and the browser drops its :target reference, so
-      // the highlight would vanish on the next poll. We mirror the target onto
-      // an .is-target class and re-apply it after every settle. DOM ids never
-      // move (the order toggle is a pure CSS flip), so anchors survive both the
-      // toggle and the poll.
-      function targetId() {
-        var m = (location.hash || '').match(/^#(event-\d+)$/);
-        return m ? m[1] : null;
-      }
-      function apply(scroll) {
-        var prev = document.querySelector('.event.is-target');
-        if (prev) prev.classList.remove('is-target');
-        var id = targetId();
-        if (!id) return;
-        var el = document.getElementById(id); // stale/unknown seq -> null, no jump
-        if (!el) return;
-        el.classList.add('is-target');
-        if (scroll) el.scrollIntoView({ block: 'center' });
-      }
-      // Land on load, follow same-page permalink clicks, and survive log swaps
-      // (re-highlight only — swaps keep scroll position, so don't yank the reader).
-      window.addEventListener('hashchange', function () { apply(true); });
-      document.body.addEventListener('htmx:afterSettle', function () { apply(false); });
-      apply(true);
-    })();
+         - the resolve-textarea focus/caret snapshot (it refocused and restored the
+           caret after every innerHTML swap blurred it). Morph never detaches an
+           unchanged textarea, and idiomorph's built-in restoreFocus re-homes the
+           active input by id and restores its selection when a change does move it;
+           hx-preserve still keeps the typed-but-unsubmitted value.
+         - the `.is-target` class mirror + afterSettle re-apply (innerHTML replaced
+           the <li id="event-N"> nodes, dropping the browser's native :target ref).
+           Morph reuses those nodes by id, so native :target — and the CSS that keys
+           off it — survives the poll on its own. Deep-link scroll is the browser's
+           native fragment navigation.
+
+         Both were proven redundant in a real browser before removal (e2e selection/
+         target/focus survival specs). */}}
 
     (function () {
       // Spec cap: clip a long spec to a max-height (CSS) with a fade, and reveal

@@ -506,9 +506,11 @@ body {
 .log-region[data-order="newest"] .timeline { flex-direction: column-reverse; }
 .log-region[data-order="oldest"] .timeline { flex-direction: column; }
 .event { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; scroll-margin-top: 16px; }
-/* Deep-linked entry: native :target lands it on load; the .is-target mirror keeps
-   the highlight across htmx log swaps (see the deep-link script in ticket.html). */
-.event:target, .event.is-target { border-color: var(--accent); border-left-color: var(--accent); background: var(--accent-bg); outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Deep-linked entry: native :target lands and highlights it on load. The log
+   region morphs (idiomorph) rather than innerHTML-swapping, so the targeted
+   <li id="event-N"> node is reused in place and keeps :target across the poll —
+   no .is-target JS mirror needed (drvweb-025). */
+.event:target { border-color: var(--accent); border-left-color: var(--accent); background: var(--accent-bg); outline: 2px solid var(--accent); outline-offset: 1px; }
 .event-escalation { border-left-color: var(--alert); }
 .event-resolution { border-left-color: var(--done); }
 .event-decision { border-left-color: var(--accent); }
