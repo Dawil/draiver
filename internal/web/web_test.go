@@ -359,16 +359,17 @@ func TestTimelineShowsRelativeTimestamps(t *testing.T) {
 func TestDeepLinkAnchors(t *testing.T) {
 	h := newServer(t)
 
-	// Full page: each event is a scroll target, the seq is a permalink, and the
-	// client script re-targets after every htmx settle so the highlight survives
-	// the log poll (task-008's innerHTML swap drops the browser's :target ref).
+	// Full page: each event is a scroll target and the seq is a permalink. The log
+	// region morphs (idiomorph) rather than innerHTML-swapping on the poll, so the
+	// targeted <li id="event-N"> node is reused in place and the browser's native
+	// :target reference survives — no JS .is-target mirror needed (drvweb-025).
 	page := get(t, h, "/ticket/PROJ-1/0001").Body.String()
 	for _, want := range []string{
-		`id="event-1"`,     // event is a URL fragment target
-		`id="event-2"`,     //
-		`href="#event-1"`,  // seq label is a copyable permalink
-		`href="#event-2"`,  //
-		"htmx:afterSettle", // highlight is re-applied after each log swap
+		`id="event-1"`,            // event is a URL fragment target
+		`id="event-2"`,            //
+		`href="#event-1"`,         // seq label is a copyable permalink
+		`href="#event-2"`,         //
+		`hx-swap="morph:innerHTML"`, // the poll morphs, so :target-carrying nodes persist
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("detail page missing deep-link hook %q", want)
@@ -384,17 +385,16 @@ func TestDeepLinkAnchors(t *testing.T) {
 		}
 	}
 
-	// The stylesheet highlights the targeted entry (native :target on load and
-	// the JS .is-target mirror across swaps).
+	// The stylesheet highlights the targeted entry via native :target, which the
+	// morph swap keeps attached across the poll (drvweb-025 retired the .is-target
+	// mirror the innerHTML swap used to require).
 	css := get(t, h, "/static/style.css")
 	if css.Code != 200 {
 		t.Fatalf("GET /static/style.css = %d", css.Code)
 	}
 	cssBody := css.Body.String()
-	for _, want := range []string{".event:target", ".event.is-target"} {
-		if !strings.Contains(cssBody, want) {
-			t.Errorf("style.css missing target highlight rule %q", want)
-		}
+	if !strings.Contains(cssBody, ".event:target") {
+		t.Errorf("style.css missing target highlight rule %q", ".event:target")
 	}
 }
 
@@ -1678,26 +1678,38 @@ func TestResolveBoxRendersForOpenEscalationOnly(t *testing.T) {
 }
 
 // TestResolveInputKeepsFocusAcrossPoll pins the focus-retention contract
-// (drvweb-014): the detail page ships a client handler that snapshots the
-// focused resolve textarea before the 3s log-region swap and refocuses it (with
-// caret) right after, so hx-preserve's value-retention is joined by
-// focus-retention and the poll no longer steals the cursor mid-sentence. The
-// script is inline in the page, so we assert its keying + call shape rather than
-// behaviour.
+// (drvweb-014, reworked by drvweb-025): the 3s log-region poll must not steal the
+// cursor out of a half-typed resolve answer. The bespoke beforeSwap/afterSwap
+// snapshot-and-refocus script is gone — the log region now morphs (idiomorph)
+// instead of innerHTML-swapping, so an unchanged textarea is never detached, and
+// idiomorph's built-in restoreFocus re-homes the active input by id (with its
+// selection) when a change does move it; hx-preserve still guards the typed value.
+// The inline script was removed, so we pin the mechanism that replaced it: the
+// morph swap on the log region, the idiomorph extension served + enabled, and
+// hx-preserve on the textarea. The live-browser proof lives in the e2e specs.
 func TestResolveInputKeepsFocusAcrossPoll(t *testing.T) {
 	root := seedEscalation(t)
 	h := newServerOver(t, root)
 
 	page := get(t, h, "/ticket/ESC-1/0001").Body.String()
 	for _, want := range []string{
-		"htmx:beforeSwap",   // snapshot focus before the region is swapped
-		"htmx:afterSwap",    // restore it once the new content is in place
-		"preventScroll",     // refocus must not yank the reader
-		"setSelectionRange", // ...and it restores the caret/selection, not just focus
+		`hx-ext="morph"`,            // idiomorph enabled on the polling region...
+		`hx-swap="morph:innerHTML"`, // ...which morphs children instead of replacing them
+		`src="/static/idiomorph-ext.min.js"`, // the extension is served locally (no CDN)
+		`hx-preserve="true"`,                  // the typed-but-unsubmitted answer is kept
 	} {
 		if !strings.Contains(page, want) {
-			t.Errorf("detail page missing resolve-focus handler marker %q", want)
+			t.Errorf("detail page missing resolve-focus mechanism marker %q", want)
 		}
+	}
+
+	// The vendored extension is reachable and self-hosted.
+	ext := get(t, h, "/static/idiomorph-ext.min.js")
+	if ext.Code != 200 {
+		t.Fatalf("GET /static/idiomorph-ext.min.js = %d, want 200", ext.Code)
+	}
+	if body := ext.Body.String(); !strings.Contains(body, "defineExtension") {
+		t.Errorf("idiomorph-ext.min.js does not register an htmx extension")
 	}
 }
 

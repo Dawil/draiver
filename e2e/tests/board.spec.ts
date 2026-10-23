@@ -1,5 +1,14 @@
 import { test, expect } from "@playwright/test";
 
+// drvweb-025: deep-link highlighting is now pure CSS `.event:target`, kept alive
+// across the morph poll because the targeted node is reused in place — so assert
+// the native :target match rather than the retired `.is-target` JS mirror.
+const isTargeted = (page: import("@playwright/test").Page, testid: string) =>
+  page.evaluate(
+    (tid) => document.querySelector(`[data-testid="${tid}"]`)?.matches(":target") ?? false,
+    testid,
+  );
+
 test.describe("board control states (per attempt)", () => {
   test("each attempt lands in its own control state", async ({ page }) => {
     await page.goto("/");
@@ -34,7 +43,7 @@ test.describe("board control states (per attempt)", () => {
     // PROJ-101/0001's latest event is the escalation (#3).
     await expect(page).toHaveURL(/\/ticket\/PROJ-101\/0001#event-3$/);
     const esc = page.getByTestId("event-3");
-    await expect(esc).toHaveClass(/is-target/);
+    await expect.poll(() => isTargeted(page, "event-3")).toBe(true);
     await expect(esc).toContainText("Which currency rounding rule for JPY?");
     await expect(esc).toBeInViewport();
   });
@@ -46,7 +55,7 @@ test.describe("board control states (per attempt)", () => {
     // PROJ-102/0001's latest event is the review claim (#3).
     await expect(page).toHaveURL(/\/ticket\/PROJ-102\/0001#event-3$/);
     const review = page.getByTestId("event-3");
-    await expect(review).toHaveClass(/is-target/);
+    await expect.poll(() => isTargeted(page, "event-3")).toBe(true);
     await expect(review).toContainText("PR #142 open");
   });
 
@@ -73,5 +82,31 @@ test.describe("board control states (per attempt)", () => {
     // ...but the Pending attempt is not counted as Running (still PROJ-101/0002 +
     // PROJ-103/0001), so the tier stays a genuinely separate, quieter count.
     await expect(page.getByTestId("count-running")).toHaveText("2");
+  });
+
+  // drvweb-025 (AC 1): the board self-polls #board-region every 3s. With the morph
+  // swap, an unchanged poll makes zero DOM mutations, so a text selection a reader
+  // holds in a card survives the tick — the copy-out it used to clobber now works.
+  test("a text selection in a board card survives a 3s poll", async ({ page }) => {
+    await page.goto("/");
+    const card = page.getByTestId("attempt-link-PROJ-102-0001");
+    await expect(card).toBeVisible();
+
+    // Select the card's text via a real Range/Selection.
+    const selected = await card.evaluate((el) => {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const s = window.getSelection()!;
+      s.removeAllRanges();
+      s.addRange(r);
+      return s.toString();
+    });
+    expect(selected.trim().length).toBeGreaterThan(0);
+
+    // Let at least one 3s board poll land; morph leaves the unchanged card alone.
+    await page.waitForTimeout(3600);
+
+    const after = await page.evaluate(() => window.getSelection()?.toString() ?? "");
+    expect(after).toBe(selected);
   });
 });

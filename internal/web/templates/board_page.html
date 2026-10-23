@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/style.css">
   {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
+  <script src="/static/idiomorph-ext.min.js"></script>
   <script src="/static/favicon.js" defer></script>
 </head>
 <body>
@@ -24,9 +25,14 @@
        single region is cheap; quiescing it would strand the board until F5. */}}
   {{/* The poll URL carries the active view (drv-039) so a 3s refresh stays in the
        same board — code tickets or ledgers. The <main> attribute is baked once at
-       page load (htmx's innerHTML swap of #board-region never replaces <main>
-       itself), and the view toggle is a full-page navigation that re-bakes it. */}}
-  <main id="board-region" data-testid="board" hx-get="/board?view={{.View}}" hx-trigger="every 3s" hx-swap="innerHTML">
+       page load (the morph:innerHTML swap of #board-region morphs the children and
+       never replaces <main> itself), and the view toggle is a full-page navigation
+       that re-bakes it. */}}
+  {{/* drvweb-025: the poll morphs (idiomorph) rather than innerHTML-replacing, so a
+       3s tick with unchanged data makes zero DOM mutations — a text selection in a
+       card survives the refresh. hx-ext="morph" enables the vendored extension here;
+       a changed cell still updates, touching only the nodes that differ. */}}
+  <main id="board-region" data-testid="board" hx-get="/board?view={{.View}}" hx-trigger="every 3s" hx-ext="morph" hx-swap="morph:innerHTML">
     {{template "board.html" .}}
   </main>
 </body>
