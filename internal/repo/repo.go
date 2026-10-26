@@ -368,6 +368,14 @@ func (r *Repo) SetRepoSettings(repoPath string, upd config.RepoSettingsUpdate) (
 	return config.SetRepoSettings("", repoPath, upd)
 }
 
+// SetOverlayDir sets the global overlay_dir (drv-041) through the gateway, the one
+// global config knob the web settings UI writes. Like SetRepoSettings it folds through
+// the daemon's own config path (passing "") and merge-preserves every other key; an
+// empty dir clears the folder lookup. changed=false means the value was already set.
+func (r *Repo) SetOverlayDir(dir string) (bool, error) {
+	return config.SetOverlayDir("", dir)
+}
+
 // RepoSettings resolves a repo's effective settings (per-repo → global → builtin)
 // by loading the global config through the gateway. An empty resolved field hands
 // the builtin back to the caller (the repo's current branch, the pyramid's top rung).

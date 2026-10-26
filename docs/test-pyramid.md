@@ -333,6 +333,180 @@ must **not** overload the `TestRung` scalar (now the iteration ceiling). Renamin
 that an advisory rung is still *run* (to climb past it) is documented here rather than
 encoded in the name.
 
+## Overlays (drv-041): the pyramid from a separate, developer-owned repo
+
+`.test-pyramid.yaml` (and the `features/`, review-env scripts, and unit tests it
+drives) is partly a *development-environment* feature. A team that has not adopted
+draiver should not be forced to carry those files in their shared repo. drv-041
+lets a **single, local-first developer** keep their own test tooling in a
+**separate, developer-owned git repo**, pointed at **only via `config.json`** —
+nothing is added to the target repo's version control.
+
+**Sharing with a team is explicitly out of scope.** If tooling is to be shared,
+the simpler answer is to colocate it in the one repo; the overlay is personal dev
+tooling, not a team-distribution mechanism. A backup remote on the overlay is
+optional and entirely the developer's business — draiver never provisions it.
+
+The overlay is itself a repo so its per-attempt worktrees stay isolated and run in
+parallel, exactly like the codebase worktrees draiver already cuts.
+
+### Resolution model — in-repo always wins
+
+For a codebase at local path `P` (the attempt's `repo`), the pyramid source is
+resolved in order (`internal/overlay` `Resolve`, a pure function with no side
+effects; step 1 is the caller's cheap `pyramid.Load` probe):
+
+1. **In-repo pyramid wins.** If the codebase worktree has a `.test-pyramid.yaml`,
+   use it and ignore overlays entirely — today's behaviour, unchanged. There is
+   **no layering** of an overlay on top of an in-repo pyramid.
+2. **Explicit per-codebase overlay.** Else, if `repos.<P>` carries an explicit
+   `overlay` path, use that repo. It is **not** existence-checked at resolve time:
+   a mispoint must fail loudly when the worktree is cut, never silently fall
+   through and mask the misconfiguration.
+3. **Global default folder.** Else, if `overlay_dir` is set and
+   `<overlay_dir>/<codebase>` exists and is a git repo, use it. A missing or
+   non-git candidate cleanly falls through, so `overlay_dir` may cover only some
+   of a developer's repos.
+4. **None.** Else no pyramid — `draiver test` stays a successful no-op, exactly as
+   a repo with no pyramid file always has.
+
+`<codebase>` for the folder lookup is the codebase repo directory's **basename**.
+The explicit per-codebase `overlay` setting is the escape hatch for a basename
+collision (two repos both named `api`).
+
+### Settings (`config.json`, outside version control)
+
+No new file — the overlay knobs live in the existing operator config
+(`internal/config`; `~/.draiver/config.json` by default):
+
+- **Global `overlay_dir`** — a folder of developer-owned overlay repos, looked up
+  by codebase basename. A new top-level `Config` key, written global-only via
+  `config.SetOverlayDir` (merge-preserving `atomicWrite`, the same read-modify-write
+  the per-repo settings use).
+- **Per-codebase `overlay`** — an explicit overlay location on `RepoSettings`,
+  keyed by the codebase path under `repos.<path>`, the twin of the existing
+  `review_env` / `default_remote` fields. Resolved via `Config.RepoSettings` →
+  `Resolved`; partial-edited via `RepoSettingsUpdate` (`*string`, nil = untouched).
+  Set at attempt time but **persisted to the codebase's settings** so it sticks for
+  later attempts (`SetRepoSettings` → `atomicWrite`).
+
+### Ownership & worktree model — operated in place
+
+**Developer-owned, operated in place — draiver does NOT clone or manage a mirror.**
+`internal/overlay` `Cut` materialises the overlay as a per-attempt worktree with
+the same `git worktree add` pattern the codebase and review-env worktrees already
+use (`internal/worktree`). The developer lives in and hand-edits the overlay repo
+directly; draiver never buries it in the cache dir.
+
+- Baseline is the overlay repo's **default branch** (track-default, not a pinned
+  ref — the overlay repo is operated in place, so its HEAD *is* that default
+  branch). A writable attempt cuts `draiver/<ticket>/<attempt>` from it, in its own
+  worktree under the cache dir, mirroring the codebase branch so parallel attempts
+  stay isolated.
+- Overlay edits an attempt makes land on `draiver/<ticket>/<attempt>` in the
+  overlay repo, **never on its main** — the overlay's main is left untouched.
+
+### Execution contract — one cwd, two env vars
+
+The pyramid's `run`/`up`/`down`/healthcheck commands and `cucumber_json` /
+`artifacts` paths resolve against **one root** today. With overlay files in a
+second directory the contract is fixed as (`internal/overlay` `ScriptEnv`,
+`cmd/test.go`):
+
+- **cwd = the codebase worktree, always** (overlay or not). This is what keeps a
+  local pyramid working untouched and keeps a pyramid portable between in-repo and
+  overlay. `cucumber_json`/`artifacts` continue to resolve against the codebase
+  root, where draiver already captures them.
+- **`DRAIVER_CODEBASE_DIR`** is exported unconditionally when an overlay is active
+  → the codebase worktree (the cwd): a reliable absolute anchor for a script that
+  `cd`s away and needs to get back to the code under test.
+- **`DRAIVER_OVERLAY_DIR`** is exported **only when an overlay is active** → the
+  overlay worktree. Overlay-authored commands reach overlay assets explicitly, e.g.
+  `run: go run $DRAIVER_OVERLAY_DIR/features/acceptance`.
+- A local (in-repo) pyramid references **neither** variable and runs byte-for-byte
+  unchanged — no cwd change, no extra environment. Backward compatible.
+
+> **Env-var naming (open decision, resolved).** The names are
+> **`DRAIVER_CODEBASE_DIR`** and **`DRAIVER_OVERLAY_DIR`** — *not*
+> `DRAIVER_TARGET_DIR` / `DRAIVER_REPO_DIR`. "Codebase" reads as the plain-English
+> counterpart to "overlay" at the point of use (`$DRAIVER_CODEBASE_DIR` vs
+> `$DRAIVER_OVERLAY_DIR`); the provenance field stays `repo`, an internal name
+> whose reuse in a shell-facing variable would be the more confusing of the two.
+
+### `draiver test create-overlay` — deterministic opt-in
+
+A first-class subcommand (not an ad-hoc `git init`), so a coding agent has a
+**deterministic, repeatable** way to opt a codebase in (`cmd/test_overlay.go`). Run
+from inside the attempt's codebase worktree, it:
+
+- creates the overlay repo at the resolved location (explicit per-codebase path,
+  else `<overlay_dir>/<codebase>`), `git init`s it, scaffolds a starter skeleton
+  (a minimal `.test-pyramid.yaml` whose `unit` rung is a trivially-green `true`
+  placeholder, a `features/` dir, `review-env/` `up`/`down`/`healthcheck` script
+  stubs, a `README` and `.gitignore`), makes the initial commit (so the default
+  branch exists for a worktree to cut from), and records the per-codebase `overlay`
+  setting so resolution finds it next time;
+- is **idempotent and safe**: it refuses — writing nothing — if the codebase
+  already has an in-repo `.test-pyramid.yaml` (in-repo wins; an overlay would be a
+  silent no-op) or if an overlay (or any non-empty dir) already occupies the
+  target;
+- leaves remote setup to the developer (optional backup).
+
+> **Command placement (open decision, resolved).** `draiver test create-overlay`,
+> not a top-level `draiver overlay {init,status,…}` group. v1 has exactly one
+> overlay verb; it reads as a mode of `draiver test`, which is the command the
+> overlay exists to serve. The top-level group is the right move only if more
+> overlay verbs appear.
+
+> **Scaffold contents (open decision, resolved).** A `features/` + `review-env/`
+> skeleton, not a bare `.test-pyramid.yaml` only — the extra dirs and script stubs
+> cost nothing to write and show the developer the shape of a full overlay (where
+> features and review-env scripts go) rather than leaving them to rediscover it.
+
+### Provenance
+
+The overlay repo **and the exact commit used** are recorded in the attempt's
+`attempt.md` provenance (`internal/attempt` `Meta.Overlay`/`OverlayCommit`,
+`internal/repo` `Provenance`/`SetProvenance`), alongside `Repo`/`Base`, so a run or
+review env is explainable after the fact — and so `draiver review` and the board
+can surface the overlay even before any `draiver test` has run.
+
+### Review behaviour — advisory, never gating
+
+`cmd/review_overlay.go`, wired in `review.go` **after** `reviewGate` so it can only
+*append* links and print — it can never turn a clean codebase review into a
+refusal:
+
+- When the attempt produced overlay changes, review surfaces a **second compare URL
+  / diff** beside the codebase one. With a review remote on the overlay (reusing
+  `PrimaryRemote` / `DefaultRemote`, link-validated against `ReviewLinkHosts`) it
+  shows a compare URL; local-only, or an ambiguous multi-remote, degrades
+  gracefully to the branch name + a `git -C <overlay> diff main..branch` hint — not
+  an error.
+- The overlay change is **advisory-but-loud**: it does not gate the codebase
+  review, but review warns prominently that an **unmerged overlay change** exists
+  and the codebase will regress on the next run without it (the two repos are
+  coupled even though they are separate).
+- Review runs overlay hygiene: a **dirty overlay main** gets an advisory nudge (the
+  owner may have legitimate WIP) — a heads-up, not a gate.
+
+### Web UI (`internal/web`)
+
+- **Settings.** The per-codebase `overlay` and the global `overlay_dir` are both
+  edited from the existing repo-settings panel on the attempt page — `overlay` as a
+  twin of `review_env` through `SetRepoSettings`; `overlay_dir`, being global,
+  through a separate `SetOverlayDir` gateway. Both round-trip through `config.json`
+  without clobbering other keys.
+- **Provenance** is surfaced read-only on the attempt detail header
+  (`overlay: <repo> @ <shortSHA>`).
+- **Review** renders the second compare URL / diff and the advisory
+  overlay-dirty / unmerged-overlay warnings.
+- **Badge fallback.** The branch-read path (`internal/web/pyramid.go` →
+  `worktree.FileAtBranch`, via `overlayPyramid`) resolves the pyramid from the
+  overlay when the codebase has none, so the badge works even without a live
+  checkout. HEAD and dirtiness stay the **codebase's** — the overlay only supplies
+  the rung *structure*, so the green-at-HEAD fold is unchanged.
+
 ## Why this is on-thesis, not a bolt-on
 
 Three of the platform's core values (`coding-agent-platform.md` §"Core values")
@@ -404,6 +578,7 @@ Tier-2/Tier-3 (`draiverctl.md`): engine = `drvctl`, UI = `drvweb`.
 | **drvweb-021** | Board/attempt view — render the attempt's cleared rung (a small pyramid badge), distinguishing green-at-HEAD from stale (result exists but `commit` ≠ tip). | 048 |
 | **drv-012** | **Environments** — a top-level `environments:` list (named `{up?, down?, healthchecks[]}` contexts) + an `environment:` binding on levels, parsed/validated in `internal/pyramid`; `draiver test` honours up → healthcheck → run → down with the control-outcome exit codes (up=6/escalate, healthcheck=7/block, run=1/code-fault); the badge surfaces the targeted env. The concrete realisation of the deferred vocabulary below. | 047, 048, drvweb-021 |
 | **drv-016** | **BDD execution rung** — a rung's optional `cucumber_json:` marks it a BDD/acceptance rung: its `run` shells out to the repo's configured BDD runner (never hardcoded) over an `environment:`, and after the run `draiver test` reads the emitted **cucumber-JSON** via `internal/cucumber` (the runner-agnostic interchange), summarising it best-effort (pass or fail) without changing the verdict. Feeds drv-017 (artefact storage) / drv-018 (HTML). | 012 |
+| **drv-041** | **Overlays** — resolve the pyramid from a separate, developer-owned repo pointed at only via `config.json` (global `overlay_dir`, per-codebase `overlay`), in-repo always wins; cwd stays the codebase worktree with `DRAIVER_CODEBASE_DIR`/`DRAIVER_OVERLAY_DIR` exported; `internal/overlay` cuts a per-attempt worktree; provenance records the overlay repo + commit; `draiver test create-overlay` scaffolds + registers one; review surfaces a second compare URL advisory-but-loud, never gating. Settings-only, zero version-control footprint. | 047, 048, 049 |
 
 Separately filed: **drv-010** — dogfood the pyramid on this repo with a
 Testcontainers integration rung (depends in spirit on drv-009).

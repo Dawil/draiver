@@ -20,6 +20,11 @@ type Provenance struct {
 	Base  *string
 	Tool  *string
 	Model *string
+	// Overlay and OverlayCommit record the test-pyramid overlay (drv-041) a run
+	// resolved its pyramid from and the exact commit it used; nil leaves them untouched
+	// (an in-repo pyramid, or no overlay, writes neither).
+	Overlay       *string
+	OverlayCommit *string
 }
 
 // SetProvenance applies a partial provenance update to an attempt's attempt.md and
@@ -48,6 +53,14 @@ func (r *Repo) SetProvenance(ticket, att string, p Provenance) (bool, error) {
 	}
 	if p.Model != nil {
 		meta.Model = *p.Model
+		changed = true
+	}
+	if p.Overlay != nil {
+		meta.Overlay = *p.Overlay
+		changed = true
+	}
+	if p.OverlayCommit != nil {
+		meta.OverlayCommit = *p.OverlayCommit
 		changed = true
 	}
 	if !changed {

@@ -205,15 +205,22 @@ func runDetachedTest(ctx context.Context, cmd *cobra.Command, ticket, att, rung,
 		return err
 	}
 
-	p, err := pyramid.Load(wd)
+	p, active, extraEnv, err := resolvePyramid(ctx, wd)
 	if err != nil {
-		return err
+		// A configured overlay that cannot be materialised (unusable repo, no pyramid):
+		// answer the marker as a failure rather than leave the worker parked forever.
+		return recordDetachedResult(root, ticket, att, rung, "", launchSeq, logRel, false, nil,
+			fmt.Sprintf("Could not resolve the pyramid to run: %v.", err))
 	}
 	if p == nil {
 		// The pyramid vanished between launch and run — answer the marker as a failure
 		// rather than leave the worker parked forever.
 		return recordDetachedResult(root, ticket, att, rung, "", launchSeq, logRel, false, nil,
-			fmt.Sprintf("No %s in %s at run time — nothing to test.", pyramid.FileName, wd))
+			fmt.Sprintf("No %s in %s and no overlay at run time — nothing to test.", pyramid.FileName, wd))
+	}
+	if active != nil {
+		fmt.Fprintf(out, "using test-pyramid overlay %s (via %s) @ %s\n", active.Repo, active.Via, shortSHA(active.Commit))
+		recordOverlayProvenance(cmd, wd, active)
 	}
 	levels, ok := levelsUpTo(p, rung)
 	if !ok {
@@ -221,7 +228,7 @@ func runDetachedTest(ctx context.Context, cmd *cobra.Command, ticket, att, rung,
 			fmt.Sprintf("Rung %q is no longer a level in %s (levels: %s).", rung, pyramid.FileName, rungNames(p)))
 	}
 
-	targetGreen, advisoryReds, failErr := climb(ctx, cmd, wd, p, levels)
+	targetGreen, advisoryReds, failErr := climb(ctx, cmd, wd, p, levels, extraEnv)
 
 	sha, shaErr := worktree.HeadSHA(ctx, wd)
 	if shaErr != nil {

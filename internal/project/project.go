@@ -83,6 +83,14 @@ type Attempt struct {
 	Repo     string // local git working-tree path the attempt targets (from attempt.md)
 	Base     string // branch the attempt lands back into (from attempt.md; drvctl-021)
 
+	// Overlay and OverlayCommit are the test-pyramid overlay (drv-041) a `draiver test`
+	// run resolved its pyramid from and the exact overlay commit it used, recorded in
+	// attempt.md provenance so a run or review env is explainable after the fact. Empty
+	// when no overlay was active (an in-repo pyramid, or none). Surfaced read-only on the
+	// board/attempt view.
+	Overlay       string
+	OverlayCommit string
+
 	State           State
 	Enabled         bool // directly opted into daemon supervision (durable; see DeriveEnabled)
 	Archived        bool // taken off the board (see DeriveArchived)
@@ -355,6 +363,7 @@ func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {
 	return Attempt{
 		Ticket: ticket, ID: id, Title: title, Type: ticketType, Assignee: spec.Assignee,
 		Tool: am.Tool, Model: am.Model, Repo: am.Repo, Base: am.Base,
+		Overlay: am.Overlay, OverlayCommit: am.OverlayCommit,
 		State: state, Enabled: DeriveEnabled(events), Archived: DeriveArchived(events),
 		Supervision: DeriveSupervision(events),
 		Events:      events, OpenEscalations: open,

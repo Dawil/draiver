@@ -17,6 +17,7 @@ import (
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/overlay"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
@@ -55,16 +56,22 @@ var testCmd = &cobra.Command{
 			return fmt.Errorf("resolve working directory: %w", err)
 		}
 
-		p, err := pyramid.Load(wd)
+		out := cmd.OutOrStdout()
+		p, active, extraEnv, err := resolvePyramid(ctx, wd)
 		if err != nil {
 			return err
 		}
-		out := cmd.OutOrStdout()
 		if p == nil {
-			// A repo that declares no pyramid is a valid state, not an error: there is
-			// simply nothing to run.
-			fmt.Fprintf(out, "no %s in %s — nothing to test\n", pyramid.FileName, wd)
+			// Neither an in-repo pyramid nor a resolvable overlay (drv-041 resolution
+			// step 4): a valid state, not an error — there is simply nothing to run.
+			fmt.Fprintf(out, "no %s in %s and no overlay configured — nothing to test\n", pyramid.FileName, wd)
 			return nil
+		}
+		if active != nil {
+			// An overlay is driving this run: say which repo + commit, and record it in the
+			// attempt's provenance so the run is explainable after the fact (drv-041).
+			fmt.Fprintf(out, "using test-pyramid overlay %s (via %s) @ %s\n", active.Repo, active.Via, shortSHA(active.Commit))
+			recordOverlayProvenance(cmd, wd, active)
 		}
 
 		// The default climb target is the highest *required* rung (drv-025): what the
@@ -122,7 +129,7 @@ var testCmd = &cobra.Command{
 		// depend on lower suites *passing*, and otherwise a required rung above an
 		// advisory one would be unreachable and the gate unsatisfiable. A failing rung
 		// logs nothing either way — the log holds only passing results by construction.
-		targetGreen, advisoryReds, failErr := climb(ctx, cmd, wd, p, levels)
+		targetGreen, advisoryReds, failErr := climb(ctx, cmd, wd, p, levels, extraEnv)
 		if failErr != nil {
 			return failErr
 		}
@@ -265,10 +272,10 @@ func testResultBody(target, sha, runKey string) string {
 // A caller that must preserve exit-code semantics (the synchronous CLI) returns
 // failErr verbatim; the detached runner instead swallows it and records a failing
 // result, since its whole point is to land a verdict on the log rather than exit.
-func climb(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, levels []pyramid.Level) (targetGreen bool, advisoryReds []string, failErr error) {
+func climb(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, levels []pyramid.Level, extraEnv []string) (targetGreen bool, advisoryReds []string, failErr error) {
 	out := cmd.OutOrStdout()
 	for i, lv := range levels {
-		err := runRung(ctx, cmd, wd, p, lv)
+		err := runRung(ctx, cmd, wd, p, lv, extraEnv)
 		if err == nil {
 			if i == len(levels)-1 {
 				targetGreen = true
@@ -299,7 +306,7 @@ func climb(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyrami
 // up even when `up` failed) and is best-effort: a non-zero `down` is a warning and
 // never changes the rung's verdict, so teardown trouble can never un-close a
 // ticket.
-func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, lv pyramid.Level) error {
+func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, lv pyramid.Level, extraEnv []string) error {
 	out := cmd.OutOrStdout()
 	env, hasEnv := p.EnvironmentFor(lv)
 
@@ -308,7 +315,7 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 		// still gets torn down. Best-effort — a `down` failure is only warned about.
 		defer func() {
 			fmt.Fprintf(out, "== %s/%s: down: %s\n", lv.Name, env.Name, env.Down)
-			if err := runShell(ctx, cmd, wd, env.Down); err != nil {
+			if err := runShell(ctx, cmd, wd, env.Down, extraEnv); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: environment %q down failed (ignored): %v\n", env.Name, err)
 			}
 		}()
@@ -316,7 +323,7 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 
 	if hasEnv && strings.TrimSpace(env.Up) != "" {
 		fmt.Fprintf(out, "== %s/%s: up: %s\n", lv.Name, env.Name, env.Up)
-		if err := runShell(ctx, cmd, wd, env.Up); err != nil {
+		if err := runShell(ctx, cmd, wd, env.Up, extraEnv); err != nil {
 			return &exitError{code: ExitEnvUp, msg: fmt.Sprintf("environment %q up failed — infrastructure fault, not your code; escalate: %v", env.Name, err)}
 		}
 	}
@@ -324,14 +331,14 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 	if hasEnv {
 		for _, hc := range env.Healthchecks {
 			fmt.Fprintf(out, "== %s/%s: healthcheck %s: %s\n", lv.Name, env.Name, hc.Name, hc.Script)
-			if err := runShell(ctx, cmd, wd, hc.Script); err != nil {
+			if err := runShell(ctx, cmd, wd, hc.Script, extraEnv); err != nil {
 				return &exitError{code: ExitBlocked, msg: fmt.Sprintf("environment %q healthcheck %q red — dependency not ready (blocked, not a code fault): %v", env.Name, hc.Name, err)}
 			}
 		}
 	}
 
 	fmt.Fprintf(out, "== %s: %s\n", lv.Name, lv.Run)
-	runErr := runShell(ctx, cmd, wd, lv.Run)
+	runErr := runShell(ctx, cmd, wd, lv.Run, extraEnv)
 
 	// A BDD/acceptance rung (drv-016) declares the cucumber-JSON its runner writes.
 	// Capture it whether the run passed or failed — a red run's report is exactly
@@ -373,13 +380,112 @@ func captureCucumber(cmd *cobra.Command, wd, rung, rel string) {
 // runShell runs one shell command in wd, wiring its stdio to the cobra command's
 // streams — the single exec seam every rung step (up/healthcheck/run/down) goes
 // through, so output ordering and interpretation are identical across them.
-func runShell(ctx context.Context, cmd *cobra.Command, wd, script string) error {
+//
+// extraEnv is the overlay execution contract (drv-041): when an overlay is active it
+// carries DRAIVER_CODEBASE_DIR / DRAIVER_OVERLAY_DIR, layered over the inherited
+// environment. For a local, in-repo pyramid it is empty and rc.Env is left unset, so
+// the command inherits os.Environ() exactly as before — byte-for-byte unchanged.
+func runShell(ctx context.Context, cmd *cobra.Command, wd, script string, extraEnv []string) error {
 	rc := exec.CommandContext(ctx, "sh", "-c", script)
 	rc.Dir = wd
 	rc.Stdout = cmd.OutOrStdout()
 	rc.Stderr = cmd.ErrOrStderr()
 	rc.Stdin = os.Stdin
+	if len(extraEnv) > 0 {
+		rc.Env = append(os.Environ(), extraEnv...)
+	}
 	return rc.Run()
+}
+
+// resolvePyramid resolves which pyramid a `draiver test` run executes from the codebase
+// worktree wd, honouring the drv-041 overlay resolution model. The codebase worktree is
+// always the cwd; the pyramid itself may come from it (in-repo) or from a separate,
+// developer-owned overlay repo cut as a per-attempt worktree. It returns the loaded
+// pyramid, the active overlay (nil when none), and the environment additions the runner
+// layers over os.Environ() (nil when no overlay, so a local pyramid runs byte-for-byte
+// as before). A nil pyramid with a nil error is the "nothing to test" no-op state (no
+// in-repo file and no overlay) — resolution step 4.
+//
+// It mirrors repoRungForWorktree's best-effort posture about *finding* an overlay: a
+// non-attempt branch, a missing attempt, an unreadable config, or no overlay setting all
+// leave "no overlay" rather than breaking `test`. But once an overlay IS resolved, a
+// genuine fault materialising it (an unusable overlay repo, an overlay with no pyramid)
+// is a hard error — a configured overlay that cannot run is a misconfiguration to
+// surface, not to silently skip.
+func resolvePyramid(ctx context.Context, wd string) (*pyramid.Pyramid, *overlay.Active, []string, error) {
+	// 1. In-repo wins: a codebase worktree carrying its own .test-pyramid.yaml ignores
+	//    overlays entirely — today's behaviour, no cwd change, no env vars.
+	p, err := pyramid.Load(wd)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if p != nil {
+		return p, nil, nil, nil
+	}
+
+	// 2-4. No in-repo pyramid: resolve an overlay from settings. Finding one needs the
+	// attempt (→ its recorded codebase repo, the resolution key) and the operator config.
+	key, err := worktree.Identify(ctx, wd)
+	if err != nil {
+		return nil, nil, nil, nil // not an attempt branch — nothing to resolve against
+	}
+	root, err := resolveRoot()
+	if err != nil {
+		return nil, nil, nil, nil
+	}
+	meta, err := attempt.LoadMeta(root, key.Ticket, key.Attempt)
+	if err != nil || strings.TrimSpace(meta.Repo) == "" {
+		return nil, nil, nil, nil
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	res := cfg.RepoSettings(meta.Repo)
+	loc, ok, err := overlay.Resolve(meta.Repo, res.Overlay, cfg.OverlayDir)
+	if err != nil || !ok {
+		return nil, nil, nil, err
+	}
+
+	// An overlay is configured: materialise it (cut the per-attempt worktree) and load
+	// its pyramid. From here a failure is a loud misconfiguration, not a silent no-op.
+	active, err := overlay.Cut(ctx, loc, key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	op, err := pyramid.Load(active.WorktreePath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if op == nil {
+		return nil, nil, nil, fmt.Errorf(
+			"overlay repo %s (resolved via %s) carries no %s — nothing to run; scaffold one with `draiver test create-overlay`, or add the file to the overlay repo",
+			loc.Repo, loc.Via, pyramid.FileName)
+	}
+	return op, &active, active.ScriptEnv(wd), nil
+}
+
+// recordOverlayProvenance records the active overlay repo + the exact commit used into
+// the attempt's attempt.md provenance (drv-041), so a run or a review env is explainable
+// after the fact. It is best-effort: a resolution/write failure is warned about but never
+// fails the test run, mirroring repoRungForWorktree's never-break-`test`-on-metadata
+// posture.
+func recordOverlayProvenance(cmd *cobra.Command, wd string, active *overlay.Active) {
+	ctx := cmd.Context()
+	key, err := worktree.Identify(ctx, wd)
+	if err != nil {
+		return
+	}
+	root, err := resolveRoot()
+	if err != nil {
+		return
+	}
+	if _, err := repo.New(root, resolveActor()).SetProvenance(key.Ticket, key.Attempt, repo.Provenance{
+		Overlay:       &active.Repo,
+		OverlayCommit: &active.Commit,
+	}); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not record overlay provenance (ignored): %v\n", err)
+	}
 }
 
 // repoRungForWorktree resolves the repo's configured default_test_rung (drv-011)
