@@ -53,6 +53,16 @@ type Meta struct {
 	// "reserved metrics room" made real (drvctl-031). Nil until an attempt retires
 	// with a metered session, so it renders only once there is something to record.
 	Metrics *agent.Metrics `yaml:"metrics,omitempty"`
+
+	// Overlay is the test-pyramid overlay repo (drv-041) a `draiver test` run resolved
+	// its pyramid from when the codebase carries no in-repo .test-pyramid.yaml — the
+	// developer-owned repo, recorded so a run or review env is explainable after the
+	// fact. OverlayCommit is the exact overlay commit the run used. Both are
+	// machine-written by `draiver test` (like metrics), not hand-editable hints, and
+	// render only once recorded; empty when no overlay was active (an in-repo pyramid,
+	// or none at all).
+	Overlay       string `yaml:"overlay,omitempty"`
+	OverlayCommit string `yaml:"overlay_commit,omitempty"`
 }
 
 // New identifies the parameters for creating an attempt.
@@ -318,6 +328,14 @@ func metaFrontmatter(m Meta) string {
 	// lines above it has no commented placeholder. parseMeta reads it straight back.
 	if m.Metrics != nil {
 		b.WriteString(yamlMarshalLine(map[string]agent.Metrics{"metrics": *m.Metrics}))
+	}
+	// Overlay + OverlayCommit render only when a `draiver test` run recorded them
+	// (drv-041) — machine-written, like metrics above, so no commented placeholder.
+	if strings.TrimSpace(m.Overlay) != "" {
+		b.WriteString(metaLine("overlay", m.Overlay))
+	}
+	if strings.TrimSpace(m.OverlayCommit) != "" {
+		b.WriteString(metaLine("overlay_commit", m.OverlayCommit))
 	}
 	return b.String()
 }

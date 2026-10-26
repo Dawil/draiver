@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/overlay"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -232,13 +234,45 @@ func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyr
 		if err != nil {
 			return pyramidState{}, false
 		}
+		if p == nil {
+			// No in-repo pyramid: the badge's rungs come from the overlay (drv-041), while
+			// HEAD and dirtiness stay the CODEBASE's — a `draiver test` run logs its
+			// test-result at the codebase HEAD, so the green-at-HEAD fold is unchanged.
+			p = s.overlayPyramid(ctx, a.Repo)
+		}
 		return pyramidState{Pyramid: p, Head: head, Dirty: dirty}, true
 	}
 	// No live checkout — the attempt retired into Review and the daemon reclaimed
 	// its worktree, but the branch survives. Read the same two facts from the base
 	// repo via the branch ref, so the badge stays visible exactly where a reviewer
 	// wants it. Still live (git's current ref), still no stored HEAD SHA.
-	return s.branchPyramidState(ctx, wm, key)
+	return s.branchPyramidState(ctx, wm, key, a.Repo)
+}
+
+// overlayPyramid resolves a codebase's test-pyramid overlay (drv-041) and loads the
+// pyramid from the overlay repo in place, for the badge's branch-read path when the
+// codebase carries no in-repo .test-pyramid.yaml. It is best-effort like the rest of
+// the badge: no overlay configured, an unresolvable overlay, or a malformed overlay
+// pyramid all yield nil (the caller renders nothing). The overlay repo is developer-
+// owned and on disk, so reading its working-tree pyramid needs no checkout — which is
+// exactly why the badge works even without a live codebase worktree.
+func (s *Server) overlayPyramid(ctx context.Context, repoPath string) *pyramid.Pyramid {
+	if repoPath == "" {
+		return nil
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil
+	}
+	loc, ok, err := overlay.Resolve(repoPath, cfg.RepoSettings(repoPath).Overlay, cfg.OverlayDir)
+	if err != nil || !ok {
+		return nil
+	}
+	p, err := pyramid.Load(loc.Repo)
+	if err != nil {
+		return nil
+	}
+	return p
 }
 
 // branchPyramidState is gatherPyramidState's fallback when no live worktree exists:
@@ -251,18 +285,29 @@ func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyr
 // checkout the daemon keeps warm while dirty is still found by Locate, so it takes
 // the live path above where DirtyAt observes it — this fallback is only reached once
 // the worktree is gone.
-func (s *Server) branchPyramidState(ctx context.Context, wm *worktree.Manager, key worktree.Key) (pyramidState, bool) {
+func (s *Server) branchPyramidState(ctx context.Context, wm *worktree.Manager, key worktree.Key, repoPath string) (pyramidState, bool) {
 	head, ok, err := wm.BranchSHA(ctx, key)
 	if err != nil || !ok {
 		return pyramidState{}, false
 	}
+	var p *pyramid.Pyramid
 	data, ok, err := wm.FileAtBranch(ctx, key, pyramid.FileName)
-	if err != nil || !ok {
-		return pyramidState{}, false
-	}
-	p, err := pyramid.Parse(data)
 	if err != nil {
 		return pyramidState{}, false
+	}
+	if ok {
+		if p, err = pyramid.Parse(data); err != nil {
+			return pyramidState{}, false
+		}
+	}
+	if p == nil {
+		// No .test-pyramid.yaml committed on the branch: fall back to the overlay's
+		// pyramid (drv-041), keeping HEAD the codebase branch tip. No overlay → nil → the
+		// caller renders nothing, exactly the old behaviour for a repo with no pyramid.
+		p = s.overlayPyramid(ctx, repoPath)
+		if p == nil {
+			return pyramidState{}, false
+		}
 	}
 	return pyramidState{Pyramid: p, Head: head, Dirty: false}, true
 }

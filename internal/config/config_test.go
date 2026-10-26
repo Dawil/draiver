@@ -112,6 +112,92 @@ func TestLoad_ReviewLinkHosts(t *testing.T) {
 	}
 }
 
+func TestLoad_OverlayDir(t *testing.T) {
+	// Omitted → empty (the folder lookup is disabled; drv-041).
+	c, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OverlayDir != "" {
+		t.Errorf("default OverlayDir = %q, want empty (omitted)", c.OverlayDir)
+	}
+
+	// Set → used verbatim.
+	path := writeConfig(t, `{"overlay_dir": "/home/dev/overlays"}`)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OverlayDir != "/home/dev/overlays" {
+		t.Errorf("OverlayDir = %q, want /home/dev/overlays", c.OverlayDir)
+	}
+}
+
+func TestSetOverlayDir_RoundTripPreservesOtherKeys(t *testing.T) {
+	// The global overlay_dir writes through the same merge-preserving path as the
+	// per-repo settings, so an unrelated repo entry and the primary_remote survive it.
+	path := writeConfig(t, `{"primary_remote": "forgejo", "repos": {"/r": {"default_remote": "origin"}}}`)
+
+	changed, err := SetOverlayDir(path, "/home/dev/overlays")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("changed = false, want true for a new overlay_dir")
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OverlayDir != "/home/dev/overlays" {
+		t.Errorf("overlay_dir = %q, want /home/dev/overlays", c.OverlayDir)
+	}
+	if c.PrimaryRemote != "forgejo" || c.Repos["/r"].DefaultRemote != "origin" {
+		t.Errorf("unrelated keys clobbered: primary=%q repo=%+v", c.PrimaryRemote, c.Repos["/r"])
+	}
+
+	// A re-submit of the same value is a no-op (changed=false, no churn).
+	if changed, err := SetOverlayDir(path, "/home/dev/overlays"); err != nil || changed {
+		t.Fatalf("re-set same value: changed=%v err=%v, want changed=false", changed, err)
+	}
+	// Clearing it disables the folder lookup.
+	if _, err := SetOverlayDir(path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(path); err != nil || c.OverlayDir != "" {
+		t.Fatalf("after clear: overlay_dir=%q err=%v, want empty", c.OverlayDir, err)
+	}
+}
+
+func TestOverlay_PerRepoRoundTripAndResolve(t *testing.T) {
+	// The per-codebase overlay location round-trips through config.json and surfaces on
+	// Resolved — the explicit escape hatch for a basename collision (drv-041).
+	path := writeConfig(t, `{"overlay_dir": "/home/dev/overlays", "repos": {"/home/dev/api": {"default_remote": "forgejo"}}}`)
+
+	overlay := "/home/dev/overlays/api-v2"
+	if _, err := SetRepoSettings(path, "/home/dev/api", RepoSettingsUpdate{Overlay: &overlay}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The explicit overlay stored and resolved, without clobbering the sibling key or the
+	// global overlay_dir.
+	if got := c.Repos["/home/dev/api"].Overlay; got != overlay {
+		t.Errorf("stored per-repo overlay = %q, want %q", got, overlay)
+	}
+	if got := c.Repos["/home/dev/api"].DefaultRemote; got != "forgejo" {
+		t.Errorf("default_remote = %q, want forgejo (preserved through overlay write)", got)
+	}
+	if c.OverlayDir != "/home/dev/overlays" {
+		t.Errorf("overlay_dir = %q, want preserved", c.OverlayDir)
+	}
+	if got := c.RepoSettings("/home/dev/api").Overlay; got != overlay {
+		t.Errorf("resolved Overlay = %q, want %q", got, overlay)
+	}
+}
+
 func TestLoad_PrimaryRemote(t *testing.T) {
 	// Omitted → empty (unconfigured; the agent falls back to the sole remote or
 	// surfaces the ambiguity when there are several).

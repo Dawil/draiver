@@ -124,6 +124,16 @@ type Config struct {
 	// is marked Done.
 	ReviewEnvMaxAgeMinutes int `json:"review_env_max_age_minutes"`
 
+	// OverlayDir is a global folder of developer-owned test-pyramid overlay repos
+	// (drv-041), looked up by codebase basename: a codebase at path P with no in-repo
+	// .test-pyramid.yaml and no explicit per-repo Overlay resolves its pyramid from
+	// <OverlayDir>/<basename P> when that is a git repo. It is the zero-config escape
+	// hatch for the solo developer whose team has not adopted draiver — their personal
+	// dev tooling lives in a separate, settings-only repo so nothing is added to the
+	// shared repo's version control. Empty (the default) disables the folder lookup;
+	// an explicit per-repo Overlay still works regardless. See internal/overlay.
+	OverlayDir string `json:"overlay_dir"`
+
 	// Repos holds per-repo setting overrides keyed by the repo path — the same
 	// string an attempt records as its `repo`/provenance Repo (drv-011). Some knobs
 	// are properties of a repo, not a single attempt (which remote is the forge,
@@ -160,6 +170,14 @@ type RepoSettings struct {
 	// for the panel to appear — a validation the consuming web/controlplane layer runs,
 	// not this dependency-free package. There is no global default to fall through to.
 	ReviewEnvironment string `json:"review_environment"`
+	// Overlay is this codebase's explicit test-pyramid overlay repo location (drv-041):
+	// the developer-owned git repo whose .test-pyramid.yaml (+ features/, review-env
+	// scripts, unit tests) draiver runs when the codebase worktree carries no in-repo
+	// .test-pyramid.yaml. It is the escape hatch for a basename collision the global
+	// overlay_dir folder lookup cannot disambiguate (two repos both named `api`), and
+	// it wins over that lookup. Empty → fall through to <overlay_dir>/<basename>, then
+	// to no overlay at all. There is no global default to fall through to.
+	Overlay string `json:"overlay"`
 }
 
 // Resolved is a repo's effective settings after global fallback is applied — what a
@@ -180,6 +198,12 @@ type Resolved struct {
 	// ReviewEnvironment is ReviewEnvironment → "" (there is no global default and no
 	// builtin: unset simply means this repo offers no review environment, drv-020).
 	ReviewEnvironment string
+	// Overlay is the explicit per-codebase overlay repo location → "" (drv-041). It is
+	// NOT the final overlay answer: an empty Overlay still falls through to the global
+	// <overlay_dir>/<basename> folder lookup, which internal/overlay resolves against
+	// OverlayDir (surfaced separately, not here). Unset here simply means "no explicit
+	// overlay pinned"; the folder lookup may still find one.
+	Overlay string
 }
 
 // RepoSettings resolves a repo's effective settings: per-repo entry → global
@@ -194,6 +218,7 @@ func (c Config) RepoSettings(repoPath string) Resolved {
 		Branch:            rs.DefaultBranch,
 		TestRung:          rs.DefaultTestRung,
 		ReviewEnvironment: rs.ReviewEnvironment,
+		Overlay:           rs.Overlay,
 	}
 	if r.Remote == "" {
 		r.Remote = c.PrimaryRemote
@@ -210,13 +235,14 @@ type RepoSettingsUpdate struct {
 	DefaultBranch     *string
 	DefaultTestRung   *string
 	ReviewEnvironment *string
+	Overlay           *string
 }
 
 // set reports whether the update touches any field — the "nothing to set" guard the
 // caller uses to leave the file untouched, mirroring SetProvenance's changed=false.
 func (u RepoSettingsUpdate) set() bool {
 	return u.DefaultRemote != nil || u.DefaultBranch != nil || u.DefaultTestRung != nil ||
-		u.ReviewEnvironment != nil
+		u.ReviewEnvironment != nil || u.Overlay != nil
 }
 
 // Default returns the built-in configuration used when no file is present and as
@@ -253,6 +279,7 @@ type file struct {
 	DefaultSupervision                 *string              `json:"default_supervision,omitempty"`
 	BDDArtefactKeep                    *int                 `json:"bdd_artefact_keep,omitempty"`
 	ReviewEnvMaxAgeMinutes             *int                 `json:"review_env_max_age_minutes,omitempty"`
+	OverlayDir                         *string              `json:"overlay_dir,omitempty"`
 	Repos                              map[string]*repoFile `json:"repos,omitempty"`
 }
 
@@ -266,6 +293,7 @@ type repoFile struct {
 	DefaultBranch     *string `json:"default_branch,omitempty"`
 	DefaultTestRung   *string `json:"default_test_rung,omitempty"`
 	ReviewEnvironment *string `json:"review_environment,omitempty"`
+	Overlay           *string `json:"overlay,omitempty"`
 }
 
 // Path resolves the config file location: an explicit flag value, then
@@ -344,6 +372,9 @@ func Load(flagVal string) (Config, error) {
 	if f.ReviewEnvMaxAgeMinutes != nil {
 		c.ReviewEnvMaxAgeMinutes = *f.ReviewEnvMaxAgeMinutes
 	}
+	if f.OverlayDir != nil {
+		c.OverlayDir = *f.OverlayDir
+	}
 	if f.Repos != nil {
 		c.Repos = make(map[string]RepoSettings, len(f.Repos))
 		for path, rf := range f.Repos {
@@ -407,6 +438,57 @@ func SetRepoSettings(flagVal, repoPath string, upd RepoSettingsUpdate) (changed 
 	if upd.ReviewEnvironment != nil {
 		rf.ReviewEnvironment = upd.ReviewEnvironment
 	}
+	if upd.Overlay != nil {
+		rf.Overlay = upd.Overlay
+	}
+
+	out, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("encode config: %w", err)
+	}
+	out = append(out, '\n')
+	if err := atomicWrite(path, out); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SetOverlayDir sets the global overlay_dir (drv-041) through the same merge-preserving
+// read-modify-write SetRepoSettings uses: it parses the existing config.json into the
+// full file mirror, replaces only overlay_dir, and atomically rewrites — so unrelated
+// keys (per-repo settings, permissions, remotes) are never clobbered. An empty dir
+// clears the key (disabling the folder lookup); the resolved OverlayDir falls back to
+// "". It is the only global knob the web settings UI writes; the per-repo escape hatch
+// goes through SetRepoSettings. Returns changed=false (no write) when dir already equals
+// the stored value, mirroring SetRepoSettings' no-op guard.
+func SetOverlayDir(flagVal, dir string) (changed bool, err error) {
+	path, err := Path(flagVal)
+	if err != nil {
+		return false, err
+	}
+	var f file
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &f); err != nil {
+			return false, fmt.Errorf("parse config %s: %w", path, err)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// No file yet — start from an empty mirror; the write mints it.
+	default:
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	// No-op guard: an unchanged value writes nothing, so a form re-submit does not churn
+	// the file (and a missing file with an empty dir stays missing).
+	cur := ""
+	if f.OverlayDir != nil {
+		cur = *f.OverlayDir
+	}
+	if cur == dir {
+		return false, nil
+	}
+	f.OverlayDir = &dir
 
 	out, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
@@ -466,6 +548,9 @@ func (rf *repoFile) resolve() RepoSettings {
 	}
 	if rf.ReviewEnvironment != nil {
 		rs.ReviewEnvironment = *rf.ReviewEnvironment
+	}
+	if rf.Overlay != nil {
+		rs.Overlay = *rf.Overlay
 	}
 	return rs
 }

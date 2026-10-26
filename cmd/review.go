@@ -68,6 +68,13 @@ var reviewCmd = &cobra.Command{
 			return err
 		}
 
+		// Overlay surfacing (drv-041): advisory-but-loud. When the attempt carries a
+		// test-pyramid overlay with unmerged work, surface a second compare URL / diff
+		// and warn that the codebase regresses on the next run without it. Never gates —
+		// it only adds a link and prints; it runs after the gate so it cannot turn a
+		// clean codebase review into a refusal.
+		links = append(links, overlayReviewLinks(cmd.Context(), cmd, root, id, att)...)
+
 		e, _, err := appendEventAt(root, id, att, event.Event{Type: "review", Body: body, Links: links})
 		if err != nil {
 			return err

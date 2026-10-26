@@ -33,6 +33,13 @@
       {{if .Attempt.Tool}} · <span data-testid="attempt-tool">{{.Attempt.Tool}}</span>{{end}}
       {{if .Attempt.Model}} · {{.Attempt.Model}}{{end}}
       {{if .Attempt.Assignee}} · {{.Attempt.Assignee}}{{end}}</p>
+    {{/* Overlay provenance (drv-041): which developer-owned test-pyramid overlay repo
+         and exact commit a `draiver test` run resolved its pyramid from, so an
+         overlay-driven run is explainable after the fact. Rendered only once a run
+         recorded it; absent for an in-repo pyramid or no overlay. */}}
+    {{if .Attempt.Overlay}}
+    <p class="tagline overlay-provenance" data-testid="attempt-overlay">overlay: <code>{{.Attempt.Overlay}}</code>{{if .Attempt.OverlayCommit}} @ <code data-testid="attempt-overlay-commit">{{shortSHA .Attempt.OverlayCommit}}</code>{{end}}</p>
+    {{end}}
   </header>
 
   <main class="detail" data-testid="ticket-detail">
@@ -561,6 +568,20 @@
         data-tip="The .test-pyramid.yaml environment the attempt page launches at Review (drv-020). Must be review-ready: up + down + at least one healthcheck. Unset offers no review environment.">i</span></span>
       <input type="text" name="review_env" class="provenance-input" data-testid="repo-settings-review-env"
         value="{{.ReviewEnv}}" placeholder="{{if .ReviewEnvHint}}{{.ReviewEnvHint}}{{else}}name a review environment…{{end}}" aria-label="review environment" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="provenance-row">
+      <span class="provenance-key">overlay<span class="repo-settings-info" tabindex="0" role="note"
+        aria-label="This codebase's explicit test-pyramid overlay repo (drv-041) — a developer-owned git repo holding the .test-pyramid.yaml when the codebase has none in-repo. Wins over the global overlay_dir folder lookup; the escape hatch for a basename collision."
+        data-tip="This codebase's explicit test-pyramid overlay repo (drv-041) — a developer-owned git repo holding the .test-pyramid.yaml when the codebase has none in-repo. Wins over the global overlay_dir folder lookup; the escape hatch for a basename collision.">i</span></span>
+      <input type="text" name="overlay" class="provenance-input" data-testid="repo-settings-overlay"
+        value="{{.Overlay}}" placeholder="{{if .OverlayHint}}{{.OverlayHint}}{{else}}path to an overlay repo…{{end}}" aria-label="per-codebase overlay repo" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="provenance-row">
+      <span class="provenance-key">overlay_dir<span class="repo-settings-info" tabindex="0" role="note"
+        aria-label="GLOBAL (drv-041): a folder of developer-owned overlay repos, looked up by codebase basename. A codebase with no in-repo pyramid and no explicit overlay resolves <overlay_dir>/<basename> when that is a git repo. Applies to every repo, not just this one."
+        data-tip="GLOBAL (drv-041): a folder of developer-owned overlay repos, looked up by codebase basename. A codebase with no in-repo pyramid and no explicit overlay resolves <overlay_dir>/<basename> when that is a git repo. Applies to every repo, not just this one.">i</span></span>
+      <input type="text" name="overlay_dir" class="provenance-input" data-testid="repo-settings-overlay-dir"
+        value="{{.OverlayDir}}" placeholder="{{if .OverlayDirHint}}{{.OverlayDirHint}}{{else}}global folder of overlay repos…{{end}}" aria-label="global overlay_dir" autocomplete="off" spellcheck="false">
     </div>
     {{if .Saved}}<span class="provenance-saved" data-testid="repo-settings-saved" role="status">saved ✓</span>{{end}}
   </form>

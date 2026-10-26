@@ -36,6 +36,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -510,6 +511,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"canArchive":    canArchive,
 			"archiveAction": archiveAction,
 			"reviewLink":    reviewLink,
+			"shortSHA":      shortSHA,
 			"provenance":    func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
 			"repoSettings":  s.repoSettingsPanel,
 			"cachePanel":    cachePanel,
@@ -948,7 +950,15 @@ type repoSettingsVM struct {
 	// ReviewEnvHint names the review-environment setting's unset meaning, surfaced as
 	// the input placeholder so the panel reads "blank = no review env offered" (drv-020).
 	ReviewEnvHint string
-	Saved         bool
+	// Overlay is the explicit per-codebase test-pyramid overlay repo location (drv-041);
+	// OverlayDir is the GLOBAL folder of overlay repos looked up by codebase basename.
+	// Both are editable here (overlay_dir is global but has no separate settings page);
+	// the *Hint fields name their unset meaning as placeholders, mirroring ReviewEnv.
+	Overlay        string
+	OverlayHint    string
+	OverlayDir     string
+	OverlayDirHint string
+	Saved          bool
 }
 
 // repoSettingsPanel projects an attempt into the repo-settings editor view model,
@@ -970,6 +980,8 @@ func (s *Server) repoSettingsPanel(a project.Attempt) repoSettingsVM {
 	stored := cfg.Repos[a.Repo]
 	vm.Remote, vm.Branch, vm.Rung = stored.DefaultRemote, stored.DefaultBranch, stored.DefaultTestRung
 	vm.ReviewEnv = stored.ReviewEnvironment
+	vm.Overlay = stored.Overlay
+	vm.OverlayDir = cfg.OverlayDir
 	res := cfg.RepoSettings(a.Repo)
 	// Placeholder hints name the fallback in force while a field is unset, so the
 	// panel reads "blank, but inheriting X" rather than just blank.
@@ -988,6 +1000,18 @@ func (s *Server) repoSettingsPanel(a project.Attempt) repoSettingsVM {
 	}
 	if vm.ReviewEnv == "" {
 		vm.ReviewEnvHint = "unset — no review environment offered at Review"
+	}
+	// Overlay hints name the resolution chain in force while a field is unset (drv-041):
+	// an explicit overlay wins; else <overlay_dir>/<basename> is tried; else no overlay.
+	if vm.Overlay == "" {
+		if vm.OverlayDir != "" {
+			vm.OverlayHint = "unset — falls back to " + vm.OverlayDir + "/" + filepath.Base(a.Repo)
+		} else {
+			vm.OverlayHint = "unset — no overlay (in-repo .test-pyramid.yaml wins if present)"
+		}
+	}
+	if vm.OverlayDir == "" {
+		vm.OverlayDirHint = "global — a folder of overlay repos looked up by codebase basename"
 	}
 	return vm
 }
@@ -2022,13 +2046,16 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	// a set field (prefill "x" → submitted "") writes the empty string. This reads the
 	// stored entry once, through the config the gateway also writes.
 	stored := config.RepoSettings{}
+	storedOverlayDir := ""
 	if cfg, cerr := config.Load(""); cerr == nil {
 		stored = cfg.Repos[a.Repo]
+		storedOverlayDir = cfg.OverlayDir
 	}
 	remote := strings.TrimSpace(r.FormValue("remote"))
 	branch := strings.TrimSpace(r.FormValue("branch"))
 	rung := strings.TrimSpace(r.FormValue("rung"))
 	reviewEnv := strings.TrimSpace(r.FormValue("review_env"))
+	overlayLoc := strings.TrimSpace(r.FormValue("overlay"))
 	var upd config.RepoSettingsUpdate
 	if remote != stored.DefaultRemote {
 		upd.DefaultRemote = &remote
@@ -2042,10 +2069,29 @@ func (s *Server) handleRepoSettings(w http.ResponseWriter, r *http.Request) {
 	if reviewEnv != stored.ReviewEnvironment {
 		upd.ReviewEnvironment = &reviewEnv
 	}
+	// The explicit per-codebase overlay (drv-041) is a twin of review_env: a *string in
+	// the same partial update, written only when the submitted value differs from stored.
+	if overlayLoc != stored.Overlay {
+		upd.Overlay = &overlayLoc
+	}
 	changed, err := s.gw.SetRepoSettings(a.Repo, upd)
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	// overlay_dir is GLOBAL, not per-repo, so it goes through the dedicated global writer
+	// (drv-041) rather than the per-repo update — but it is edited from the same panel
+	// (there is no separate global-settings page), applied with the same "blank = leave,
+	// changed = write" diffing. A change to either the per-repo or the global field
+	// flashes Saved.
+	overlayDir := strings.TrimSpace(r.FormValue("overlay_dir"))
+	if overlayDir != storedOverlayDir {
+		dirChanged, derr := s.gw.SetOverlayDir(overlayDir)
+		if derr != nil {
+			s.fail(w, derr)
+			return
+		}
+		changed = changed || dirChanged
 	}
 	// Re-read the attempt so the swapped-in panel reflects the persisted values; Saved
 	// confirms the write only when something actually changed (a pure no-op submit
