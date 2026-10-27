@@ -1347,6 +1347,7 @@ func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store") // defeat bfcache: Back re-fetches fresh
 	s.render(w, "board_page.html", vm)
 }
 
