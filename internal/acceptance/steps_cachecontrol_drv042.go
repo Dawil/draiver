@@ -70,7 +70,7 @@ func thenBoardPartialNoNoStore(w *World, sr *StepRun) error {
 	if strings.Contains(cc, "no-store") {
 		return fmt.Errorf("board partial Cache-Control = %q, want no \"no-store\": the header must be scoped to the full-page handler, not the shared render()", cc)
 	}
-	return nil
+	return shootMorph(w, sr, "/", "board-partial-no-store-scope", `[data-testid="board"]`)
 }
 
 func thenBoardPollUnchangedByNoStore(w *World, sr *StepRun) error {
@@ -80,5 +80,8 @@ func thenBoardPollUnchangedByNoStore(w *World, sr *StepRun) error {
 	}
 	// Reuse drvweb-025's morph contract: the no-store header must not disturb the
 	// board's unconditional 3s poll or its idiomorph swap.
-	return assertMorphSwap(html, `data-testid="board"`, "board")
+	if err := assertMorphSwap(html, `data-testid="board"`, "board"); err != nil {
+		return err
+	}
+	return shootMorph(w, sr, "/", "board-poll-unchanged", `[data-testid="board"]`)
 }
