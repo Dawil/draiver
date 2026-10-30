@@ -122,6 +122,19 @@ environments:
         script: sh review-env/ttyd/healthcheck.sh
     url: http://127.0.0.1:${DRAIVER_REVIEW_PORT}/
 
+  # forgejo-main is the environment the second drv-043 dogfood promotion targets
+  # (decision #44): the trunk this repo's changes are promoted into — forgejo's `main`.
+  # Like `local` it owns no up/down (checking merge status stands nothing up and mutates
+  # nothing). Its healthcheck is a genuine precondition — the `forgejo` remote must be
+  # configured and reachable — so a box with no network / no such remote BLOCKS the
+  # promotion ("dependency not ready, pass the ball") instead of letting the qa
+  # false-report the branch as "not merged". It declares no `url`: a merge check has no
+  # served endpoint to probe.
+  - name: forgejo-main
+    healthchecks:
+      - name: forgejo-reachable
+        script: git ls-remote --heads forgejo >/dev/null 2>&1
+
 levels:
   - name: unit
     run: go test ./...
@@ -165,3 +178,17 @@ promotions:
   - environment: local
     base: main
     qa: test "$DRAIVER_PROMOTE_ENV" = local && test "$DRAIVER_PROMOTE_BASE" = main
+
+  # forgejo-main (decision #44) is a SECOND dogfood promotion whose qa verifies the
+  # reviewed commit has actually been merged into forgejo's trunk — the real-world
+  # "is this live in the environment yet?" question a reviewer asks before ratifying.
+  # It is exactly the spec's named use of `base`: "assert the attempt's commit is an
+  # ancestor of base." draiver still does NOT merge or diff — the repo's qa does, using
+  # the branch draiver exports as $DRAIVER_PROMOTE_BASE. The qa fetches that branch from
+  # forgejo (FETCH_HEAD is its freshly-fetched tip) and asks whether HEAD (the reviewed
+  # commit, in the attempt or detached worktree) is an ancestor of it: exit 0 == merged
+  # == promoted, non-zero == not yet merged. It is red until the PR lands, then green —
+  # which is the whole point, and still purely informational (promotions never gate).
+  - environment: forgejo-main
+    base: main
+    qa: git fetch --quiet forgejo "$DRAIVER_PROMOTE_BASE" && git merge-base --is-ancestor HEAD FETCH_HEAD
