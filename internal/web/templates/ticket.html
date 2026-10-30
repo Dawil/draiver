@@ -76,6 +76,10 @@
         <button type="button" role="tab" id="attempt-tab-review-env" class="tab" data-testid="attempt-tab-review-env"
           aria-selected="false" aria-controls="attempt-tabpanel-review-env" tabindex="-1">Review environment</button>
         {{end}}
+        {{if .Promote}}
+        <button type="button" role="tab" id="attempt-tab-promote" class="tab" data-testid="attempt-tab-promote"
+          aria-selected="false" aria-controls="attempt-tabpanel-promote" tabindex="-1">Promotions</button>
+        {{end}}
         {{if .Report.HasRuns}}
         <button type="button" role="tab" id="attempt-tab-bdd" class="tab" data-testid="attempt-tab-bdd"
           aria-selected="false" aria-controls="attempt-tabpanel-bdd" tabindex="-1">BDD report</button>
@@ -161,6 +165,22 @@
            operator drives several review envs independently and concurrently. */}}
       <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-review-env" data-testid="attempt-tabpanel-review-env" aria-labelledby="attempt-tab-review-env" hidden>
         {{range .ReviewEnv.Panels}}{{template "review-env-panel" .}}{{end}}
+      </div>
+      {{end}}
+
+      {{if .Promote}}
+      {{/* Promotion surface (drv-043): one promote control per declared `promotions:`
+           entry. Each VERIFIES (never performs) that the reviewed code is
+           promoted-and-healthy in that environment — draiver does not deploy, merge, or
+           push; it only runs the repo-authored `qa` success check. Offered only on an
+           attempt in Review (matching the review-env controls), so .Promote is nil (tab
+           + panel absent) on every other attempt. The button is a same-origin POST that
+           re-renders the live log (a new promotion-result event appears) and OOB-swaps a
+           result banner plus this refreshed surface. Promotion is informational and
+           non-terminal — it never gates review or done. */}}
+      <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-promote" data-testid="attempt-tabpanel-promote" aria-labelledby="attempt-tab-promote" hidden>
+        {{template "promote-surface" .Promote}}
+        <div id="promote-result" class="promote-result" data-testid="promote-result" hidden></div>
       </div>
       {{end}}
 
@@ -813,3 +833,46 @@
      bdd-report-slot. Plain executor text, HTML-escaped — never markdown.
      data-status exposes the verdict for tests/styling. */}}
 {{define "rerun-result"}}<div id="rerun-result" class="rerun-result rerun-{{.Class}}" data-testid="rerun-result" data-status="{{.Status}}" hx-swap-oob="true">{{.Message}}</div>{{end}}
+
+{{/* promote-surface (drv-043): the attempt page's whole promotion surface — one
+     promote-panel per declared `promotions:` entry. #promote-surface is the OOB swap
+     target a promote POST refreshes (promote-surface-slot), so the status lines update
+     in place without a reload. */}}
+{{define "promote-surface"}}<section class="promote" id="promote-surface" data-testid="promote-surface">
+  <div class="promote-head">
+    <h2 class="promote-title">Promotions</h2>
+    {{template "info-bubble" "Verify (never perform) that the reviewed code is promoted-and-healthy in an environment. draiver does not deploy, merge, or push — it only runs the repo-declared qa check. Promotions are informational: a green chip tells a reviewer the ticket is ready to ratify; they never gate review or done."}}
+  </div>
+  {{range .Panels}}{{template "promote-panel" .}}{{end}}
+</section>{{end}}
+
+{{/* promote-surface-slot is the OOB variant a promote POST returns to refresh the
+     surface in place (same #promote-surface id, hx-swap-oob). */}}
+{{define "promote-surface-slot"}}{{if .}}<section class="promote" id="promote-surface" data-testid="promote-surface" hx-swap-oob="true">
+  <div class="promote-head">
+    <h2 class="promote-title">Promotions</h2>
+    {{template "info-bubble" "Verify (never perform) that the reviewed code is promoted-and-healthy in an environment. draiver does not deploy, merge, or push — it only runs the repo-declared qa check. Promotions are informational: a green chip tells a reviewer the ticket is ready to ratify; they never gate review or done."}}
+  </div>
+  {{range .Panels}}{{template "promote-panel" .}}{{end}}
+</section>{{end}}{{end}}
+
+{{/* promote-panel (drv-043): one environment's promote control — a status line plus a
+     Promote button. Unlike a review-env panel this is stateless (a promotion is a
+     one-shot verify, not a lifecycle): no poll, no up/down. The button posts to the
+     env-scoped promote route, swapping the live log region (a new promotion-result
+     event appears) and OOB-refreshing the surface + result banner. */}}
+{{define "promote-panel"}}<div class="promote-panel promote-{{.Class}}" id="promote-env-{{.EnvSlug}}" data-testid="promote-panel" data-promote-env="{{.EnvName}}" data-promote-class="{{.Class}}">
+  <p class="promote-env">Environment <code data-testid="promote-env-name">{{.EnvName}}</code>{{if .Base}} <span class="promote-base" data-testid="promote-base">· tracks <code>{{.Base}}</code></span>{{end}}</p>
+  <p class="promote-status" data-testid="promote-status"><span class="promote-chip promote-chip-{{.Class}}" data-testid="promote-chip-{{.EnvSlug}}">{{.StatusLine}}</span></p>
+  <div class="promote-actions">
+    <button type="button" class="action-promote" data-testid="action-promote-{{.EnvSlug}}"
+      hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/promote/{{.EnvName}}"
+      hx-target="[data-testid=log-region]" hx-swap="innerHTML"
+      hx-confirm="Verify the promotion to {{.EnvName}}? This runs the repo's qa check against the reviewed commit and records the verdict.">Promote</button>
+  </div>
+</div>{{end}}
+
+{{/* promote-result carries the drv-043 promote outcome back onto the page (OOB),
+     paired with the attempt-live fragment and the refreshed promote-surface. Plain
+     executor text, HTML-escaped — never markdown. data-status exposes the verdict. */}}
+{{define "promote-result"}}<div id="promote-result" class="promote-result promote-{{.Class}}" data-testid="promote-result" data-status="{{.Status}}" hx-swap-oob="true">{{.Message}}</div>{{end}}

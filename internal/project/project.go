@@ -335,6 +335,41 @@ func DeriveArchived(events []event.Event) bool {
 	return archived
 }
 
+// PromotionStatus is the latest recorded promotion outcome for one environment
+// (drv-043): the Commit the promotion verified and whether its qa passed. It is a
+// new orthogonal projection of the log — like DeriveEnabled/DeriveArchived — not a
+// State: a promotion informs the human's ratification decision, it never gates
+// review or done. Whether the status still describes the tip (green) or has gone
+// stale is a read-time comparison of Commit against the live HEAD the caller makes
+// (the same staleness discipline the pyramid badge uses), so this fold stays pure.
+type PromotionStatus struct {
+	Commit  string // the HEAD commit the promotion verified
+	Outcome string // "pass" | "fail" — the qa verdict
+}
+
+// DerivePromotions folds an attempt's `promotion-result` events into the latest
+// status per environment (drv-043). It mirrors DeriveEnabled/DeriveArchived exactly:
+// a pure projection over the append-only log, last-event-wins, defaulting to the
+// empty map when no promotion has been recorded. The map is keyed by the event's
+// Environment; an event with a blank Environment is ignored (it names no environment
+// to key on). The returned Commit/Outcome let a presentation caller render a per-env
+// chip — green when Outcome is pass and Commit == HEAD, stale when it is an older
+// commit, failed when Outcome is fail — beside the Review badge.
+func DerivePromotions(events []event.Event) map[string]PromotionStatus {
+	out := map[string]PromotionStatus{}
+	for _, e := range events {
+		if e.Type != "promotion-result" {
+			continue
+		}
+		env := strings.TrimSpace(e.Environment)
+		if env == "" {
+			continue
+		}
+		out[env] = PromotionStatus{Commit: e.Commit, Outcome: e.Outcome}
+	}
+	return out
+}
+
 // LoadAttempt reads one attempt's log + provenance + the ticket spec identity and
 // derives its state.
 func LoadAttempt(root store.Root, ticket, id string) (Attempt, error) {

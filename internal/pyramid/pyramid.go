@@ -137,14 +137,92 @@ type Param struct {
 	Default string `yaml:"default"`
 }
 
+// Promotion declares how draiver VERIFIES that a change has been promoted to an
+// environment (drv-043) — never how it is promoted. It is a separate axis from the
+// testing-V levels: a promotion references no Level and `draiver test` never runs
+// one, exactly as a review environment is bound to no level. A promotion is keyed by
+// its Environment (one promotion per environment), reusing that environment's
+// up/down/healthchecks/url/params machinery; what makes a promotion succeed is the
+// repo-authored QA command — exit 0 == promoted-and-healthy, the whole contract.
+type Promotion struct {
+	// Environment is the non-blank name of an entry in the pyramid's Environments
+	// list — validated the same way a Level's Environment is. It is also the
+	// promotion's identity: at most one promotion per environment.
+	Environment string `yaml:"environment"`
+	// Base is the branch this environment tracks (e.g. what is deployed to dev). In
+	// v1 it is descriptive metadata only: recorded on the result, shown in the UI, and
+	// exported to the qa/healthcheck scripts as $DRAIVER_PROMOTE_BASE so a repo *can*
+	// use it. draiver itself never merges into or diffs against it (loose coupling).
+	Base string `yaml:"base"`
+	// QA is the non-blank shell command whose exit status defines promotion success —
+	// to a promotion what a Level's Run is to a rung. exit 0 == promoted-and-healthy.
+	QA string `yaml:"qa"`
+}
+
 // Pyramid is a repo's parsed, validated test-pyramid declaration. Levels is an
 // ordered list, bottom-to-top: the list order IS the pyramid, so the last entry is
 // the target (top) rung. Environments is an unordered, by-name set of the contexts
 // levels can reference; it is a sibling of Levels, not nested under one, precisely
-// so one staging/QA context defined once can be shared by several rungs.
+// so one staging/QA context defined once can be shared by several rungs. Promotions
+// is a separate, non-gating axis (drv-043) — bound to environments by name, run by
+// `draiver promote`, never by `draiver test`.
 type Pyramid struct {
 	Levels       []Level       `yaml:"levels"`
 	Environments []Environment `yaml:"environments"`
+	Promotions   []Promotion   `yaml:"promotions,omitempty"`
+}
+
+// Promotion resolves the promotion declared for an environment by name. ok is false
+// for a blank name or one with no declared promotion. For a Pyramid returned by
+// Load/Parse a promotion's Environment always resolves to a declared environment
+// (validate guarantees it); this looks up the promotion itself, the by-name accessor
+// the `draiver promote` verb and the UI promotion panel need.
+func (p *Pyramid) Promotion(env string) (Promotion, bool) {
+	want := strings.TrimSpace(env)
+	if want == "" {
+		return Promotion{}, false
+	}
+	for _, pr := range p.Promotions {
+		if strings.TrimSpace(pr.Environment) == want {
+			return pr, true
+		}
+	}
+	return Promotion{}, false
+}
+
+// PromotionResult is one logged promotion outcome the UI folds over: the environment
+// a `promotion-result` event names and the commit it verified. It is the promotion
+// twin of Result — a neutral pair deliberately decoupled from internal/event, so this
+// data-model package stays free of the log schema. The caller maps its passing
+// promotion-result events onto PromotionResults (a failing result is informational
+// only and is not a green, so callers pass only the passes they want folded).
+type PromotionResult struct {
+	Environment string
+	Commit      string
+}
+
+// PromotedAtHEAD folds promotion results down to "which promotions are green at this
+// commit": the set of declared-promotion environments that have a PromotionResult
+// whose Commit equals head. It is the promotion twin of HighestAtHEAD — a result
+// naming an environment with no declared promotion (a removed/renamed promotion) is
+// ignored, and a result whose Commit != head is stale and does not count, so a commit
+// made after the promotion correctly invalidates it. The returned set is keyed by
+// environment name for O(1) lookup; an empty map means nothing is promoted at HEAD.
+func (p *Pyramid) PromotedAtHEAD(results []PromotionResult, head string) map[string]bool {
+	declared := make(map[string]bool, len(p.Promotions))
+	for _, pr := range p.Promotions {
+		declared[strings.TrimSpace(pr.Environment)] = true
+	}
+	green := map[string]bool{}
+	for _, r := range results {
+		if r.Commit != head {
+			continue
+		}
+		if declared[r.Environment] {
+			green[r.Environment] = true
+		}
+	}
+	return green
 }
 
 // EnvironmentFor resolves the Environment a level targets. ok is false when the
@@ -432,6 +510,28 @@ func (p *Pyramid) validate() error {
 	}
 	if required == 0 {
 		return errors.New("no required levels: at least one level must be required (omit `required` or set required: true) so the review gate has something to enforce")
+	}
+
+	// Promotions (drv-043) are a separate axis: each needs a non-blank environment
+	// resolving to a declared environment and a non-blank qa command, and no two may
+	// name the same environment (a promotion is keyed by its environment). An
+	// absent/empty promotions: section is a no-op, so older files stay valid.
+	promoted := make(map[string]bool, len(p.Promotions))
+	for i, pr := range p.Promotions {
+		env := strings.TrimSpace(pr.Environment)
+		if env == "" {
+			return fmt.Errorf("promotion %d: environment is blank", i)
+		}
+		if !envs[env] {
+			return fmt.Errorf("promotion %d: environment %q is not declared (environments: %s)", i, env, envNames(p))
+		}
+		if promoted[env] {
+			return fmt.Errorf("promotion %d: duplicate environment %q (at most one promotion per environment)", i, env)
+		}
+		promoted[env] = true
+		if strings.TrimSpace(pr.QA) == "" {
+			return fmt.Errorf("promotion %q: qa is blank", env)
+		}
 	}
 	return nil
 }

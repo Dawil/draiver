@@ -145,3 +145,23 @@ levels:
     # cleanly without one, so gating review on it would be a flakiness policy
     # smuggled into altitude ordering — exactly what `required` decouples.
     required: false
+
+# promotions (drv-043) are a SEPARATE, non-gating axis from the testing-V levels
+# above: `draiver test` never runs them, and they never gate review or done. draiver
+# does not PERFORM a promotion (no deploy/merge/push) — it only VERIFIES one by running
+# the repo-declared `qa` success check over an environment (exit 0 == promoted-and-
+# healthy), exactly as a level's `run:` defines a rung. A promotion is keyed by its
+# `environment`, which must name an entry in `environments:` above (reusing that env's
+# up/down/healthchecks/url/params machinery).
+#
+# This dogfoods the format end-to-end (drv-010/drv-012 pattern): `local` is already
+# declared above (its go-toolchain healthcheck is a genuine, always-green precondition
+# and it owns no up/down), and the `qa` here is trivially green — it asserts the
+# DRAIVER_PROMOTE_* contract draiver injects is actually present, so running
+# `draiver promote local --log` in this repo records a real promotion-result without
+# needing any external environment. `base` is descriptive metadata in v1 (recorded,
+# shown in the UI, exported as $DRAIVER_PROMOTE_BASE); draiver does not diff against it.
+promotions:
+  - environment: local
+    base: main
+    qa: test "$DRAIVER_PROMOTE_ENV" = local && test "$DRAIVER_PROMOTE_BASE" = main
