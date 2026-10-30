@@ -72,6 +72,8 @@ func init() {
 		"a promotion with a blank qa is rejected with a clear message":                  thenBlankQARejected,
 		"a test-pyramid with both levels and promotions":                                givenPromotionPyramid,
 		"the rungs draiver test would climb are exactly the levels, never a promotion":  thenTestNeverClimbsPromotion,
+		"the parsed promotions surface on the board":                                    thenParsedPromotionsSurfaceOnBoard,
+		"the promotion axis renders beside the test pyramid on the board":               thenPromotionAxisRendersOnBoard,
 		"a Review attempt whose repo declares promotions for dev and staging":           givenReviewAttemptWithPromotions,
 		"dev is promoted green at HEAD and staging is promoted at an older commit":      givenDevGreenStagingStale,
 		"I open the board": noopPromote,
@@ -329,6 +331,45 @@ func givenDevGreenStagingStale(w *World, sr *StepRun) error {
 		}
 	}
 	return nil
+}
+
+// ensurePromBoard returns the scenario's live promotion board, standing one up (with
+// the green dev + stale staging results) on first use. The pure parse/axis scenarios
+// set up only an in-memory pyramid, so this lets their terminal step still capture the
+// live corroborating artefact every scenario owes the report (drv-042 AC #4), mirroring
+// how the required-gate logic scenarios end on shootBadge.
+func ensurePromBoard(w *World) (*promBoard, error) {
+	if b, _ := w.get("promboard").(*promBoard); b != nil {
+		return b, nil
+	}
+	b, err := seedPromBoard(w)
+	if err != nil {
+		return nil, err
+	}
+	if err := givenDevGreenStagingStale(w, nil); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// thenParsedPromotionsSurfaceOnBoard corroborates the parse/validate scenario with a
+// screenshot of the board card the parsed promotions render into — the parsed axis made
+// visible, not merely asserted in memory.
+func thenParsedPromotionsSurfaceOnBoard(w *World, sr *StepRun) error {
+	if _, err := ensurePromBoard(w); err != nil {
+		return err
+	}
+	return shoot(w, sr, "/", "promotions-parse-surfaces-on-board", true, "", "")
+}
+
+// thenPromotionAxisRendersOnBoard corroborates the "test never climbs a promotion"
+// scenario with a board screenshot showing the promotion chips rendering as a separate
+// axis beside the test-pyramid badge.
+func thenPromotionAxisRendersOnBoard(w *World, sr *StepRun) error {
+	if _, err := ensurePromBoard(w); err != nil {
+		return err
+	}
+	return shoot(w, sr, "/", "promotions-separate-from-test-axis", true, "", "")
 }
 
 func thenBoardShowsPromotionChips(w *World, sr *StepRun) error {

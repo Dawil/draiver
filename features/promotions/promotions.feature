@@ -13,10 +13,12 @@ Feature: Surface environment promotions on the board
     Then the promotions section parses and resolves the promotion by environment
     And a promotion naming an undeclared environment is rejected with a clear message
     And a promotion with a blank qa is rejected with a clear message
+    And the parsed promotions surface on the board
 
   Scenario: draiver test never climbs a promotion
     Given a test-pyramid with both levels and promotions
     Then the rungs draiver test would climb are exactly the levels, never a promotion
+    And the promotion axis renders beside the test pyramid on the board
 
   Scenario: The Review column shows green and stale promotion labels
     Given a Review attempt whose repo declares promotions for dev and staging
