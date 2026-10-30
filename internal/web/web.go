@@ -518,6 +518,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"cohortRow":     cohortRow,
 			"sessionDot":    s.sessionDot,
 			"pyramidBadge":  s.pyramidBadge,
+			"promoChips":    s.promoChips,
 			"gitPosition":   s.gitPosition,
 			"paletteVars":   paletteVars,
 			"inlineMD":      s.inlineMD,
@@ -574,6 +575,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/{env}/up", s.handleReviewEnvUp)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/{env}/down", s.handleReviewEnvDown)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/review-env/{env}/status", s.handleReviewEnvStatus)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/promote/{env}", s.handlePromote)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/repo-settings", s.handleRepoSettings)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)
@@ -771,6 +773,12 @@ type detailVM struct {
 	// misconfigured reviewEnvironment default to flag), so the surface is absent on every
 	// other attempt. Built by s.reviewEnvSurface.
 	ReviewEnv *reviewEnvsVM
+	// Promote drives the promotion surface (drv-043): one promote control per declared
+	// `promotions:` entry, each verifying (never performing) that the reviewed code is
+	// promoted-and-healthy in that environment. It is non-nil only on an attempt in
+	// Review whose pyramid declares at least one promotion, so the surface is absent on
+	// every other attempt. Built by s.promoteSurface.
+	Promote *promoteSurfaceVM
 }
 
 // capabilityVM drives the "capability-panel" partial (drvweb-017): a Capability's
@@ -1498,6 +1506,10 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 	// nothing. The git read behind it is bounded by a background context, matching
 	// pyramidBadge.
 	vm.ReviewEnv = s.reviewEnvSurface(context.Background(), a)
+	// Promotion surface (drv-043): best-effort like the review-env surface — a nil
+	// result (not in Review, no pyramid, or no declared promotion) renders nothing. The
+	// git read behind it is bounded by a background context, matching pyramidBadge.
+	vm.Promote = s.promoteSurface(context.Background(), a)
 	return vm, nil
 }
 

@@ -199,6 +199,45 @@ body {
 .pyramid .pyramid-flag { margin-left: 3px; text-transform: uppercase; letter-spacing: .06em;
            font-size: 9px; opacity: .8; }
 .pyramid .pyramid-env { margin-left: 2px; font-size: 9px; opacity: .7; letter-spacing: .02em; }
+
+/* Promotion labels (drv-043). Small per-environment chips beside the state badge on a
+   Review-column card: green `<env> ✓` when the ticket is promoted-and-current (a
+   passing promotion-result at HEAD), muted `<env> ·` when the pass is at an older
+   commit (promoted, but the code has moved since), red `<env> ✕` when the latest
+   result is a fail. The ✓/·/✕ glyph plus a title/aria-label keep the state legible
+   without colour. Theme-aware via the shared palette vars (--done/--muted/--alert). */
+.promos { display: inline-flex; align-items: center; gap: 4px; }
+.promo { display: inline-flex; align-items: center; gap: 2px; font-size: 10px;
+         border-radius: 999px; padding: 0 6px; border: 1px solid var(--line); letter-spacing: .02em; }
+.promo .promo-sym { font-weight: 600; }
+.promo-ok { color: var(--done); border-color: color-mix(in srgb, var(--done) 55%, var(--line)); }
+.promo-stale { color: var(--muted); border-style: dashed; }
+.promo-fail { color: var(--alert); border-color: color-mix(in srgb, var(--alert) 55%, var(--line)); }
+
+/* Promotion surface (drv-043) on the attempt page: one stateless promote control per
+   declared promotion. The panel's left accent mirrors its chip class. */
+.promote { display: flex; flex-direction: column; gap: 10px; }
+.promote-head { display: flex; align-items: center; gap: 6px; }
+.promote-title { font-size: 15px; margin: 0; }
+.promote-panel { border: 1px solid var(--line); border-left: 3px solid var(--line);
+         border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.promote-panel.promote-ok { border-left-color: var(--done); }
+.promote-panel.promote-stale { border-left-color: var(--muted); }
+.promote-panel.promote-fail { border-left-color: var(--alert); }
+.promote-panel.promote-none { border-left-color: var(--muted); }
+.promote-env { margin: 0; font-size: 13px; }
+.promote-base { color: var(--muted); font-size: 12px; }
+.promote-status { margin: 0; }
+.promote-chip { font-size: 12px; }
+.promote-chip-ok { color: var(--done); }
+.promote-chip-stale { color: var(--muted); }
+.promote-chip-fail { color: var(--alert); }
+.promote-chip-none { color: var(--muted); }
+.promote-result { font-size: 12px; white-space: pre-wrap; border-radius: 6px; padding: 6px 9px; }
+.promote-result.promote-ok { color: var(--done); background: color-mix(in srgb, var(--done) 12%, transparent); }
+.promote-result.promote-warn { color: var(--review); background: color-mix(in srgb, var(--review) 12%, transparent); }
+.promote-result.promote-bad { color: var(--alert); background: var(--alert-bg); }
+
 /* control-state accents come from the parent column */
 .col-stuck .card { background: var(--alert-bg); border-color: var(--alert); }
 .col-running .card, .col-done .card { opacity: .9; }

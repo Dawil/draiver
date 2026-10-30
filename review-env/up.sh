@@ -52,6 +52,57 @@ export DRAIVER_CONFIG="$CONFIG"
 "$BIN" new    LEDGER-2 --title "$ENV_NAME: ledger needs a human"    --repo "$PWD" --base main --type codebase >/dev/null 2>&1 || true
 "$BIN" escalate LEDGER-2 "which trunk is authoritative for $ENV_NAME?" >/dev/null 2>&1 || true
 
+# drv-043: a Review ticket carrying real promotion-results so the reviewer sees the new
+# per-environment promotion labels live — one GREEN (promoted-and-current at HEAD) and
+# one STALE (promoted at an older commit; the code has since moved). draiver only
+# VERIFIES a promotion (runs the repo's `qa`); it never performs one. We stand up a tiny
+# throwaway fixture repo whose committed `.test-pyramid.yaml` declares dev+staging
+# promotions with trivially-green `qa`, checked out on the attempt branch so the board's
+# branch-ref fold finds it, drive the attempt into Review, then record the two verdicts
+# with real `draiver promote --log` runs on either side of an intervening commit — so
+# staging lands stale and dev lands green at the branch tip the board reads for HEAD.
+# Best-effort like every seed above; the webui must still come up if any step hiccups.
+PROMO="$PWD/$RUN/promorepo"
+if command -v git >/dev/null 2>&1; then
+  mkdir -p "$PROMO"
+  cat >"$PROMO/.test-pyramid.yaml" <<'PY'
+environments:
+  - name: dev
+    healthchecks:
+      - name: ready
+        script: "true"
+  - name: staging
+    healthchecks:
+      - name: ready
+        script: "true"
+levels:
+  - name: unit
+    run: "true"
+promotions:
+  - environment: dev
+    base: main
+    qa: "true"
+  - environment: staging
+    base: main
+    qa: "true"
+PY
+  # Init directly ON the attempt branch so gatherPyramidState's no-live-worktree fold
+  # (branchPyramidState) reads the pyramid and HEAD from draiver/DUMMY-PROMO/0001.
+  git -C "$PROMO" init -q -b draiver/DUMMY-PROMO/0001 >/dev/null 2>&1 || true
+  git -C "$PROMO" config user.email review-env@example.test >/dev/null 2>&1 || true
+  git -C "$PROMO" config user.name  "review-env"            >/dev/null 2>&1 || true
+  git -C "$PROMO" add .test-pyramid.yaml >/dev/null 2>&1 || true
+  git -C "$PROMO" commit -q -m "promotions fixture" >/dev/null 2>&1 || true
+  "$BIN" new    DUMMY-PROMO --title "$ENV_NAME: promotions" --repo "$PROMO" --base main >/dev/null 2>&1 || true
+  "$BIN" review DUMMY-PROMO "seeded promotions for $ENV_NAME" --url "http://example.test/compare/main...dummy" >/dev/null 2>&1 || true
+  # staging verified at the first commit; HEAD then advances so staging goes stale; dev
+  # verified at the new tip is green-at-HEAD. `promote --log` derives the attempt from
+  # the branch and stamps the result with the commit it verified — two real verdicts.
+  ( cd "$PROMO" && DRAIVER_ATTEMPT=0001 "$BIN" promote staging --log ) >/dev/null 2>&1 || true
+  git -C "$PROMO" commit -q --allow-empty -m "advance HEAD past staging promotion" >/dev/null 2>&1 || true
+  ( cd "$PROMO" && DRAIVER_ATTEMPT=0001 "$BIN" promote dev --log ) >/dev/null 2>&1 || true
+fi
+
 # Launch the webui backgrounded with output redirected (so draiver's CombinedOutput does
 # not block on the inherited pipe), record its pid for down.sh, then wait until the port
 # actually answers so confirm-up never races bring-up.
