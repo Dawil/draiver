@@ -868,7 +868,7 @@
     <button type="button" class="action-promote" data-testid="action-promote-{{.EnvSlug}}"
       hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/promote/{{.EnvName}}"
       hx-target="[data-testid=log-region]" hx-swap="innerHTML"
-      hx-confirm="Verify the promotion to {{.EnvName}}? This runs the repo's qa check against the reviewed commit and records the verdict.">Promote</button>
+      hx-confirm="Check the promotion to {{.EnvName}}? This runs the repo's qa check against the reviewed commit and records the verdict — draiver does not deploy, merge, or push.">Check</button>
   </div>
 </div>{{end}}
 
