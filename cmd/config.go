@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	configRepoRemote string
-	configRepoBranch string
-	configRepoRung   string
+	configRepoRemote  string
+	configRepoBranch  string
+	configRepoRung    string
+	configRepoOverlay string
 )
 
 var configCmd = &cobra.Command{
@@ -36,6 +37,7 @@ var configRepoCmd = &cobra.Command{
 		"  draiver config repo /path/to/repo                       print the resolved values\n" +
 		"  draiver config repo /path/to/repo --remote forgejo      set the default git remote\n" +
 		"  draiver config repo /path/to/repo --branch main --rung integration\n" +
+		"  draiver config repo /path/to/repo --overlay /path/to/overlay  pin an explicit test-pyramid overlay\n" +
 		"\n" +
 		"Only the flags you pass change; an omitted flag leaves that key untouched, and a\n" +
 		"flag passed empty (e.g. --remote \"\") clears it so it falls back to the global\n" +
@@ -73,6 +75,10 @@ var configRepoCmd = &cobra.Command{
 			v := strings.TrimSpace(configRepoRung)
 			upd.DefaultTestRung = &v
 		}
+		if cmd.Flags().Changed("overlay") {
+			v := strings.TrimSpace(configRepoOverlay)
+			upd.Overlay = &v
+		}
 		if changed, err := gw.SetRepoSettings(repoPath, upd); err != nil {
 			return err
 		} else if changed {
@@ -95,6 +101,7 @@ var configRepoCmd = &cobra.Command{
 		fmt.Fprintf(tw, "default remote\t%s\n", resolvedLine(stored.DefaultRemote, r.Remote, "unset — git actions fall back to the sole remote or surface ambiguity"))
 		fmt.Fprintf(tw, "default branch\t%s\n", resolvedLine(stored.DefaultBranch, r.Branch, "unset — defaults to the repo's current branch"))
 		fmt.Fprintf(tw, "default test rung\t%s\n", resolvedLine(stored.DefaultTestRung, r.TestRung, "unset — `draiver test` iteration ceiling; defaults to the pyramid file's highest required rung"))
+		fmt.Fprintf(tw, "overlay\t%s\n", resolvedLine(stored.Overlay, r.Overlay, "unset — no explicit per-repo overlay; the global overlay_dir/<basename> lookup may still find one"))
 		return tw.Flush()
 	},
 }
@@ -117,6 +124,7 @@ func init() {
 	configRepoCmd.Flags().StringVar(&configRepoRemote, "remote", "", "default git remote for this repo (supersedes primary_remote); empty clears it")
 	configRepoCmd.Flags().StringVar(&configRepoBranch, "branch", "", "default branch (trunk) for this repo; empty clears it")
 	configRepoCmd.Flags().StringVar(&configRepoRung, "rung", "", "default target test rung for this repo; empty clears it")
+	configRepoCmd.Flags().StringVar(&configRepoOverlay, "overlay", "", "explicit per-repo test-pyramid overlay repo (supersedes the overlay_dir lookup); empty clears it")
 	configCmd.AddCommand(configRepoCmd)
 	rootCmd.AddCommand(configCmd)
 }
