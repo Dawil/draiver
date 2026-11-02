@@ -44,6 +44,27 @@ export DRAIVER_CONFIG="$CONFIG"
 "$BIN" review DUMMY-2 "seeded review claim for $ENV_NAME" --url "http://example.test/compare/main...dummy" >/dev/null 2>&1 || true
 "$BIN" new    DUMMY-3 --title "$ENV_NAME: needs a human"  --repo "$PWD" --base main >/dev/null 2>&1 || true
 "$BIN" escalate DUMMY-3 "seeded question for $ENV_NAME?" >/dev/null 2>&1 || true
+
+# drv-045: seed the in-review DUMMY-2 attempt's per-attempt system-event journal
+# (session/system.jsonl) so the reviewer sees a POPULATED System Logs panel live — the
+# new second streaming panel, separate from Agent Logs — not just a green unit test.
+# One record per operator/daemon source (provenance edit, git control, review-env
+# up/down, promotion check) plus a draiverctld lifecycle line, each carrying its OWN
+# recorded ts in the (deliberately fixed, past) order the board renders — proving the
+# panel stamps lines with their recorded time, never render-time now(). system.jsonl is
+# rebuildable runtime state written directly at the action site, so seeding it is just
+# writing the JSON lines the handlers/reconciler would have appended. Best-effort like
+# every seed above (the webui must still come up if this hiccups); the dummy attempt is
+# 0001, matching the promotions block below.
+DUMMY2_SESSION="$DATA/DUMMY-2/attempts/0001/session"
+mkdir -p "$DUMMY2_SESSION" 2>/dev/null && cat >"$DUMMY2_SESSION/system.jsonl" <<'SYS' 2>/dev/null || true
+{"ts":"2026-11-03T09:00:00Z","class":"ctl-session","message":"ctl: session started — worktree cut for DUMMY-2/0001","fields":{"actor":"draiverctld"}}
+{"ts":"2026-11-03T09:05:12Z","class":"provenance","message":"provenance updated: base `master` → `main`","fields":{"from":"master","to":"main","actor":"human:review"}}
+{"ts":"2026-11-03T09:07:33Z","class":"git","message":"git push: ok — pushed draiver/DUMMY-2/0001","fields":{"verb":"push","outcome":"ok"}}
+{"ts":"2026-11-03T09:09:48Z","class":"review-env-up","message":"review-env up: `review` → starting","fields":{"env":"review"}}
+{"ts":"2026-11-03T09:14:21Z","class":"promotion-check","message":"promotion check: `staging` @ `abc1234` — pass","fields":{"env":"staging","commit":"abc1234","verdict":"pass"}}
+{"ts":"2026-11-03T09:18:02Z","class":"review-env-down","message":"review-env down: `review` → down","fields":{"env":"review"}}
+SYS
 # drv-039: a couple of `type: codebase` ledgers so the reviewer can see the new ledger
 # rendering — a resting one (gated to Parked by drv-037, so it only shows in the Ledgers
 # view) and an escalated one (Needs-me, surfacing into the code view and lighting the

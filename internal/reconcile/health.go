@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/project"
+	"github.com/Dawil/draiver/internal/systemlog"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -177,5 +178,24 @@ func (r *Reconciler) appendHealth(key worktree.Key, ev HealthEvent) {
 	defer f.Close()
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		r.opt.Logf("reconcile: health log %s/%s: write: %v", key.Ticket, key.Attempt, err)
+	}
+}
+
+// emitSystem appends one draiverctld lifecycle event to the attempt's system.jsonl
+// (drv-045), stamped with the reconciler's clock, so the supervisor's per-attempt
+// actions (a session admitted, a retire/park) surface in the web System Logs panel
+// beside the health transitions above. It projects transitions the reconciler
+// already computes — it adds no new daemon bookkeeping — and is best-effort: a write
+// failure is logged operationally and never fails the tick, exactly as appendHealth
+// is. The daemon's actor stamps the "by whom".
+func (r *Reconciler) emitSystem(key worktree.Key, ev systemlog.SystemEvent) {
+	if ev.Fields == nil {
+		ev.Fields = map[string]string{}
+	}
+	if _, ok := ev.Fields["actor"]; !ok && r.opt.Actor != "" {
+		ev.Fields["actor"] = r.opt.Actor
+	}
+	if err := systemlog.Append(r.opt.Root, key.Ticket, key.Attempt, r.opt.Now, ev); err != nil {
+		r.opt.Logf("reconcile: system log %s/%s: %v", key.Ticket, key.Attempt, err)
 	}
 }

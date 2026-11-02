@@ -13,6 +13,7 @@ import (
 	"github.com/Dawil/draiver/internal/promote"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/repo"
+	"github.com/Dawil/draiver/internal/systemlog"
 )
 
 // Promotion status is drv-043's new orthogonal projection of the log (DerivePromotions)
@@ -309,6 +310,13 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// drv-045: record the *act* of running the promotion check as a system event —
+	// env, commit, and the verdict observed — distinct from (and in addition to) the
+	// durable promotion-result the pass/fail branch above may have recorded. It is the
+	// operational view: it fires for every outcome the check produced, including a
+	// blocked/env-fault one that records no durable verdict.
+	s.emitSystem(id, att, promotionSystemEvent(envName, outcome))
+
 	vm, err := s.detail(id, att)
 	if err != nil {
 		s.fail(w, err)
@@ -338,6 +346,41 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(buf.Bytes())
+}
+
+// promotionSystemEvent composes the drv-045 system-log record for the *act* of a
+// promotion check: a ClassPromotion event naming the env, the commit, and the verdict
+// the check observed (pass/fail/blocked/env-fault/none). It carries the overlay repo
+// as a structured field when the promotion came from a test-pyramid overlay, so a
+// board-triggered overlay check is as legible in the stream as a CLI one. A
+// qa-failed/env-fault/blocked verdict takes the error role so it reads red.
+func promotionSystemEvent(env string, outcome promote.Outcome) systemlog.SystemEvent {
+	verdict := string(outcome.Status)
+	switch outcome.Status {
+	case promote.StatusOK:
+		verdict = "pass"
+	case promote.StatusQAFailed:
+		verdict = "fail"
+	}
+	fields := map[string]string{"env": env, "verdict": verdict}
+	if sha := strings.TrimSpace(outcome.Commit); sha != "" {
+		fields["commit"] = shortSHA(sha)
+	}
+	msg := "promotion check: `" + env + "`"
+	if sha := strings.TrimSpace(outcome.Commit); sha != "" {
+		msg += " @ `" + shortSHA(sha) + "`"
+	}
+	msg += " — " + verdict
+	if outcome.Overlay != nil {
+		fields["overlay"] = outcome.Overlay.Repo
+		msg += " (overlay `" + outcome.Overlay.Repo + "`)"
+	}
+	return systemlog.SystemEvent{
+		Class:   systemlog.ClassPromotion,
+		Message: msg,
+		Fields:  fields,
+		Error:   outcome.Status == promote.StatusQAFailed || outcome.Status == promote.StatusEnvFault || outcome.Status == promote.StatusBlocked,
+	}
 }
 
 // webPromotionResultBody renders a promotion-result event body for the web-recorded

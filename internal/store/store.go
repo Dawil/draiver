@@ -205,6 +205,18 @@ func (r Root) SessionCtlLogPath(id, attempt string) string {
 	return filepath.Join(r.SessionDir(id, attempt), "ctl.jsonl")
 }
 
+// SessionSystemLogPath is the attempt's per-attempt system-event journal (drv-045):
+// the append-only JSON-lines record of operator-initiated system actions (provenance
+// edits, git controls, review-env up/down, promotion checks) and draiverctld's
+// per-attempt lifecycle (session start, retire/park), each stamped with its own
+// recorded time at emit. It is the operational source the web "System Logs" panel
+// tails, sitting beside ctl.jsonl (health) in the same session dir. Like ctl.jsonl it
+// is rebuildable runtime state — safe to delete; the stream simply refills from
+// subsequent actions — and out of the hash chain.
+func (r Root) SessionSystemLogPath(id, attempt string) string {
+	return filepath.Join(r.SessionDir(id, attempt), "system.jsonl")
+}
+
 // --- existence & listing ---
 
 // Exists reports whether a ticket folder is present.

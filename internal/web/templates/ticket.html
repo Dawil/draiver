@@ -225,6 +225,22 @@
       </details>
     </section>
 
+    {{/* System Logs (drv-045): a second collapsed-by-default live panel, sibling to
+         Agent Logs, onto the attempt's system-event journal — provenance edits, git
+         controls, review-env up/down, promotion checks, and draiverctld health /
+         lifecycle. Unlike Agent Logs (which is purely what the model/tools emitted),
+         this is what the *system* did to the attempt, each line stamped with its real
+         recorded time. Same SSE-on-expand wiring, same textContent (never HTML) XSS
+         discipline — only the data-stream-url differs. */}}
+    <section class="agent-logs" data-testid="system-logs">
+      <details class="agent-logs-details" data-testid="system-logs-details"
+        data-stream-url="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/system-logs"
+        data-empty-placeholder="no system events yet…">
+        <summary class="agent-logs-summary" data-testid="system-logs-summary">System Logs <span class="hint">operational &amp; lifecycle events</span></summary>
+        <pre class="agent-logs-stream" data-testid="system-logs-stream" aria-live="polite"></pre>
+      </details>
+    </section>
+
     <section class="log">
       <div class="log-head">
         <h2>Log <span class="count" id="log-count">{{len .Events}}</span></h2>
@@ -413,43 +429,46 @@
     })();
 
     (function () {
-      // Agent Logs: open a Server-Sent Events stream only while the <details> is
-      // expanded, so a collapsed panel costs no connection and no subprocess. Each
-      // event is one rendered session line; it is untrusted content, so it is
-      // appended as a text node (never HTML). A stream that never produces a line
-      // (a hand-run attempt with no session) leaves the quiet placeholder in place.
-      var details = document.querySelector('[data-testid="agent-logs-details"]');
-      if (!details) return;
-      var pre = details.querySelector('[data-testid="agent-logs-stream"]');
-      var url = details.dataset.streamUrl;
-      var es = null, started = false;
-      var placeholder = 'no session stream yet…';
+      // Live log panels (Agent Logs + System Logs, drv-045): each opens a Server-Sent
+      // Events stream only while its <details> is expanded, so a collapsed panel costs
+      // no connection and no subprocess. Each event is one rendered line; it is
+      // untrusted content, so it is appended as a text node (never HTML). A stream that
+      // never produces a line leaves the quiet placeholder in place. The two panels are
+      // identical plumbing over different data-stream-urls, so wire every panel the
+      // same way from its own <details data-stream-url>.
+      document.querySelectorAll('details[data-stream-url]').forEach(function (details) {
+        var pre = details.querySelector('pre');
+        if (!pre) return;
+        var url = details.dataset.streamUrl;
+        var es = null, started = false;
+        var placeholder = details.dataset.emptyPlaceholder || 'no session stream yet…';
 
-      function connect() {
-        if (es) return;
-        started = false;
-        pre.textContent = placeholder;
-        es = new EventSource(url);
-        es.onmessage = function (e) {
-          if (!started) { pre.textContent = ''; started = true; }
-          var atBottom = pre.scrollHeight - pre.clientHeight - pre.scrollTop < 40;
-          pre.appendChild(document.createTextNode(e.data + '\n'));
-          if (atBottom) pre.scrollTop = pre.scrollHeight; // follow unless scrolled up
-        };
-        es.onerror = function () {
-          // Connection dropped: if nothing ever arrived, keep the quiet
-          // placeholder rather than surfacing an error; otherwise leave the
-          // backlog in place. (EventSource retries on its own.)
-          if (!started) pre.textContent = placeholder;
-        };
-      }
-      function disconnect() {
-        if (es) { es.close(); es = null; }
-      }
-      details.addEventListener('toggle', function () {
-        if (details.open) connect(); else disconnect();
+        function connect() {
+          if (es) return;
+          started = false;
+          pre.textContent = placeholder;
+          es = new EventSource(url);
+          es.onmessage = function (e) {
+            if (!started) { pre.textContent = ''; started = true; }
+            var atBottom = pre.scrollHeight - pre.clientHeight - pre.scrollTop < 40;
+            pre.appendChild(document.createTextNode(e.data + '\n'));
+            if (atBottom) pre.scrollTop = pre.scrollHeight; // follow unless scrolled up
+          };
+          es.onerror = function () {
+            // Connection dropped: if nothing ever arrived, keep the quiet
+            // placeholder rather than surfacing an error; otherwise leave the
+            // backlog in place. (EventSource retries on its own.)
+            if (!started) pre.textContent = placeholder;
+          };
+        }
+        function disconnect() {
+          if (es) { es.close(); es = null; }
+        }
+        details.addEventListener('toggle', function () {
+          if (details.open) connect(); else disconnect();
+        });
+        window.addEventListener('beforeunload', disconnect);
       });
-      window.addEventListener('beforeunload', disconnect);
     })();
   </script>
 </body>
