@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Dawil/draiver/internal/config"
+	"github.com/Dawil/draiver/internal/overlay"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -67,6 +69,11 @@ type Outcome struct {
 	Base        string
 	Commit      string
 	Lines       []string
+	// Overlay is the test-pyramid overlay (drv-041) that supplied this promotion, set by
+	// Run when the pyramid was resolved from an overlay rather than an in-repo file; nil
+	// for an in-repo promotion. The web caller records its repo + commit as provenance,
+	// mirroring the CLI's recordOverlayProvenance.
+	Overlay *overlay.Active
 }
 
 // RunQA runs one promotion's env-wrapped qa check in dir and returns its verdict. It
@@ -152,12 +159,19 @@ func RunQA(ctx context.Context, stdout, stderr io.Writer, dir string, env *pyram
 // and without mutating that worktree. The worktree is torn down unconditionally.
 //
 // A non-nil error is reserved for a genuinely malformed pyramid, an attempt with
-// nothing to review, or a worktree-cut failure the caller should surface as a 500; an
-// ordinary blocked/failed/no-promotion outcome is carried in the returned Outcome.
+// nothing to review, a worktree-cut failure, or a configured-but-unusable overlay the
+// caller should surface as a 500; an ordinary blocked/failed/no-promotion outcome is
+// carried in the returned Outcome.
 //
-// v1: only an in-repo .test-pyramid.yaml is consulted (the dogfood/seed/test path).
-// An overlay-driven promotion is CLI-only for now, so a repo with no in-repo pyramid
-// yields StatusNoPromotion here (decision #3).
+// The pyramid is resolved through overlay.ResolvePyramid — the same shared resolution
+// the CLI `draiver promote` performs — so a promotion declared only in a test-pyramid
+// overlay (drv-041) runs here exactly as it does off the CLI: the overlay is cut at the
+// overlay repo's current HEAD, its script-env (DRAIVER_CODEBASE_DIR/DRAIVER_OVERLAY_DIR)
+// is threaded into RunQA, and the sourcing overlay is surfaced on Outcome.Overlay for the
+// caller to record as provenance. Resolution stays commit-bound on the CODEBASE side (the
+// reviewed-commit detached worktree below, unchanged). Only when there is neither an
+// in-repo pyramid NOR a resolvable overlay does this yield StatusNoPromotion — the
+// terminal case is preserved, it just no longer fires on every overlay case.
 func Run(ctx context.Context, root store.Root, repo, ticket, att, envName string, stdout, stderr io.Writer) (Outcome, error) {
 	wm, err := worktree.NewManager(repo)
 	if err != nil {
@@ -176,7 +190,15 @@ func Run(ctx context.Context, root store.Root, repo, ticket, att, envName string
 	}
 	defer removeWorktree(ctx, repo, wd)
 
-	p, err := pyramid.Load(wd)
+	// Resolve the pyramid the way the CLI does: in-repo wins, else the configured overlay.
+	// `repo` is the codebase path (the overlay resolution key); the per-repo explicit
+	// overlay + global overlay_dir come from the operator config.
+	cfg, err := config.Load("")
+	if err != nil {
+		return Outcome{}, fmt.Errorf("promote: load config: %w", err)
+	}
+	res := cfg.RepoSettings(repo)
+	p, active, extraEnv, err := overlay.ResolvePyramid(ctx, wd, repo, res.Overlay, cfg.OverlayDir, key)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -185,7 +207,7 @@ func Run(ctx context.Context, root store.Root, repo, ticket, att, envName string
 			Status:      StatusNoPromotion,
 			Environment: envName,
 			Commit:      commit,
-			Lines:       []string{"No in-repo `.test-pyramid.yaml` at the reviewed commit — nothing to promote."},
+			Lines:       []string{"No in-repo `.test-pyramid.yaml` at the reviewed commit and no resolvable overlay — nothing to promote."},
 		}, nil
 	}
 	promo, ok := p.Promotion(envName)
@@ -194,13 +216,14 @@ func Run(ctx context.Context, root store.Root, repo, ticket, att, envName string
 			Status:      StatusNoPromotion,
 			Environment: envName,
 			Commit:      commit,
-			Lines:       []string{fmt.Sprintf("No promotion declares environment %q in `.test-pyramid.yaml`.", envName)},
+			Lines:       []string{fmt.Sprintf("No promotion declares environment %q in `%s`.", envName, pyramid.FileName)},
 		}, nil
 	}
 	env, _ := p.EnvironmentByName(promo.Environment)
 
-	out := RunQA(ctx, stdout, stderr, wd, env, promo, nil)
+	out := RunQA(ctx, stdout, stderr, wd, env, promo, extraEnv)
 	out.Commit = commit
+	out.Overlay = active
 	return out, nil
 }
 

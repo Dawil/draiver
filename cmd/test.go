@@ -414,17 +414,20 @@ func runShell(ctx context.Context, cmd *cobra.Command, wd, script string, extraE
 // surface, not to silently skip.
 func resolvePyramid(ctx context.Context, wd string) (*pyramid.Pyramid, *overlay.Active, []string, error) {
 	// 1. In-repo wins: a codebase worktree carrying its own .test-pyramid.yaml ignores
-	//    overlays entirely — today's behaviour, no cwd change, no env vars.
-	p, err := pyramid.Load(wd)
-	if err != nil {
+	//    overlays entirely — today's behaviour, no cwd change, no env vars. Checked here
+	//    (not only inside overlay.ResolvePyramid) so a non-attempt branch with an in-repo
+	//    pyramid still works — the attempt/config lookup below would otherwise short it to
+	//    the no-op state.
+	if p, err := pyramid.Load(wd); err != nil {
 		return nil, nil, nil, err
-	}
-	if p != nil {
+	} else if p != nil {
 		return p, nil, nil, nil
 	}
 
-	// 2-4. No in-repo pyramid: resolve an overlay from settings. Finding one needs the
-	// attempt (→ its recorded codebase repo, the resolution key) and the operator config.
+	// 2-4. No in-repo pyramid: resolve an overlay. Finding one needs the attempt (→ its
+	// recorded codebase repo, the resolution key) and the operator config. This lookup is
+	// best-effort — a non-attempt branch, a missing attempt, or an unreadable repo setting
+	// all mean "no overlay resolvable", a successful no-op, not a broken test run.
 	key, err := worktree.Identify(ctx, wd)
 	if err != nil {
 		return nil, nil, nil, nil // not an attempt branch — nothing to resolve against
@@ -442,27 +445,11 @@ func resolvePyramid(ctx context.Context, wd string) (*pyramid.Pyramid, *overlay.
 		return nil, nil, nil, err
 	}
 	res := cfg.RepoSettings(meta.Repo)
-	loc, ok, err := overlay.Resolve(meta.Repo, res.Overlay, cfg.OverlayDir)
-	if err != nil || !ok {
-		return nil, nil, nil, err
-	}
 
-	// An overlay is configured: materialise it (cut the per-attempt worktree) and load
-	// its pyramid. From here a failure is a loud misconfiguration, not a silent no-op.
-	active, err := overlay.Cut(ctx, loc, key)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	op, err := pyramid.Load(active.WorktreePath)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if op == nil {
-		return nil, nil, nil, fmt.Errorf(
-			"overlay repo %s (resolved via %s) carries no %s — nothing to run; scaffold one with `draiver test create-overlay`, or add the file to the overlay repo",
-			loc.Repo, loc.Via, pyramid.FileName)
-	}
-	return op, &active, active.ScriptEnv(wd), nil
+	// Delegate to the shared resolver — the one function `draiver promote` (cmd/promote.go)
+	// and the board's promote button (internal/promote.Run via internal/web) also call, so
+	// all three surfaces resolve the overlay, cut it, and build its script-env identically.
+	return overlay.ResolvePyramid(ctx, wd, meta.Repo, res.Overlay, cfg.OverlayDir, key)
 }
 
 // recordOverlayProvenance records the active overlay repo + the exact commit used into

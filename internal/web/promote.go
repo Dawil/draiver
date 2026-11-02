@@ -12,6 +12,7 @@ import (
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/promote"
 	"github.com/Dawil/draiver/internal/pyramid"
+	"github.com/Dawil/draiver/internal/repo"
 )
 
 // Promotion status is drv-043's new orthogonal projection of the log (DerivePromotions)
@@ -266,6 +267,20 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+
+	// If the promotion came from a test-pyramid overlay, record the same provenance the
+	// CLI's recordOverlayProvenance writes (overlay repo + the exact commit used), so a
+	// board-triggered overlay promotion is as auditable as a CLI one. Best-effort and
+	// independent of the verdict — exactly like the CLI, which records on resolution
+	// whether or not qa then passes; a write failure never fails the promotion.
+	if outcome.Overlay != nil {
+		// Best-effort, like the CLI's recordOverlayProvenance: a provenance-write failure
+		// is swallowed rather than failing the promotion the reviewer just ran.
+		_, _ = s.gw.SetProvenance(id, att, repo.Provenance{
+			Overlay:       &outcome.Overlay.Repo,
+			OverlayCommit: &outcome.Overlay.Commit,
+		})
 	}
 
 	// Record the verdict for a pass or a fail — both are commit-bound evidence the

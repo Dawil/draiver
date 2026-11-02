@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -161,4 +162,57 @@ func Cut(ctx context.Context, loc Location, key worktree.Key) (Active, error) {
 		return Active{}, fmt.Errorf("overlay: resolve overlay commit: %w", err)
 	}
 	return Active{Location: loc, WorktreePath: wt.Path, Commit: commit}, nil
+}
+
+// ResolvePyramid is the single resolution drv-041's model names, shared by every
+// surface that executes a pyramid (`draiver test`, `draiver promote`, and the board's
+// promote button) so they agree byte-for-byte on WHICH pyramid runs and with what
+// execution contract. It folds steps 1→4 over the codebase worktree wd:
+//
+//  1. In-repo wins: wd carrying its own .test-pyramid.yaml ignores overlays entirely —
+//     returned with a nil Active and nil extraEnv, so a local pyramid runs byte-for-byte
+//     as before (no cwd change, no env vars).
+//  2-3. No in-repo pyramid: resolve an overlay from the settings handed in
+//     (explicitOverlay wins, else the <overlayDir>/<basename> folder lookup), cut it as
+//     the per-attempt worktree keyed by key (at the overlay repo's current HEAD, exactly
+//     as the badge reads it in place), load its pyramid, and return the overlay's
+//     ScriptEnv(wd) contract (DRAIVER_CODEBASE_DIR / DRAIVER_OVERLAY_DIR) as extraEnv.
+//  4. Neither an in-repo pyramid nor a resolvable overlay: (nil, nil, nil, nil) — the
+//     "nothing to run" no-op the caller maps to its own terminal state.
+//
+// It takes the overlay settings as plain strings (overlay.Resolve's signature) rather
+// than a *config.Config, so this package needs no dependency on config. Finding *which*
+// repo + attempt to resolve against is the caller's concern (the CLI derives it from the
+// worktree branch; the web executor has it directly); this owns everything from "there
+// is no in-repo pyramid" onward, including the terminal "overlay configured but carries
+// no pyramid" hard error — a configured overlay that cannot run is a misconfiguration to
+// surface, not to silently skip.
+func ResolvePyramid(ctx context.Context, wd, codebasePath, explicitOverlay, overlayDir string, key worktree.Key) (*pyramid.Pyramid, *Active, []string, error) {
+	p, err := pyramid.Load(wd)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if p != nil {
+		return p, nil, nil, nil
+	}
+
+	loc, ok, err := Resolve(codebasePath, explicitOverlay, overlayDir)
+	if err != nil || !ok {
+		return nil, nil, nil, err
+	}
+
+	active, err := Cut(ctx, loc, key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	op, err := pyramid.Load(active.WorktreePath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if op == nil {
+		return nil, nil, nil, fmt.Errorf(
+			"overlay repo %s (resolved via %s) carries no %s — nothing to run; scaffold one with `draiver test create-overlay`, or add the file to the overlay repo",
+			loc.Repo, loc.Via, pyramid.FileName)
+	}
+	return op, &active, active.ScriptEnv(wd), nil
 }
