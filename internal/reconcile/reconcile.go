@@ -48,6 +48,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,7 @@ import (
 	"github.com/Dawil/draiver/internal/protocol"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/systemlog"
 	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/wake"
 	"github.com/Dawil/draiver/internal/watch"
@@ -418,6 +420,14 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 		} else {
 			// Admit succeeded: whatever class was wedging this attempt has cleared.
 			r.reportHealth(key, "", "")
+			// drv-045: surface the admit as a system-log line — the worktree was cut
+			// (or re-used) and a session started/resumed for the attempt. It fires on a
+			// genuine admit edge (the attempt was not already in the run table), not
+			// every tick, so it marks the transition, not the level.
+			r.emitSystem(key, systemlog.SystemEvent{
+				Class:   systemlog.ClassCtlSession,
+				Message: "ctl: session admitted — worktree cut, session started",
+			})
 		}
 	}
 
@@ -991,6 +1001,18 @@ func (r *Reconciler) recordRetire(key worktree.Key, st project.State, reclaimed 
 	}); err != nil {
 		r.opt.Logf("reconcile: record retire %s/%s: %v", key.Ticket, key.Attempt, err)
 	}
+	// drv-045: surface the retire as a system-log line too — the operational view of
+	// the daemon stopping the session and (not) reclaiming the worktree. The durable
+	// `note` above stays authoritative; this is the stream's one-line echo.
+	disposition := "kept warm"
+	if reclaimed {
+		disposition = "reclaimed worktree"
+	}
+	r.emitSystem(key, systemlog.SystemEvent{
+		Class:   systemlog.ClassCtlRetire,
+		Message: fmt.Sprintf("ctl: retired into %s — %s", st, disposition),
+		Fields:  map[string]string{"state": string(st), "reclaimed": strconv.FormatBool(reclaimed)},
+	})
 }
 
 // foldMetrics reads the session meter's final Totals and writes them into

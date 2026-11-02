@@ -60,6 +60,7 @@ import (
 	"github.com/Dawil/draiver/internal/repo"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/streamlog"
+	"github.com/Dawil/draiver/internal/systemlog"
 )
 
 //go:embed templates/*.html
@@ -561,6 +562,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ticket/{id}/{attempt}", s.handleAttempt)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/live", s.handleAttemptLive)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/agent-logs", s.handleAgentLogs)
+	mux.HandleFunc("GET /ticket/{id}/{attempt}/system-logs", s.handleSystemLogs)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/report", s.handleReport)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/report/asset", s.handleReportAsset)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/report/download", s.handleReportDownload)
@@ -1611,9 +1613,63 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request) {
 	// live rather than in buffer-sized bursts. A follow never ends on its own — it
 	// unblocks when r.Context() cancels on client disconnect.
 	sse := &sseLineWriter{w: w, flusher: flusher}
-	_ = streamlog.TailStream(r.Context(), sse,
-		s.root.SessionStreamPath(id, att), s.root.SessionCtlLogPath(id, att),
-		true /*follow*/, true /*render*/, 50 /*tail backlog*/)
+	// drv-045: the Agent Logs panel is now purely the agent session stream — no
+	// ctl.jsonl health interleave, no synthetic session-online/turn-end lines. Those
+	// system events moved to the System Logs panel (handleSystemLogs). TailAgentStream
+	// renders stream.jsonl alone with the system-role lines suppressed; the on-disk
+	// stream.jsonl and its --json passthrough are unchanged (this is a UI split).
+	_ = streamlog.TailAgentStream(r.Context(), sse,
+		s.root.SessionStreamPath(id, att),
+		true /*follow*/, 50 /*tail backlog*/)
+}
+
+// handleSystemLogs streams the attempt's System Logs panel (GET
+// /ticket/{id}/{attempt}/system-logs) — drv-045's second live panel, modelled on
+// handleAgentLogs with the same SSE framing, the same sseLineWriter, and the same
+// r.Context() binding so the follow ends when the panel collapses. Its source is the
+// system-event journal (system.jsonl) interleaved with draiverctld's health
+// transitions (ctl.jsonl), each line rendered with its own recorded timestamp —
+// never render-time now() — so replaying an attempt shows the same times a live
+// follow showed. Lines are relayed as text and set client-side via textContent,
+// never the markdown→HTML path, the same XSS discipline as Agent Logs.
+func (s *Server) handleSystemLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.fail(w, fmt.Errorf("streaming unsupported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	sse := &sseLineWriter{w: w, flusher: flusher}
+	_ = streamlog.TailSystemLog(r.Context(), sse,
+		s.root.SessionSystemLogPath(id, att), s.root.SessionCtlLogPath(id, att),
+		true /*follow*/, 50 /*tail backlog*/)
+}
+
+// emitSystem appends one operational system event to the attempt's system.jsonl for
+// the System Logs stream (drv-045). It stamps the server's actor onto the record (so
+// "by whom" is legible) and is strictly best-effort: a write failure is swallowed —
+// never failing the board action that produced it — exactly like the reconciler's
+// appendHealth. system.jsonl is an operational projection, never a truth substrate,
+// so it must not be able to break the action it merely observes.
+func (s *Server) emitSystem(id, att string, ev systemlog.SystemEvent) {
+	if ev.Fields == nil {
+		ev.Fields = map[string]string{}
+	}
+	if _, ok := ev.Fields["actor"]; !ok && s.actor != "" {
+		ev.Fields["actor"] = s.actor
+	}
+	_ = systemlog.Append(s.root, id, att, time.Now, ev)
 }
 
 // sseLineWriter adapts streamlog's line-oriented io.Writer output to Server-Sent
@@ -1846,7 +1902,7 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 // log region plus an OOB result banner with the push report. Non-terminal: it does
 // not change the attempt's state.
 func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
-	s.handleGitVerb(w, r, func(id, att string) (gitResultVM, error) {
+	s.handleGitVerb(w, r, "push", func(id, att string) (gitResultVM, error) {
 		// Bare remote (""): the button offers no NAME field, so land picks the sole
 		// remote or the config's primary_remote (the drv-011 default-remote stopgap).
 		res, err := land.Push(r.Context(), s.gw, id, att, "", "")
@@ -1870,7 +1926,7 @@ func (s *Server) handleGitPush(w http.ResponseWriter, r *http.Request) {
 // nothing moved) and returns the re-rendered log region plus an OOB result banner.
 // Non-terminal: the attempt stays in its current state.
 func (s *Server) handleGitSync(w http.ResponseWriter, r *http.Request) {
-	s.handleGitVerb(w, r, func(id, att string) (gitResultVM, error) {
+	s.handleGitVerb(w, r, "sync", func(id, att string) (gitResultVM, error) {
 		// Bare remote (""): land picks the sole remote or the config's primary_remote
 		// (the drv-011 default-remote stopgap); no config path uses the default.
 		res, err := land.Sync(r.Context(), s.gw, id, att, "", "")
@@ -1921,7 +1977,7 @@ type gitResultVM struct {
 // does not flip. run returns the banner to display (success, no-op, OR a handled
 // failure — see handleGitSync), or an error reserved for a genuine server fault,
 // surfaced via s.fail (500) exactly like the other writes.
-func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(id, att string) (gitResultVM, error)) {
+func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, verb string, run func(id, att string) (gitResultVM, error)) {
 	if !sameOrigin(r) {
 		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
 		return
@@ -1937,6 +1993,10 @@ func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(
 		s.fail(w, err)
 		return
 	}
+	// drv-045: record the git control as a system event — the verb and its outcome
+	// (ok / noop / fail) from the result banner. This is the operational view of the
+	// action; a non-noop sync still records its own durable `note` separately.
+	s.emitSystem(id, att, gitSystemEvent(verb, result))
 	vm, err := s.detail(id, att)
 	if err != nil {
 		s.fail(w, err)
@@ -1955,6 +2015,43 @@ func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, run func(
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(buf.Bytes())
+}
+
+// gitSystemEvent composes the drv-045 system-log record for a git control: a
+// ClassGit event naming the verb (push/sync) and the outcome the banner reported.
+// A "fail" outcome takes the error role so it reads red in the panel; ok/noop are
+// neutral system lines. The first line of the banner message is kept for the log so
+// the record stays a single skimmable line.
+func gitSystemEvent(verb string, result gitResultVM) systemlog.SystemEvent {
+	outcome := result.Kind
+	if outcome == "" {
+		outcome = "ok"
+	}
+	summary := truncateFirstLine(result.Message, 100)
+	msg := "git " + verb + ": " + outcome
+	if summary != "" {
+		msg += " — " + summary
+	}
+	return systemlog.SystemEvent{
+		Class:   systemlog.ClassGit,
+		Message: msg,
+		Fields:  map[string]string{"verb": verb, "outcome": outcome},
+		Error:   result.Kind == "fail",
+	}
+}
+
+// truncateFirstLine keeps the first line of s, trimmed, capped to max runes with an
+// ellipsis if anything was dropped — so a multi-line git report collapses to one
+// skimmable system-log line.
+func truncateFirstLine(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if r := []rune(s); len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
 }
 
 // handleProvenance sets an attempt's repo/base from the detail page's provenance
@@ -2004,6 +2101,12 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 	if baseVal != "" {
 		p.Base = &baseVal
 	}
+	// Capture the pre-edit values (best-effort) so the system-log line can show the
+	// from→to the spec asks for; a load failure just omits the "from" side.
+	var oldRepo, oldBase string
+	if prev, err := project.LoadAttempt(s.root, id, att); err == nil {
+		oldRepo, oldBase = prev.Repo, prev.Base
+	}
 	if _, err := s.gw.SetProvenance(id, att, p); err != nil {
 		s.fail(w, err)
 		return
@@ -2013,7 +2116,44 @@ func (s *Server) handleProvenance(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// drv-045: record the provenance edit as a system event (the operational view;
+	// the gateway owns the durable attempt.md write). One line naming the field(s)
+	// changed and, where available, old→new.
+	s.emitSystem(id, att, provenanceSystemEvent(repoVal, baseVal, oldRepo, oldBase))
 	s.render(w, "provenance-panel", provenanceVM{Attempt: a, Saved: true})
+}
+
+// provenanceSystemEvent composes the drv-045 system-log record for a provenance
+// edit: a ClassProvenance event whose message names each field the submit changed
+// with its old→new (an unchanged or newly-set-from-blank field reads naturally), and
+// whose Fields carry the structured repo/base from→to for a machine reader. Only the
+// fields actually submitted (non-blank) are reported — a blank input means "leave
+// unchanged" and is omitted here exactly as it is omitted from the gateway write.
+func provenanceSystemEvent(newRepo, newBase, oldRepo, oldBase string) systemlog.SystemEvent {
+	fields := map[string]string{}
+	var parts []string
+	if newRepo != "" {
+		parts = append(parts, "repo "+fromTo(oldRepo, newRepo))
+		fields["repo_from"], fields["repo_to"] = oldRepo, newRepo
+	}
+	if newBase != "" {
+		parts = append(parts, "base "+fromTo(oldBase, newBase))
+		fields["base_from"], fields["base_to"] = oldBase, newBase
+	}
+	return systemlog.SystemEvent{
+		Class:   systemlog.ClassProvenance,
+		Message: "provenance updated: " + strings.Join(parts, ", "),
+		Fields:  fields,
+	}
+}
+
+// fromTo renders an old→new transition for a system-log message, reading naturally
+// when the old side was blank (a first-time set).
+func fromTo(old, new string) string {
+	if strings.TrimSpace(old) == "" {
+		return "set to `" + new + "`"
+	}
+	return "`" + old + "` → `" + new + "`"
 }
 
 // handleRepoSettings sets a repo's per-repo defaults from the detail page's

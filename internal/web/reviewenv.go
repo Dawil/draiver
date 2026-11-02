@@ -11,6 +11,7 @@ import (
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/reviewenv"
+	"github.com/Dawil/draiver/internal/systemlog"
 )
 
 // reviewEnvsVM is the attempt page's whole review-environment surface (drv-034): one
@@ -445,6 +446,16 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// drv-045: record the up transition as a system event (the idempotent no-op above
+	// already returned, so this fires only on a real launch — the transition, not the
+	// level, mirroring the health-edge discipline). The eventual up/failed outcome is
+	// driven by the Launch goroutine and surfaced through the record; this line marks
+	// the operator's act of bringing it up.
+	s.emitSystem(id, att, systemlog.SystemEvent{
+		Class:   systemlog.ClassReviewEnvUp,
+		Message: "review-env up: `" + envName + "` → starting",
+		Fields:  map[string]string{"env": envName, "state": string(reviewenv.Starting)},
+	})
 	// Launch on a background context so tearing down the request does not cancel the
 	// bring-up mid-`up`. The goroutine persists the outcome (up+url / failed); the
 	// panel's status poll surfaces it.
@@ -507,10 +518,20 @@ func (s *Server) handleReviewEnvDown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "draiver: not a declared, review-ready environment for this attempt", http.StatusBadRequest)
 		return
 	}
-	if _, err := s.reviewEnvManager().Teardown(r.Context(), a, envName, "button"); err != nil {
+	rec, err := s.reviewEnvManager().Teardown(r.Context(), a, envName, "button")
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	// drv-045: record the down transition as a system event, naming the env and the
+	// terminal state Teardown reached — `down` (confirmed gone) or `teardown-failed` (a
+	// leak). A teardown-failed takes the error role so a leak reads red in the stream.
+	s.emitSystem(id, att, systemlog.SystemEvent{
+		Class:   systemlog.ClassReviewEnvDn,
+		Message: "review-env down: `" + envName + "` → " + string(rec.State),
+		Fields:  map[string]string{"env": envName, "state": string(rec.State)},
+		Error:   rec.State == reviewenv.TeardownFailed,
+	})
 	s.renderReviewEnvPanel(w, r.Context(), a, envName)
 }
 

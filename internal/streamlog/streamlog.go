@@ -22,6 +22,7 @@ import (
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/agent/claudecode"
 	"github.com/Dawil/draiver/internal/reconcile"
+	"github.com/Dawil/draiver/internal/systemlog"
 )
 
 // The role vocabulary event kinds map onto — a small, stable set that replaces
@@ -95,6 +96,13 @@ type streamRenderer struct {
 	md        *glamour.TermRenderer
 	ctxTokens int // last-known cumulative context tokens; -1 until first usage
 	now       func() time.Time
+	// suppressSystem drops the synthetic system-role lifecycle lines the agent
+	// stream carries — `session online` (EventSystem) and `turn end` (EventTurnEnd)
+	// — from the render (drv-045). The web "Agent Logs" panel sets it so the agent
+	// column is purely the agent/tools talking; those lifecycle transitions move to
+	// the System Logs stream as real recorded events. The CLI `ctl logs` leaves it
+	// false, keeping the terminal's historical interleave intact.
+	suppressSystem bool
 }
 
 // newStreamRenderer builds a renderer bound to out, detecting whether out is a
@@ -162,7 +170,12 @@ func (r *streamRenderer) renderEvent(ev agent.Event) {
 	switch ev.Kind {
 	case agent.EventSystem:
 		// The session id is a transport handle, not something a human reading the
-		// stream needs; note only that the session came online.
+		// stream needs; note only that the session came online. Suppressed in the
+		// agent-only web render (drv-045): a system-role lifecycle line, it belongs in
+		// the System Logs stream, not spliced into the agent column.
+		if r.suppressSystem {
+			return
+		}
 		r.emit(roleSystem, "session online")
 	case agent.EventAssistant:
 		if ev.Thinking {
@@ -192,6 +205,11 @@ func (r *streamRenderer) renderEvent(ev agent.Event) {
 		// dedicated line for them is dropped (drvctl-025 #8).
 		return
 	case agent.EventTurnEnd:
+		// A system-role lifecycle line; suppressed in the agent-only web render
+		// (drv-045), same reasoning as EventSystem above.
+		if r.suppressSystem {
+			return
+		}
 		r.emit(roleSystem, "turn end ("+ev.Turn+")")
 	case agent.EventError:
 		r.emit(roleError, ev.Err)
@@ -433,6 +451,102 @@ func TailStream(ctx context.Context, out io.Writer, streamPath, ctlPath string, 
 	}
 }
 
+// TailAgentStream renders an attempt's agent session stream ALONE (drv-045): the
+// web "Agent Logs" panel's source. Unlike TailStream it folds in no ctl.jsonl health
+// and suppresses the synthetic system-role lifecycle lines (`session online`, `turn
+// end`), so the agent column is purely what the model and its tools emitted — the
+// system events live in the System Logs stream (TailSystemLog). It is always a
+// human render (the web panel never serves raw); the on-disk stream.jsonl and its
+// --json passthrough are untouched — this is a UI split, not a format change.
+//
+// tail is the follow-mode backlog window over stream.jsonl, exactly as TailStream
+// documents it.
+func TailAgentStream(ctx context.Context, out io.Writer, streamPath string, follow bool, tail int) error {
+	streamTail := -1
+	if follow {
+		streamTail = tail
+	}
+	sr := newStreamRenderer(out)
+	sr.suppressSystem = true
+	stream := &lineReader{path: streamPath, tail: streamTail}
+	defer stream.close()
+
+	printed := false
+	for {
+		n := stream.drain(func(line string) { sr.renderLine(line); printed = true })
+		if !follow {
+			if stream.flush(func(line string) { sr.renderLine(line); printed = true }) {
+				printed = true
+			}
+			if !printed {
+				fmt.Fprintln(out, "(no session stream yet)")
+			}
+			return nil
+		}
+		if n == 0 {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+	}
+}
+
+// TailSystemLog renders an attempt's system-event stream (drv-045): the web "System
+// Logs" panel's source. It interleaves two append-only sources through one renderer,
+// each line stamped with its OWN recorded timestamp — never render-time now() — so
+// the timestamp column is truthful on a live follow and on historical replay alike:
+//
+//   - system.jsonl (systemPath): the operator/daemon system events this ticket adds
+//     (provenance edits, git controls, review-env up/down, promotion checks, ctld
+//     lifecycle), via renderSystemLine.
+//   - ctl.jsonl (ctlPath): draiverctld's health error-start/error-end transitions,
+//     via the existing renderHealthLine — health is a system signal and moves here
+//     with the rest. It already carries a real recorded ts.
+//
+// Both sources are sparse operational records, so neither is windowed: tail bounds
+// only follow-mode backlog symmetry with the agent panel, but in practice the whole
+// file is shown (a system log is not a high-rate stream). A missing file is simply
+// skipped until it appears (lineReader opens lazily), so a freshly-deleted or
+// never-written system.jsonl starts the stream empty rather than erroring.
+func TailSystemLog(ctx context.Context, out io.Writer, systemPath, ctlPath string, follow bool, tail int) error {
+	sysTail := -1
+	if follow {
+		sysTail = tail
+	}
+	sr := newStreamRenderer(out)
+	system := &lineReader{path: systemPath, tail: sysTail}
+	ctl := &lineReader{path: ctlPath, tail: -1}
+	defer system.close()
+	defer ctl.close()
+
+	printed := false
+	for {
+		n := system.drain(func(line string) { sr.renderSystemLine(line); printed = true })
+		n += ctl.drain(func(line string) { sr.renderHealthLine(line); printed = true })
+		if !follow {
+			if system.flush(func(line string) { sr.renderSystemLine(line); printed = true }) {
+				printed = true
+			}
+			if ctl.flush(func(line string) { sr.renderHealthLine(line); printed = true }) {
+				printed = true
+			}
+			if !printed {
+				fmt.Fprintln(out, "(no system events yet)")
+			}
+			return nil
+		}
+		if n == 0 {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+	}
+}
+
 // tailRaw is the --json path: the stream.jsonl bytes, verbatim. It preserves the
 // exact pre-drvctl-027 behaviour — a `| jq` / replay consumer sees the on-disk
 // journal untouched, and health never enters this stream. In follow mode it honours
@@ -646,6 +760,38 @@ func (r *streamRenderer) renderHealthLine(line string) {
 	case "end":
 		r.emitAt(roleSystem, ts, "ctl: "+ev.Class+" cleared")
 	}
+}
+
+// renderSystemLine renders one session/system.jsonl record — a drv-045 system
+// event — through the shared prefix vocabulary so it reads like the agent/health
+// lines, just from a different source. Crucially it ALWAYS uses the record's own
+// recorded ts (parsed from RFC3339, shown local), never r.now(): a system line's
+// time is the time its writer stamped it, so the panel is truthful on live follow
+// and replay alike. A failed action (ev.Error) takes the error role; everything else
+// is the neutral system role. The body is the emitter's pre-composed Message, set
+// verbatim (the same XSS-safe textContent path the web panel uses). A malformed or
+// empty record prints nothing.
+func (r *streamRenderer) renderSystemLine(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	var ev systemlog.SystemEvent
+	if json.Unmarshal([]byte(line), &ev) != nil {
+		return
+	}
+	if strings.TrimSpace(ev.Message) == "" {
+		return
+	}
+	ts := r.now().Format(tsLayout)
+	if t, err := time.Parse(time.RFC3339, ev.TS); err == nil {
+		ts = t.Local().Format(tsLayout)
+	}
+	role := roleSystem
+	if ev.Error {
+		role = roleError
+	}
+	r.emitAt(role, ts, ev.Message)
 }
 
 // openStream opens the stream file, waiting for it to appear when following. It
