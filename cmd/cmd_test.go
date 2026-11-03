@@ -69,7 +69,7 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	resolveByFlag = ""
 	logByFlag = ""
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
-	testLog, testDetach = false, false
+	testLog, testDetach, testOnly = false, false, false
 	parkClear = false
 	reportJSON, reportRun, reportOut = "", "", ""
 	reportInline, reportDemo = true, false

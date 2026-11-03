@@ -29,6 +29,15 @@ import (
 // fast iterative loop — run + report only, no write, works against a dirty tree.
 var testLog bool
 
+// testOnly runs — and captures — exactly one rung (RUNG) on demand: its own
+// environment lifecycle and nothing below it, capturing its declared artefacts
+// regardless of verdict (drv-047). It is a diagnostic/evidence producer, NOT a gate
+// recorder: it NEVER appends a test-result event, so it is mutually exclusive with
+// --log. The review gate's soundness (a logged result at rung j implies every required
+// rung ≤ j passed) rests on the full climb halting at the first red required rung — a
+// single-rung run breaks that premise, so it must not write a gate event.
+var testOnly bool
+
 var testCmd = &cobra.Command{
 	Use:   "test [RUNG]",
 	Short: "Run the worktree's test pyramid; --log records a passing result",
@@ -54,6 +63,14 @@ var testCmd = &cobra.Command{
 		wd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("resolve working directory: %w", err)
+		}
+
+		// --only and --log are mutually exclusive (drv-047): --only is a single-rung
+		// evidence producer that must never advance the gate, --log is the gate recorder
+		// that trusts the full climb. Refuse the combination with a clear reason rather
+		// than silently preferring one.
+		if testOnly && testLog {
+			return fmt.Errorf("--only and --log are mutually exclusive: a single-rung run cannot record a gate result (--only captures a report on demand; --log records the review gate, which the full climb proves)")
 		}
 
 		out := cmd.OutOrStdout()
@@ -95,6 +112,14 @@ var testCmd = &cobra.Command{
 		levels, ok := levelsUpTo(p, target)
 		if !ok {
 			return fmt.Errorf("rung %q is not a level in %s (levels: %s)", target, pyramid.FileName, rungNames(p))
+		}
+
+		// --only runs — and captures — exactly the target rung, skipping every rung below
+		// it (drv-047). It reuses runRung (so it is overlay-compatible for free) and the
+		// existing artefact capture, but writes NO test-result event and tolerates a dirty
+		// tree. The exit code is that rung's alone.
+		if testOnly {
+			return runOnlyRung(ctx, cmd, wd, p, levels[len(levels)-1], extraEnv)
 		}
 
 		// --log demands a commit that fully captures the tree under test, so refuse a
@@ -251,6 +276,63 @@ func captureBDDArtefacts(out io.Writer, root store.Root, key worktree.Key, targe
 		fmt.Fprintf(out, "pruned %d old BDD run(s) (keep=%d)\n", len(removed), cfg.BDDArtefactKeep)
 	}
 	return refs, runKey, nil
+}
+
+// runOnlyRung runs exactly one rung (drv-047 `--only`): its own environment lifecycle
+// via runRung (up → healthchecks → run → down) and nothing below it, then captures its
+// declared artefacts regardless of the run's verdict — a failing report is evidence
+// worth keeping, exactly as the board's Rerun treats it. It appends NO test-result
+// event: a single-rung run cannot soundly advance the review gate (see testOnly), so it
+// is an evidence producer only. The rung's own exit code is returned verbatim, so a red
+// rung exits non-zero whether it is required or advisory — advisory-vs-required is
+// irrelevant to a one-element run, and there are no lower rungs to halt on.
+func runOnlyRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyramid, lv pyramid.Level, extraEnv []string) error {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "running only rung %q — lower rungs are not run; captures the report but records no gate result (drv-047 --only)\n", lv.Name)
+
+	runErr := runRung(ctx, cmd, wd, p, lv, extraEnv)
+
+	// Capture the rung's declared artefacts regardless of the run's verdict, stamped
+	// with HEAD best-effort for provenance. Best-effort: a capture problem is warned
+	// about and never changes the rung's exit code — the run's verdict stays
+	// authoritative, exactly as `down`/live-cucumber capture are elsewhere.
+	captureOnlyArtefacts(cmd, wd, lv)
+
+	return runErr
+}
+
+// captureOnlyArtefacts durably stores a `--only` run's declared evidence (cucumber-JSON
+// + artifacts) into the attempt's artefacts/ store, regardless of verdict, reusing the
+// same captureBDDArtefacts path the --log climb uses. It is wholly best-effort: a
+// non-capture rung is a no-op, and any failure to identify the attempt, resolve the
+// root, stamp HEAD, or write the capture is a warning — never a changed exit code. A
+// missing cucumber-JSON (e.g. the run failed before writing one) is reported and
+// swallowed, so `--only`'s exit code always reflects the rung alone.
+func captureOnlyArtefacts(cmd *cobra.Command, wd string, lv pyramid.Level) {
+	if strings.TrimSpace(lv.CucumberJSON) == "" && len(lv.Artifacts) == 0 {
+		return // an ordinary rung declares no evidence — nothing to capture
+	}
+	errOut := cmd.ErrOrStderr()
+	ctx := cmd.Context()
+	key, err := worktree.Identify(ctx, wd)
+	if err != nil {
+		fmt.Fprintf(errOut, "warning: --only could not identify the attempt to store artefacts (ignored): %v\n", err)
+		return
+	}
+	root, err := resolveRoot()
+	if err != nil {
+		fmt.Fprintf(errOut, "warning: --only could not resolve the data root to store artefacts (ignored): %v\n", err)
+		return
+	}
+	// HEAD best-effort: --only tolerates a dirty tree, so the stamp is the committed HEAD
+	// if one resolves, else the "nocommit" sentinel the artefact store already understands.
+	sha := "nocommit"
+	if h, err := worktree.HeadSHA(ctx, wd); err == nil && strings.TrimSpace(h) != "" {
+		sha = strings.TrimSpace(h)
+	}
+	if _, _, err := captureBDDArtefacts(cmd.OutOrStdout(), root, key, lv, sha); err != nil {
+		fmt.Fprintf(errOut, "warning: --only captured no report (ignored): %v\n", err)
+	}
 }
 
 // testResultBody renders the test-result event body, noting the captured run key
@@ -526,6 +608,7 @@ func rungNames(p *pyramid.Pyramid) string {
 
 func init() {
 	testCmd.Flags().BoolVar(&testLog, "log", false, "on all-green, append a durable test-result event (refuses a dirty tree)")
+	testCmd.Flags().BoolVar(&testOnly, "only", false, "run and capture exactly RUNG — its own env lifecycle and nothing below it — regardless of lower rungs; captures the report on demand but records no gate result (mutually exclusive with --log)")
 	testCmd.Flags().BoolVar(&testDetach, "detach", false, "run the climb out-of-band and land a durable pass/fail result on the attempt's log; returns at once so the session can `park` (drvctl-055)")
 	rootCmd.AddCommand(testCmd)
 }
