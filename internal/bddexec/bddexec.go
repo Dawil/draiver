@@ -14,8 +14,12 @@
 // gated on all-green + --log; a rerun instead executes a single rung and captures
 // its output every time. The control flow genuinely differs, so this re-expresses
 // the thin up/healthcheck/run/capture orchestration rather than sharing cmd's — the
-// reuse is at the building-block level (pyramid, bddartefact). Converging cmd onto
-// this is worth a follow-up once drv-016/017/018 settle on main.
+// reuse is at the building-block level (pyramid, bddartefact). Converging cmd's
+// orchestration onto this is still worth a follow-up; what has converged (drv-047) is
+// pyramid *resolution*: a rerun now routes through the shared overlay.ResolvePyramid,
+// the same seam `draiver test`/`draiver promote` use, so an overlay-only codebase
+// reruns its overlay's bound BDD rung with DRAIVER_CODEBASE_DIR / DRAIVER_OVERLAY_DIR
+// threaded into every shell step, cwd the codebase worktree.
 package bddexec
 
 import (
@@ -31,6 +35,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/bddartefact"
 	"github.com/Dawil/draiver/internal/config"
+	"github.com/Dawil/draiver/internal/overlay"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -69,18 +74,31 @@ type Outcome struct {
 	Lines  []string
 }
 
-// BoundBDDRung resolves the BDD rung a rerun would re-execute for the worktree at
-// wd: the highest (closest-to-target) rung declaring a cucumber_json report, plus
-// its resolved environment (nil for the ambient context). ok is false — not an
-// error — when there is no pyramid or no BDD rung, so callers can cheaply gate a
-// "rerun" affordance. A malformed .test-pyramid.yaml is a real error.
-func BoundBDDRung(wd string) (pyramid.Level, *pyramid.Environment, bool, error) {
-	p, err := pyramid.Load(wd)
+// BoundBDDRung resolves the BDD rung a rerun would re-execute for the codebase repo:
+// the highest (closest-to-target) rung declaring a cucumber_json report, plus its
+// resolved environment (nil for the ambient context). ok is false — not an error —
+// when there is neither an in-repo nor an overlay pyramid, or no BDD rung in it, so
+// callers can cheaply gate a "rerun" affordance. A malformed .test-pyramid.yaml is a
+// real error.
+//
+// It is overlay-aware (drv-041/drv-047) but READ-ONLY: it never cuts a worktree. The
+// in-repo pyramid wins; when the codebase carries none it resolves the overlay in place
+// (overlay.Resolve + pyramid.Load against the developer-owned overlay repo), exactly the
+// no-checkout pattern the board badge uses (internal/web/pyramid.go). repo is the
+// codebase's recorded base path (a.Repo), the resolution key for the overlay settings —
+// not a directory the rung runs in.
+func BoundBDDRung(repo string) (pyramid.Level, *pyramid.Environment, bool, error) {
+	p, err := pyramid.Load(repo)
 	if err != nil {
 		return pyramid.Level{}, nil, false, err
 	}
 	if p == nil {
-		return pyramid.Level{}, nil, false, nil
+		// No in-repo pyramid: resolve an overlay in place. A missing/unresolvable overlay
+		// is ok=false (nothing to rerun), never an error — the gate just hides the button.
+		p, err = overlayPyramid(repo)
+		if err != nil || p == nil {
+			return pyramid.Level{}, nil, false, err
+		}
 	}
 	lv, ok := lastBDDRung(p)
 	if !ok {
@@ -88,6 +106,26 @@ func BoundBDDRung(wd string) (pyramid.Level, *pyramid.Environment, bool, error) 
 	}
 	env, _ := p.EnvironmentFor(lv)
 	return lv, env, true, nil
+}
+
+// overlayPyramid resolves the codebase repo's test-pyramid overlay and loads its pyramid
+// from the overlay repo in place (no worktree cut) — the read-only resolution the rerun
+// gate needs for an overlay-only codebase. It mirrors internal/web/pyramid.go's badge
+// path: a missing/unresolvable overlay is a clean nil (nothing to rerun); only a genuine
+// overlay I/O or malformed-pyramid fault is an error.
+func overlayPyramid(repo string) (*pyramid.Pyramid, error) {
+	if strings.TrimSpace(repo) == "" {
+		return nil, nil
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, err
+	}
+	loc, ok, err := overlay.Resolve(repo, cfg.RepoSettings(repo).Overlay, cfg.OverlayDir)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return pyramid.Load(loc.Repo)
 }
 
 // lastBDDRung returns the highest-indexed rung declaring a cucumber_json — the BDD
@@ -137,7 +175,13 @@ func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outc
 	}
 	defer removeWorktree(ctx, repo, wd)
 
-	lv, env, ok, err := BoundBDDRung(wd)
+	// Resolve the rung through the shared overlay resolver (drv-047), exactly as
+	// `draiver test` does — so an overlay-only codebase reruns its overlay's BDD rung,
+	// and extraEnv (DRAIVER_CODEBASE_DIR / DRAIVER_OVERLAY_DIR) threads into every shell
+	// step. cwd stays the detached codebase worktree wd; overlay assets are reached via
+	// $DRAIVER_OVERLAY_DIR. An in-repo pyramid yields a nil overlay and nil extraEnv, so
+	// the in-repo rerun is byte-for-byte unchanged.
+	p, extraEnv, ok, err := resolveRerunPyramid(ctx, wd, repo, key)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -147,11 +191,13 @@ func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outc
 			Lines:  []string{"No BDD rung in `.test-pyramid.yaml` — there is nothing to rerun."},
 		}, nil
 	}
+	lv, _ := lastBDDRung(p)
+	env, _ := p.EnvironmentFor(lv)
 	out := Outcome{Rung: lv.Name, Env: lv.Environment}
 
 	// Bring the environment up (drv-012). A non-zero `up` is infrastructure, not code.
 	if env != nil && strings.TrimSpace(env.Up) != "" {
-		if err := runShell(ctx, wd, env.Up); err != nil {
+		if err := runShell(ctx, wd, env.Up, extraEnv); err != nil {
 			out.Status = StatusEnvFault
 			out.Lines = []string{
 				fmt.Sprintf("Environment %q failed to come up: %v.", env.Name, err),
@@ -161,7 +207,7 @@ func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outc
 		}
 		// Tear down unconditionally, best-effort, once we have brought it up.
 		if strings.TrimSpace(env.Down) != "" {
-			defer runShell(ctx, wd, env.Down)
+			defer runShell(ctx, wd, env.Down, extraEnv)
 		}
 	}
 
@@ -169,7 +215,7 @@ func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outc
 	// ball back rather than capture a bogus report.
 	if env != nil {
 		for _, hc := range env.Healthchecks {
-			if err := runShell(ctx, wd, hc.Script); err != nil {
+			if err := runShell(ctx, wd, hc.Script, extraEnv); err != nil {
 				out.Status = StatusBlocked
 				out.Lines = []string{
 					fmt.Sprintf("Healthcheck %q for environment %q is red — rerun blocked.", hc.Name, env.Name),
@@ -182,7 +228,7 @@ func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outc
 
 	// Execute the rung, then capture its output as a fresh run regardless of the
 	// run's own verdict — a failing run's report is evidence worth keeping.
-	runErr := runShell(ctx, wd, lv.Run)
+	runErr := runShell(ctx, wd, lv.Run, extraEnv)
 
 	// Stamp with the reviewed commit we cut the worktree at — never "nocommit". The
 	// worktree is detached at exactly this commit, so the capture names the real code
@@ -328,10 +374,43 @@ func gitRun(ctx context.Context, repo string, args ...string) error {
 
 // runShell runs a `sh -c` command string in wd and returns its run error (nil on
 // exit 0) — the same exec seam `draiver test` uses for up/down/healthcheck/run.
-func runShell(ctx context.Context, wd, script string) error {
+//
+// extraEnv is the overlay execution contract (drv-041/drv-047): when an overlay is
+// active it carries DRAIVER_CODEBASE_DIR / DRAIVER_OVERLAY_DIR, layered over the
+// inherited environment. For an in-repo pyramid it is empty and rc.Env is left unset,
+// so the command inherits os.Environ() exactly as before — byte-for-byte unchanged.
+func runShell(ctx context.Context, wd, script string, extraEnv []string) error {
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.Dir = wd
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	return cmd.Run()
+}
+
+// resolveRerunPyramid resolves the pyramid a rerun re-executes for the attempt, folding
+// drv-041's overlay model exactly as cmd/test.go's resolvePyramid does: the in-repo
+// pyramid at the detached codebase worktree wd wins; otherwise the attempt's configured
+// overlay is cut and loaded, returning its ScriptEnv(wd) as extraEnv. repo is the
+// codebase's recorded base path, the resolution key for the overlay settings. ok is
+// false when there is neither an in-repo nor an overlay pyramid with a BDD rung.
+func resolveRerunPyramid(ctx context.Context, wd, repo string, key worktree.Key) (*pyramid.Pyramid, []string, bool, error) {
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("bddexec: load config: %w", err)
+	}
+	res := cfg.RepoSettings(repo)
+	p, _, extraEnv, err := overlay.ResolvePyramid(ctx, wd, repo, res.Overlay, cfg.OverlayDir, key)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if p == nil {
+		return nil, nil, false, nil
+	}
+	if _, ok := lastBDDRung(p); !ok {
+		return nil, nil, false, nil
+	}
+	return p, extraEnv, true, nil
 }
 
 func envLabel(env *pyramid.Environment) string {

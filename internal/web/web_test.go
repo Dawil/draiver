@@ -2069,6 +2069,65 @@ func TestRestartContextRejectsNonAutoStop(t *testing.T) {
 	}
 }
 
+// TestRestartContextCardControl pins decision #25's board surface: a card whose attempt
+// auto-stopped on a full context window shows the one-click "Restart context window"
+// control; an ordinary escalation's card does not; and a board-origin POST (?surface=card)
+// resolves+restarts and returns the re-rendered BOARD (not the attempt-page fragment), so
+// the card leaves Needs-me without opening the attempt.
+func TestRestartContextCardControl(t *testing.T) {
+	// Auto-stop escalation (seq 2) → the board card shows the restart-context control.
+	auto := seedAutoStopEscalation(t)
+	h, calls := newServerWithRestart(t, auto, nil)
+	board := get(t, h, "/").Body.String()
+	for _, want := range []string{
+		`data-testid="restart-context-btn-ESC-1-0001"`,
+		`name="seq" value="2"`,
+		"/ticket/ESC-1/0001/restart-context?surface=card",
+	} {
+		if !strings.Contains(board, want) {
+			t.Errorf("auto-stop card missing restart-context control %q", want)
+		}
+	}
+
+	// Ordinary (untagged) escalation → no restart-context control on the card.
+	ord := seedEscalation(t)
+	ho, _ := newServerWithRestart(t, ord, nil)
+	ob := get(t, ho, "/").Body.String()
+	if strings.Contains(ob, `data-testid="restart-context-btn-ESC-1-0001"`) {
+		t.Errorf("an ordinary escalation card must NOT show the restart-context control")
+	}
+
+	// Board-origin click: resolves the escalation, triggers the restart, and returns the
+	// re-rendered board (not the attempt-page live fragment + banner).
+	form := url.Values{"seq": {"2"}}
+	req := httptest.NewRequest(http.MethodPost, "/ticket/ESC-1/0001/restart-context?surface=card", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://"+req.Host)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("board restart-context POST = %d, want 200\n%s", rr.Code, rr.Body.String())
+	}
+	if got := stateOf(t, auto, "ESC-1", "0001"); got != project.Running {
+		t.Errorf("after board restart, state = %q, want Running (escalation resolved)", got)
+	}
+	if len(*calls) != 1 || (*calls)[0] != "ESC-1/0001" {
+		t.Errorf("restart calls = %v, want one [ESC-1/0001]", *calls)
+	}
+	out := rr.Body.String()
+	// A board fragment: the card is present and the escalation cleared the control; it is
+	// NOT the attempt page's restart-result banner.
+	if !strings.Contains(out, `data-testid="card-ESC-1-0001"`) {
+		t.Errorf("board-origin restart response should re-render the card\n%s", out)
+	}
+	if strings.Contains(out, `data-testid="restart-result"`) {
+		t.Errorf("board-origin restart must not emit the attempt-page restart-result banner")
+	}
+	if strings.Contains(out, `data-testid="restart-context-btn-ESC-1-0001"`) {
+		t.Errorf("the resolved escalation must no longer show the restart-context control")
+	}
+}
+
 // TestRestartContextCrossOriginRejected pins the CSRF guard on the restart write.
 func TestRestartContextCrossOriginRejected(t *testing.T) {
 	root := seedAutoStopEscalation(t)

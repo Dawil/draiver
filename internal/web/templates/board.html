@@ -82,6 +82,24 @@
     {{if .WaitingReason}}<span class="waiting" data-testid="waiting-{{.Ticket}}-{{.ID}}">{{inlineMD .WaitingReason}}</span>{{end}}
   </a>
   <div class="card-actions">
+    {{/* Restart context window (decision #25): when an attempt has auto-stopped on a full
+         context window (an open escalation tagged context-auto-stop, drv-028), surface the
+         same one-click "resolve + restart on a clean window" the attempt page offers — but
+         straight from the dashboard, so a reviewer never has to open the attempt. It posts
+         the escalation seq to the existing /restart-context route with ?surface=card, so
+         handleRestartContext re-renders the board and the card leaves Needs-me as the
+         escalation clears. No confirm dialog — a restart is a safe recovery action. The
+         control renders only for this escalation kind; the handler re-validates the seq. */}}
+    {{with restartContext $a}}
+    <form class="restart-context-card-form" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/restart-context?surface=card"
+          hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/restart-context?surface=card" hx-target="#board-region" hx-swap="innerHTML">
+      <input type="hidden" name="seq" value="{{.Seq}}">
+      <button type="submit" class="restart-context-btn" data-testid="restart-context-btn-{{$a.Ticket}}-{{$a.ID}}"
+              aria-label="restart context window" title="Restart context window — resume on a clean context (cold-start from brief)">
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.46-3.54" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M13 2.5V5h-2.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </form>
+    {{end}}
     {{if canEnable .}}
     <form class="enable-form" method="post" action="/ticket/{{.Ticket}}/{{.ID}}/enable"
           hx-post="/ticket/{{.Ticket}}/{{.ID}}/enable" hx-target="closest .card-wrap" hx-swap="outerHTML">
@@ -94,13 +112,13 @@
     {{/* Mark-done tick (drv-046): on an all-green Review card, one click ratifies the
          ticket into Done without opening the attempt. It reuses the accept-tick SVG the
          archive affordance draws but is a DISTINCT action — a different route, testid,
-         tooltip, and confirm copy — so a reviewer and the BDD tests never confuse it with
-         the Done-card archive accept. Re-renders the whole board region so the card
-         relocates Review → Done, exactly as the archive form does. */}}
+         and tooltip — so a reviewer and the BDD tests never confuse it with the Done-card
+         archive accept. Re-renders the whole board region so the card relocates Review →
+         Done, exactly as the archive form does. No confirm dialog: by the time the tick
+         is lit every promotion has already been run and is green (decision #25). */}}
     {{if canMarkDone $a}}
     <form class="markdone-form" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/done"
-          hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/done" hx-target="#board-region" hx-swap="innerHTML"
-          hx-confirm="Mark {{$a.Ticket}} done? Every promotion is green — this ratifies the attempt into Done.">
+          hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/done" hx-target="#board-region" hx-swap="innerHTML">
       <button type="submit" class="markdone-btn" data-testid="markdone-btn-{{$a.Ticket}}-{{$a.ID}}"
               aria-label="mark done — all promotions green" title="Mark done — all promotions green">
         <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -155,8 +173,9 @@
      handlePromote re-renders the whole card (closest .card-wrap, outerHTML) — the chip
      flips grey→green/red in place and the all-green mark-done tick appears/disappears.
      While the POST is in flight an inline CSS spinner shows (hx-indicator) and the button
-     is aria-busy; hx-confirm reuses the attempt page's copy so a stray click can't kick
-     off a check silently. The hover info tooltip is preserved on the button. */}}
-{{define "promo-chips"}}{{with promoChips .}}<div class="card-promos" data-testid="promos-{{$.Ticket}}-{{$.ID}}">{{range .}}<form class="promo-form" method="post" action="/ticket/{{$.Ticket}}/{{$.ID}}/promote/{{.Env}}?surface=card" hx-post="/ticket/{{$.Ticket}}/{{$.ID}}/promote/{{.Env}}?surface=card" hx-target="closest .card-wrap" hx-swap="outerHTML" hx-indicator="find .promo-spin" hx-confirm="Check the promotion to {{.Env}}? This runs the repo's qa check against the reviewed commit and records the verdict — draiver does not deploy, merge, or push." hx-on::before-request="this.querySelector('button').setAttribute('aria-busy','true')" hx-on::after-request="this.querySelector('button').removeAttribute('aria-busy')"><button type="submit" class="promo promo-{{.Class}}" data-testid="promo-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" data-promo-class="{{.Class}}" title="{{.Label}}" aria-label="{{.Label}} — click to run the check">{{.Env}} <span class="promo-sym" aria-hidden="true">{{.Symbol}}</span><span class="promo-spin" data-testid="promo-spin-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="26 12"/></svg></span></button></form>{{end}}</div>{{end}}{{end}}
+     is aria-busy. No confirm dialog: a check is a safe, read-only verify (no deploy/merge/
+     push), so a click runs it straight away (decision #25). The hover info tooltip is
+     preserved on the button. */}}
+{{define "promo-chips"}}{{with promoChips .}}<div class="card-promos" data-testid="promos-{{$.Ticket}}-{{$.ID}}">{{range .}}<form class="promo-form" method="post" action="/ticket/{{$.Ticket}}/{{$.ID}}/promote/{{.Env}}?surface=card" hx-post="/ticket/{{$.Ticket}}/{{$.ID}}/promote/{{.Env}}?surface=card" hx-target="closest .card-wrap" hx-swap="outerHTML" hx-indicator="find .promo-spin" hx-on::before-request="this.querySelector('button').setAttribute('aria-busy','true')" hx-on::after-request="this.querySelector('button').removeAttribute('aria-busy')"><button type="submit" class="promo promo-{{.Class}}" data-testid="promo-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" data-promo-class="{{.Class}}" title="{{.Label}}" aria-label="{{.Label}} — click to run the check">{{.Env}} <span class="promo-sym" aria-hidden="true">{{.Symbol}}</span><span class="promo-spin" data-testid="promo-spin-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="26 12"/></svg></span></button></form>{{end}}</div>{{end}}{{end}}
 
 {{define "pyramid-badge"}}{{with pyramidBadge .}}<span class="pyramid {{if .Stale}}pyramid-stale{{else if .Dirty}}pyramid-dirty{{else}}pyramid-green{{end}}" data-testid="pyramid-{{$.Ticket}}-{{$.ID}}" data-stale="{{.Stale}}" data-dirty="{{.Dirty}}" role="img" title="{{.Label}}" aria-label="{{.Label}}">{{range $i, $r := .Rungs}}{{if $i}}<span class="pyramid-sep" aria-hidden="true">·</span>{{end}}<span class="pyramid-rung {{if $r.Reached}}rung-on{{else}}rung-off{{end}}">{{$r.Name}}{{if $r.Environment}}<span class="pyramid-env" data-testid="pyramid-env-{{$.Ticket}}-{{$.ID}}-{{$r.Name}}" title="runs in the {{$r.Environment}} environment">@{{$r.Environment}}</span>{{end}}{{if $r.Reached}}<span class="rung-check" aria-hidden="true"> ✓</span>{{end}}</span>{{end}}{{if .Stale}}<span class="pyramid-flag" aria-hidden="true">stale</span>{{else if .Dirty}}<span class="pyramid-flag" aria-hidden="true">uncommitted</span>{{end}}</span>{{end}}{{end}}

@@ -82,8 +82,10 @@ body {
    the archive button alone, more when the play button is also present. */
 .card-actions { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; z-index: 1; }
 .card-wrap:has(.card-actions) .card { padding-right: 36px; }
-/* Two corner buttons (play+archive, or mark-done+archive) need the wider reserve. */
-.card-wrap:has(.enable-form) .card, .card-wrap:has(.markdone-form) .card { padding-right: 62px; }
+/* Two corner buttons (play+archive, mark-done+archive, or restart-context+archive) need
+   the wider reserve. */
+.card-wrap:has(.enable-form) .card, .card-wrap:has(.markdone-form) .card,
+.card-wrap:has(.restart-context-card-form) .card { padding-right: 62px; }
 /* Green play button: enable a parked Running attempt into supervision. Colour is
    the eucalypt --dot-running (the same green the running dot uses); the play
    triangle carries the meaning as shape, not colour alone, and it is a real
@@ -98,6 +100,21 @@ body {
 }
 .enable-btn:hover { background: var(--dot-running); color: var(--panel-2); }
 .enable-btn:focus-visible { outline: 2px solid var(--dot-running); outline-offset: 2px; }
+/* Restart-context button (decision #25): on a card that auto-stopped on a full context
+   window, a one-click "resolve + restart on a clean window". Amber --alert signals the
+   attention state (the attempt is stuck), the circular-arrow glyph carries "restart" as
+   shape; always visible (not hover-revealed like mark-done) so the remediation is easy to
+   find on a stuck card. A real <button> with an aria-label. */
+.restart-context-card-form { margin: 0; }
+.restart-context-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; line-height: 0; cursor: pointer;
+  border: 1px solid var(--alert); border-radius: 50%;
+  background: color-mix(in srgb, var(--alert) 18%, transparent);
+  color: var(--alert);
+}
+.restart-context-btn:hover { background: var(--alert); color: var(--panel-2); }
+.restart-context-btn:focus-visible { outline: 2px solid var(--alert); outline-offset: 2px; }
 /* Archive affordance: take a card off the board. The glyph carries the sentiment
    as shape (a tick for accept, a cross for close) with an aria-label, never colour
    alone. Hidden until the card is hovered or something inside it is focused, so it
