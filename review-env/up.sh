@@ -73,20 +73,72 @@ SYS
 "$BIN" new    LEDGER-2 --title "$ENV_NAME: ledger needs a human"    --repo "$PWD" --base main --type codebase >/dev/null 2>&1 || true
 "$BIN" escalate LEDGER-2 "which trunk is authoritative for $ENV_NAME?" >/dev/null 2>&1 || true
 
-# drv-043: a Review ticket carrying real promotion-results so the reviewer sees the new
-# per-environment promotion labels live — one GREEN (promoted-and-current at HEAD) and
-# one STALE (promoted at an older commit; the code has since moved). draiver only
-# VERIFIES a promotion (runs the repo's `qa`); it never performs one. We stand up a tiny
-# throwaway fixture repo whose committed `.test-pyramid.yaml` declares dev+staging
-# promotions with trivially-green `qa`, checked out on the attempt branch so the board's
-# branch-ref fold finds it, drive the attempt into Review, then record the two verdicts
-# with real `draiver promote --log` runs on either side of an intervening commit — so
-# staging lands stale and dev lands green at the branch tip the board reads for HEAD.
-# Best-effort like every seed above; the webui must still come up if any step hiccups.
+# drv-043/drv-046: two Review tickets carrying real promotion-results so the reviewer
+# sees the board card's INTERACTIVE promotion controls live — the per-environment chips
+# (drv-046 makes them clickable, grey until first run) and the all-green "mark done" tick.
+# draiver only VERIFIES a promotion (runs the repo's `qa`); it never performs one. Each
+# fixture is a tiny throwaway repo whose committed `.test-pyramid.yaml` declares its
+# promotions, checked out ON the attempt branch so the board's no-live-worktree fold
+# (branchPyramidState) reads the pyramid and HEAD from draiver/<ticket>/0001.
+#
+#   DUMMY-PROMO       — the MIXED card: dev GREEN at HEAD, staging FAILED (red), prod
+#                       NEVER RUN (grey not-run). So a reviewer sees grey+green+red chips
+#                       and, because not all are green, NO mark-done tick.
+#   DUMMY-PROMO-GREEN — the ALL-GREEN card: dev+staging both green at HEAD, so the live
+#                       "mark done" tick appears and the ticket can be ratified to Done
+#                       straight from the board.
+#
+# A fail is recorded only by the web handler (`draiver promote --log` refuses a failed qa
+# and writes nothing), so staging's red verdict is seeded AFTER the webui is up, by
+# POSTing the drv-046 board promote route against the live board (see the readiness loop
+# below) — which also dogfoods the exact path the chip click drives. Best-effort like
+# every seed above; the webui must still come up if any step hiccups.
 PROMO="$PWD/$RUN/promorepo"
+PROMO_GREEN="$PWD/$RUN/promorepo-green"
 if command -v git >/dev/null 2>&1; then
   mkdir -p "$PROMO"
   cat >"$PROMO/.test-pyramid.yaml" <<'PY'
+environments:
+  - name: dev
+    healthchecks:
+      - name: ready
+        script: "true"
+  - name: staging
+    healthchecks:
+      - name: ready
+        script: "true"
+  - name: prod
+    healthchecks:
+      - name: ready
+        script: "true"
+levels:
+  - name: unit
+    run: "true"
+promotions:
+  - environment: dev
+    base: main
+    qa: "true"
+  - environment: staging
+    base: main
+    qa: "false"
+  - environment: prod
+    base: main
+    qa: "true"
+PY
+  git -C "$PROMO" init -q -b draiver/DUMMY-PROMO/0001 >/dev/null 2>&1 || true
+  git -C "$PROMO" config user.email review-env@example.test >/dev/null 2>&1 || true
+  git -C "$PROMO" config user.name  "review-env"            >/dev/null 2>&1 || true
+  git -C "$PROMO" add .test-pyramid.yaml >/dev/null 2>&1 || true
+  git -C "$PROMO" commit -q -m "promotions fixture" >/dev/null 2>&1 || true
+  "$BIN" new    DUMMY-PROMO --title "$ENV_NAME: promotions (mixed)" --repo "$PROMO" --base main >/dev/null 2>&1 || true
+  "$BIN" review DUMMY-PROMO "seeded promotions for $ENV_NAME" --url "http://example.test/compare/main...dummy" >/dev/null 2>&1 || true
+  # dev is verified at HEAD → green-at-HEAD. staging (qa false) is recorded red by the
+  # live board after launch; prod is left un-run → grey not-run chip.
+  ( cd "$PROMO" && DRAIVER_ATTEMPT=0001 "$BIN" promote dev --log ) >/dev/null 2>&1 || true
+
+  # The all-green companion: both promotions pass at HEAD, so the mark-done tick lights.
+  mkdir -p "$PROMO_GREEN"
+  cat >"$PROMO_GREEN/.test-pyramid.yaml" <<'PY'
 environments:
   - name: dev
     healthchecks:
@@ -107,21 +159,15 @@ promotions:
     base: main
     qa: "true"
 PY
-  # Init directly ON the attempt branch so gatherPyramidState's no-live-worktree fold
-  # (branchPyramidState) reads the pyramid and HEAD from draiver/DUMMY-PROMO/0001.
-  git -C "$PROMO" init -q -b draiver/DUMMY-PROMO/0001 >/dev/null 2>&1 || true
-  git -C "$PROMO" config user.email review-env@example.test >/dev/null 2>&1 || true
-  git -C "$PROMO" config user.name  "review-env"            >/dev/null 2>&1 || true
-  git -C "$PROMO" add .test-pyramid.yaml >/dev/null 2>&1 || true
-  git -C "$PROMO" commit -q -m "promotions fixture" >/dev/null 2>&1 || true
-  "$BIN" new    DUMMY-PROMO --title "$ENV_NAME: promotions" --repo "$PROMO" --base main >/dev/null 2>&1 || true
-  "$BIN" review DUMMY-PROMO "seeded promotions for $ENV_NAME" --url "http://example.test/compare/main...dummy" >/dev/null 2>&1 || true
-  # staging verified at the first commit; HEAD then advances so staging goes stale; dev
-  # verified at the new tip is green-at-HEAD. `promote --log` derives the attempt from
-  # the branch and stamps the result with the commit it verified — two real verdicts.
-  ( cd "$PROMO" && DRAIVER_ATTEMPT=0001 "$BIN" promote staging --log ) >/dev/null 2>&1 || true
-  git -C "$PROMO" commit -q --allow-empty -m "advance HEAD past staging promotion" >/dev/null 2>&1 || true
-  ( cd "$PROMO" && DRAIVER_ATTEMPT=0001 "$BIN" promote dev --log ) >/dev/null 2>&1 || true
+  git -C "$PROMO_GREEN" init -q -b draiver/DUMMY-PROMO-GREEN/0001 >/dev/null 2>&1 || true
+  git -C "$PROMO_GREEN" config user.email review-env@example.test >/dev/null 2>&1 || true
+  git -C "$PROMO_GREEN" config user.name  "review-env"            >/dev/null 2>&1 || true
+  git -C "$PROMO_GREEN" add .test-pyramid.yaml >/dev/null 2>&1 || true
+  git -C "$PROMO_GREEN" commit -q -m "promotions fixture (all green)" >/dev/null 2>&1 || true
+  "$BIN" new    DUMMY-PROMO-GREEN --title "$ENV_NAME: promotions (all green)" --repo "$PROMO_GREEN" --base main >/dev/null 2>&1 || true
+  "$BIN" review DUMMY-PROMO-GREEN "seeded all-green promotions for $ENV_NAME" --url "http://example.test/compare/main...dummy" >/dev/null 2>&1 || true
+  ( cd "$PROMO_GREEN" && DRAIVER_ATTEMPT=0001 "$BIN" promote dev     --log ) >/dev/null 2>&1 || true
+  ( cd "$PROMO_GREEN" && DRAIVER_ATTEMPT=0001 "$BIN" promote staging --log ) >/dev/null 2>&1 || true
 fi
 
 # Launch the webui backgrounded with output redirected (so draiver's CombinedOutput does
@@ -133,6 +179,12 @@ echo $! >"$PID"
 i=0
 while [ "$i" -lt 150 ]; do
   if node -e "require('net').connect(Number(process.env.DRAIVER_REVIEW_PORT),'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})" 2>/dev/null; then
+    # drv-046: record DUMMY-PROMO's staging RED verdict via the live board — the only
+    # path that records a fail (the CLI refuses a failed qa) — so the mixed card shows a
+    # red chip. This drives the exact drv-046 board promote route (?surface=card) a chip
+    # click uses, dogfooding it; same-origin with no Origin header passes the guard.
+    # Best-effort: a hiccup here must never stop the env from coming up.
+    node -e "const http=require('http');const req=http.request({host:'127.0.0.1',port:Number(process.env.DRAIVER_REVIEW_PORT),path:'/ticket/DUMMY-PROMO/0001/promote/staging?surface=card',method:'POST'},function(r){r.resume();r.on('end',function(){process.exit(0)})});req.on('error',function(){process.exit(0)});req.end();" 2>/dev/null || true
     echo "up: draiver webui listening on $DRAIVER_REVIEW_PORT (ENV_NAME=$ENV_NAME, data=$DATA)"
     exit 0
   fi

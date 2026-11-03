@@ -26,14 +26,17 @@ import (
 
 // promoChipVM is one per-environment promotion label on a Review-column card: the
 // environment name plus a class/symbol telling a reviewer at a glance whether the
-// ticket is promoted-and-current (ok), promoted at an older commit (stale), or failed.
-// It is the promotion twin of a pyramid rung chip — additive presentation that only
-// appears on a recorded promotion-result, never a gate.
+// ticket is promoted-and-current (ok), promoted at an older commit (stale), failed,
+// or declared-but-never-run (none). It is the promotion twin of a pyramid rung chip —
+// additive presentation. Since drv-046 the chip is also the actuating control: it
+// renders as a form button posting the env-scoped promote check, so a chip appears
+// for every DECLARED promotion (grey `none` until it is first run), not only once a
+// result exists.
 type promoChipVM struct {
 	Env    string
 	Slug   string
-	Class  string // "ok" | "stale" | "fail"
-	Symbol string // "✓" | "·" | "✕"
+	Class  string // "none" | "ok" | "stale" | "fail"
+	Symbol string // "○" | "✓" | "·" | "✕"
 	Label  string // screen-reader / tooltip summary
 }
 
@@ -61,31 +64,36 @@ func (s *Server) promoChips(a project.Attempt) []promoChipVM {
 // HEAD is read by the caller), so it is exhaustively unit-testable off canned inputs.
 // It folds the attempt's promotion-result log (project.DerivePromotions) against the
 // pyramid's declared promotions, in declaration order for a deterministic render.
+//
+// Since drv-046 it emits a chip for EVERY declared promotion — a declared-but-never-run
+// env gets a grey `none` chip rather than being skipped — so a reviewer can see (and
+// click) a pending promotion. The pyramid's Promotions stay the authority, so an env
+// with a recorded result but no current declaration (removed/renamed) still folds off.
 func projectPromoChips(p *pyramid.Pyramid, events []event.Event, head string) []promoChipVM {
 	if p == nil || len(p.Promotions) == 0 {
 		return nil
 	}
 	statuses := project.DerivePromotions(events)
-	if len(statuses) == 0 {
-		return nil
-	}
 	var chips []promoChipVM
 	for _, pr := range p.Promotions {
-		ps, ok := statuses[pr.Environment]
-		if !ok {
-			continue
-		}
-		chips = append(chips, promoChip(pr.Environment, ps, head))
+		// statuses[env] is the zero PromotionStatus (Outcome == "") when nothing has been
+		// run for this env yet — promoChip renders that as the grey `none` chip.
+		chips = append(chips, promoChip(pr.Environment, statuses[pr.Environment], head))
 	}
 	return chips
 }
 
 // promoChip classifies one environment's latest promotion status against HEAD into its
-// rendered chip. A fail is always a cross regardless of commit (the latest verdict was
-// red); a pass is green only when its commit still describes the tip, else muted-stale.
+// rendered chip. No result yet is a grey `none` (declared but never checked); a fail is
+// always a cross regardless of commit (the latest verdict was red); a pass is green only
+// when its commit still describes the tip, else muted-stale. The glyph (○/✓/·/✕) plus
+// the title/aria-label keep every state legible without colour alone.
 func promoChip(env string, ps project.PromotionStatus, head string) promoChipVM {
 	c := promoChipVM{Env: env, Slug: reviewEnvSlug(env)}
 	switch {
+	case ps.Outcome == "":
+		c.Class, c.Symbol = "none", "○"
+		c.Label = "promotion to " + env + " not yet checked"
 	case ps.Outcome == "fail":
 		c.Class, c.Symbol = "fail", "✕"
 		c.Label = "promotion to " + env + " failed at " + shortSHA(ps.Commit)
@@ -98,6 +106,38 @@ func promoChip(env string, ps project.PromotionStatus, head string) promoChipVM 
 			", now stale — HEAD is " + shortSHA(head)
 	}
 	return c
+}
+
+// canMarkDone reports whether a Review card should show the green "mark done" tick that
+// ratifies the ticket straight into Done (drv-046) — true iff the attempt is in Review,
+// is not a codebase ledger (a ledger cannot be closed via `done`; restingState rewrites
+// its Done back to Pending, so the tick must never appear on one — mirroring canEnable),
+// and declares ≥1 promotion with EVERY declared promotion green-at-HEAD.
+//
+// It reuses the §1 board-chip projection (so the tick and the chips can never disagree:
+// all chips Class == "ok") and therefore reads live HEAD via promoChips — hence a Server
+// method, unlike the pure canEnable/canArchive. It gates both the rendered tick and
+// handleMarkDone's POST, re-deriving HEAD each call, so the button and the effect agree.
+func (s *Server) canMarkDone(a project.Attempt) bool {
+	if a.Type == project.TypeCodebase || a.State != project.Review {
+		return false
+	}
+	chips := s.promoChips(a) // nil off-Review / no declared promotion; git HEAD re-read
+	return allPromoGreen(chips)
+}
+
+// allPromoGreen is the pure gate canMarkDone folds: at least one declared promotion, and
+// every chip green-at-HEAD. An empty set (no declared promotion) is never ratifiable.
+func allPromoGreen(chips []promoChipVM) bool {
+	if len(chips) == 0 {
+		return false
+	}
+	for _, c := range chips {
+		if c.Class != "ok" {
+			return false
+		}
+	}
+	return true
 }
 
 // --- attempt-page promote controls (part 3) ---
@@ -264,6 +304,13 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// drv-046 part 4: record the START of the check as a system event, immediately
+	// before promote.Run, naming the env and the commit about to be checked — the
+	// durable, real-timestamped twin of the board spinner. It is emitted for every
+	// origin (board or attempt page) so the System Logs stream shows the full
+	// started → pass|fail arc, not only the terminal verdict below.
+	s.emitSystem(id, att, promotionStartedSystemEvent(envName, st.Head))
+
 	outcome, err := promote.Run(r.Context(), s.root, a.Repo, id, att, envName, io.Discard, io.Discard)
 	if err != nil {
 		s.fail(w, err)
@@ -316,6 +363,15 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// operational view: it fires for every outcome the check produced, including a
 	// blocked/env-fault one that records no durable verdict.
 	s.emitSystem(id, att, promotionSystemEvent(envName, outcome))
+
+	// drv-046: a board-origin check (the chip carries ?surface=card) re-renders the whole
+	// card so the clicked chip flips grey→green/red and the all-green "mark done" tick
+	// appears/disappears in one swap — mirroring handleEnable's closest-.card-wrap /
+	// outerHTML swap. The attempt-page origin keeps the original log+OOB fragments below.
+	if r.URL.Query().Get("surface") == "card" {
+		s.render(w, "card", a)
+		return
+	}
 
 	vm, err := s.detail(id, att)
 	if err != nil {
@@ -381,6 +437,77 @@ func promotionSystemEvent(env string, outcome promote.Outcome) systemlog.SystemE
 		Fields:  fields,
 		Error:   outcome.Status == promote.StatusQAFailed || outcome.Status == promote.StatusEnvFault || outcome.Status == promote.StatusBlocked,
 	}
+}
+
+// promotionStartedSystemEvent composes the drv-046 "check started" system-log record:
+// a ClassPromotion event naming the env and the commit about to be checked, emitted just
+// before promote.Run so the stream shows the start of the arc. It is never an error (a
+// start carries no verdict) and carries no overlay field — overlay provenance is known
+// only after the run, so it rides the terminal promotionSystemEvent, not this one.
+func promotionStartedSystemEvent(env, head string) systemlog.SystemEvent {
+	fields := map[string]string{"env": env, "verdict": "started"}
+	msg := "promotion check: `" + env + "`"
+	if sha := strings.TrimSpace(head); sha != "" {
+		fields["commit"] = shortSHA(sha)
+		msg += " @ `" + shortSHA(sha) + "`"
+	}
+	msg += " — started"
+	return systemlog.SystemEvent{
+		Class:   systemlog.ClassPromotion,
+		Message: msg,
+		Fields:  fields,
+	}
+}
+
+// handleMarkDone is the board's one-click ratify (POST /ticket/{id}/{attempt}/done,
+// drv-046): on an all-green Review card it appends a `done` event through the SAME
+// gateway the attempt page's compose box uses (s.gw.Done → drv-008), moving the ticket
+// to Done without opening the attempt. A dedicated board route (rather than the generic
+// /log) exists only so the response re-renders the WHOLE board region — the card
+// relocates from Review to Done in one htmx swap, exactly as handleArchive does — where
+// handleLogAppend returns the attempt-page log fragment.
+//
+// canMarkDone is the authoritative gate (gw.Done enforces no state precondition of its
+// own — repo.go just appends): it is re-checked here, re-deriving HEAD, so a POST for a
+// card showing no tick (any promotion non-green, or not in Review, or a ledger) is
+// refused with a 400 and writes nothing. The same-origin guard matches the other writes.
+func (s *Server) handleMarkDone(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	a, err := project.LoadAttempt(s.root, id, att)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// The gate the tick renders behind, re-checked server-side (it re-reads HEAD via
+	// promoChips) so the button and the effect can never disagree: a POST for a
+	// non-green / non-Review / ledger card writes nothing and is a bad request, not a 500.
+	if !s.canMarkDone(a) {
+		http.Error(w, "draiver: mark done is offered only on a Review attempt whose promotions are all green", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.gw.Done(id, att, "Ratified from the board: all promotions green."); err != nil {
+		s.fail(w, err)
+		return
+	}
+	// Re-render the whole board region so the card relocates Review → Done in one swap,
+	// and keep the favicon in sync like handleArchive. Render in the operator's CURRENT
+	// view (HX-Current-URL), since the done POST carries no view of its own.
+	vm, err := s.board(viewFromCurrentURL(r))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	emitFaviconTrigger(w, vm)
+	s.render(w, "board.html", vm)
 }
 
 // webPromotionResultBody renders a promotion-result event body for the web-recorded
