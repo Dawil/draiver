@@ -292,6 +292,27 @@ func canArchive(a project.Attempt) bool {
 	return !a.Archived
 }
 
+// restartCtxVM drives the board card's "Restart context window" control (decision #25):
+// it carries the seq of the open escalation the control resolves-and-restarts.
+type restartCtxVM struct{ Seq int }
+
+// restartContext reports the open context-window auto-stop escalation an attempt card
+// should offer a one-click "Restart context window" control for, or nil when there is
+// none. It is the board twin of the attempt page's per-escalation ContextAutoStop
+// button (drv-028): the control shows only when the attempt has filled its context
+// window and auto-stopped (an OPEN escalation carrying limit.TagContextAutoStop), so a
+// reviewer can clear it and bring the attempt back on a clean window straight from the
+// dashboard. It returns the first such escalation; the handler re-validates the seq
+// (classifyResolveTarget + isContextAutoStop), so the control and the POST agree.
+func restartContext(a project.Attempt) *restartCtxVM {
+	for _, o := range a.OpenEscalations {
+		if slices.Contains(o.Tags, limit.TagContextAutoStop) {
+			return &restartCtxVM{Seq: o.Seq}
+		}
+	}
+	return nil
+}
+
 // archiveVM drives the card's archive affordance and encodes its sentiment. The
 // glyph/colour is column-derived: a Done card accepts (green tick), an active card
 // (Running/Stuck/Review) closes (grey cross). It keeps the template logic-free —
@@ -508,9 +529,10 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"stateLabel":    stateLabel,
 			"badge":         func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
 			"cardHref":      cardHref,
-			"canEnable":     canEnable,
-			"canArchive":    canArchive,
-			"canMarkDone":   s.canMarkDone,
+			"canEnable":      canEnable,
+			"canArchive":     canArchive,
+			"canMarkDone":    s.canMarkDone,
+			"restartContext": restartContext,
 			"archiveAction": archiveAction,
 			"reviewLink":    reviewLink,
 			"shortSHA":      shortSHA,
@@ -2511,8 +2533,25 @@ func (s *Server) handleRestartContext(w http.ResponseWriter, r *http.Request) {
 	// `ctl up`), not a server fault: report it in the banner, do not 500 and do not
 	// reopen the already-resolved escalation.
 	result := restartResultVM{Kind: "ok", Message: "Restarting the attempt on a clean context window — cold-starting from brief. Watch it come back up on the board."}
-	if err := s.restart(r.Context(), id, att); err != nil {
-		result = restartResultVM{Kind: "fail", Message: "Resolved, but the restart could not be scheduled — " + cleanRestartErr(err)}
+	restartErr := s.restart(r.Context(), id, att)
+	if restartErr != nil {
+		result = restartResultVM{Kind: "fail", Message: "Resolved, but the restart could not be scheduled — " + cleanRestartErr(restartErr)}
+	}
+	// drv-046 (decision #25): a board-origin click (?surface=card) re-renders the whole
+	// board so the card leaves the Needs-me column as the escalation clears — mirroring
+	// handleMarkDone. The escalation is already resolved durably above, so the restart's
+	// own success/failure only affects whether the attempt then comes back up; either
+	// way the board reflects the resolved state. The attempt-page origin keeps the
+	// attempt-live + restart-result banner fragments below.
+	if r.URL.Query().Get("surface") == "card" {
+		bvm, err := s.board(viewFromCurrentURL(r))
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		emitFaviconTrigger(w, bvm)
+		s.render(w, "board.html", bvm)
+		return
 	}
 	vm, err := s.detail(id, att)
 	if err != nil {

@@ -40,3 +40,13 @@ Feature: Drive promotion checks and ratify a ticket from the board card
     And dev is green at HEAD, staging has failed, and prod has never been checked
     When I click the grey prod chip on the card
     Then the attempt's System Logs show a started line and then a pass line for prod
+
+  # decision #25: a one-click "Restart context window" control on the board card for a
+  # ticket that auto-stopped on a full context window — resolve + restart from the
+  # dashboard, no confirmation, without opening the attempt.
+  Scenario: A context-window auto-stopped card shows a one-click restart-context control
+    Given a card whose attempt auto-stopped on a full context window
+    When I open the board
+    Then the card shows a restart-context control, absent on a card with an ordinary escalation
+    When I click the restart-context control
+    Then the escalation is resolved and the card no longer shows the control, without opening the attempt page
