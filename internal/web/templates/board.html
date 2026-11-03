@@ -64,7 +64,6 @@
     <span class="meta-row">
       {{template "session-dot" .}}
       {{template "pyramid-badge" .}}
-      {{template "promo-chips" .}}
       {{/* A codebase ledger (drv-037/drv-039) is a belief store, not a unit of work:
            mark it so a card surfacing into the code view's Stuck column, or sitting
            in the ledgers view, reads as a ledger rather than an ordinary ticket. */}}
@@ -92,6 +91,22 @@
       </button>
     </form>
     {{end}}
+    {{/* Mark-done tick (drv-046): on an all-green Review card, one click ratifies the
+         ticket into Done without opening the attempt. It reuses the accept-tick SVG the
+         archive affordance draws but is a DISTINCT action — a different route, testid,
+         tooltip, and confirm copy — so a reviewer and the BDD tests never confuse it with
+         the Done-card archive accept. Re-renders the whole board region so the card
+         relocates Review → Done, exactly as the archive form does. */}}
+    {{if canMarkDone $a}}
+    <form class="markdone-form" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/done"
+          hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/done" hx-target="#board-region" hx-swap="innerHTML"
+          hx-confirm="Mark {{$a.Ticket}} done? Every promotion is green — this ratifies the attempt into Done.">
+      <button type="submit" class="markdone-btn" data-testid="markdone-btn-{{$a.Ticket}}-{{$a.ID}}"
+              aria-label="mark done — all promotions green" title="Mark done — all promotions green">
+        <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </form>
+    {{end}}
     {{if canArchive .}}{{with archiveAction $a}}
     <form class="archive-form" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/archive"
           hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/archive" hx-target="#board-region" hx-swap="innerHTML"
@@ -105,6 +120,7 @@
     </form>
     {{end}}{{end}}
   </div>
+  {{template "promo-chips" $a}}
   {{with reviewLink $a}}<a class="card-review" data-testid="review-link-{{$a.Ticket}}-{{$a.ID}}" href="{{.Href}}" target="_blank" rel="noopener noreferrer">Review changes ↗</a>{{end}}
 </div>
 {{end}}
@@ -126,15 +142,21 @@
      badge means a result names HEAD but the worktree has uncommitted changes, so
      re-running `draiver test` might not still pass (drvweb-021 #27). Shared by the
      board card and the detail header so both show the same signal. */}}
-{{/* promo-chips surfaces an attempt's per-environment promotion status (drv-043) as
-     small labels beside the state badge on a Review-column card: a green `<env> ✓` when
-     the latest promotion-result for that env is a pass whose commit == HEAD, a muted
-     `<env> ·` when the pass is at an older commit (promoted, but the code has moved
-     since), and `<env> ✕` when the latest result is a fail. promoChips returns nothing
-     outside Review, and nothing for an env with no recorded result or no declared
-     promotion, so {{with}} guards the whole thing — chips never appear without positive
-     proof of a recorded result. The payoff: a reviewer scanning the Review column sees
-     which tickets are promoted-and-current and ready to ratify. */}}
-{{define "promo-chips"}}{{with promoChips .}}<span class="promos" data-testid="promos-{{$.Ticket}}-{{$.ID}}">{{range .}}<span class="promo promo-{{.Class}}" data-testid="promo-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" data-promo-class="{{.Class}}" role="img" title="{{.Label}}" aria-label="{{.Label}}">{{.Env}} <span class="promo-sym" aria-hidden="true">{{.Symbol}}</span></span>{{end}}</span>{{end}}{{end}}
+{{/* promo-chips (drv-043 display, drv-046 actuation) is a Review-column card's per-
+     environment promotion cluster, rendered as a clickable strip at the foot of the card
+     (a sibling of the tile <a>, since a <button>/<form> cannot nest in an anchor — the
+     same reason card-review is a sibling). promoChips emits one chip per DECLARED
+     promotion: grey `<env> ○` not yet checked, green `<env> ✓` promoted-and-current,
+     muted `<env> ·` promoted at an older commit (stale), red `<env> ✕` failed. It
+     returns nothing outside Review or for a repo with no declared promotion, so {{with}}
+     guards the whole strip.
+
+     Each chip is a form posting the env-scoped promote check with ?surface=card, so
+     handlePromote re-renders the whole card (closest .card-wrap, outerHTML) — the chip
+     flips grey→green/red in place and the all-green mark-done tick appears/disappears.
+     While the POST is in flight an inline CSS spinner shows (hx-indicator) and the button
+     is aria-busy; hx-confirm reuses the attempt page's copy so a stray click can't kick
+     off a check silently. The hover info tooltip is preserved on the button. */}}
+{{define "promo-chips"}}{{with promoChips .}}<div class="card-promos" data-testid="promos-{{$.Ticket}}-{{$.ID}}">{{range .}}<form class="promo-form" method="post" action="/ticket/{{$.Ticket}}/{{$.ID}}/promote/{{.Env}}?surface=card" hx-post="/ticket/{{$.Ticket}}/{{$.ID}}/promote/{{.Env}}?surface=card" hx-target="closest .card-wrap" hx-swap="outerHTML" hx-indicator="find .promo-spin" hx-confirm="Check the promotion to {{.Env}}? This runs the repo's qa check against the reviewed commit and records the verdict — draiver does not deploy, merge, or push." hx-on::before-request="this.querySelector('button').setAttribute('aria-busy','true')" hx-on::after-request="this.querySelector('button').removeAttribute('aria-busy')"><button type="submit" class="promo promo-{{.Class}}" data-testid="promo-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" data-promo-class="{{.Class}}" title="{{.Label}}" aria-label="{{.Label}} — click to run the check">{{.Env}} <span class="promo-sym" aria-hidden="true">{{.Symbol}}</span><span class="promo-spin" data-testid="promo-spin-{{$.Ticket}}-{{$.ID}}-{{.Slug}}" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="26 12"/></svg></span></button></form>{{end}}</div>{{end}}{{end}}
 
 {{define "pyramid-badge"}}{{with pyramidBadge .}}<span class="pyramid {{if .Stale}}pyramid-stale{{else if .Dirty}}pyramid-dirty{{else}}pyramid-green{{end}}" data-testid="pyramid-{{$.Ticket}}-{{$.ID}}" data-stale="{{.Stale}}" data-dirty="{{.Dirty}}" role="img" title="{{.Label}}" aria-label="{{.Label}}">{{range $i, $r := .Rungs}}{{if $i}}<span class="pyramid-sep" aria-hidden="true">·</span>{{end}}<span class="pyramid-rung {{if $r.Reached}}rung-on{{else}}rung-off{{end}}">{{$r.Name}}{{if $r.Environment}}<span class="pyramid-env" data-testid="pyramid-env-{{$.Ticket}}-{{$.ID}}-{{$r.Name}}" title="runs in the {{$r.Environment}} environment">@{{$r.Environment}}</span>{{end}}{{if $r.Reached}}<span class="rung-check" aria-hidden="true"> ✓</span>{{end}}</span>{{end}}{{if .Stale}}<span class="pyramid-flag" aria-hidden="true">stale</span>{{else if .Dirty}}<span class="pyramid-flag" aria-hidden="true">uncommitted</span>{{end}}</span>{{end}}{{end}}

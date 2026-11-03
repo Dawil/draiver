@@ -510,6 +510,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			"cardHref":      cardHref,
 			"canEnable":     canEnable,
 			"canArchive":    canArchive,
+			"canMarkDone":   s.canMarkDone,
 			"archiveAction": archiveAction,
 			"reviewLink":    reviewLink,
 			"shortSHA":      shortSHA,
@@ -578,6 +579,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/{env}/down", s.handleReviewEnvDown)
 	mux.HandleFunc("GET /ticket/{id}/{attempt}/review-env/{env}/status", s.handleReviewEnvStatus)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/promote/{env}", s.handlePromote)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/done", s.handleMarkDone)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/provenance", s.handleProvenance)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/repo-settings", s.handleRepoSettings)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/supervision", s.handleSupervision)

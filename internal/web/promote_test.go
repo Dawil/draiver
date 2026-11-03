@@ -20,24 +20,37 @@ var promoPyramid = &pyramid.Pyramid{
 	},
 }
 
-// projectPromoChips classifies each declared promotion's latest result against HEAD:
-// a pass at HEAD is ok (green ✓), a pass at an older commit is stale (muted ·), a fail
-// is fail (✕). Chips render in declaration order, only for envs with a recorded result,
-// and a result for an undeclared promotion is dropped.
+// projectPromoChips emits a chip for every DECLARED promotion (drv-046): a declared-
+// but-never-run env is grey `none` (○), a pass at HEAD is ok (green ✓), a pass at an
+// older commit is stale (muted ·), a fail is fail (✕). Chips render in declaration
+// order, and a result for an undeclared promotion is dropped (the pyramid is the
+// authority). Only a nil/empty-promotion pyramid yields no chips at all.
 func TestProjectPromoChips(t *testing.T) {
 	const head = "cafef00d"
 	const old = "deadbeef"
 
-	t.Run("nil when no pyramid or no results", func(t *testing.T) {
+	t.Run("nil only when no pyramid or no declared promotion", func(t *testing.T) {
 		if projectPromoChips(nil, nil, head) != nil {
 			t.Error("nil pyramid should yield no chips")
 		}
-		if projectPromoChips(promoPyramid, nil, head) != nil {
-			t.Error("no results should yield no chips")
+		if projectPromoChips(&pyramid.Pyramid{}, nil, head) != nil {
+			t.Error("a pyramid with no declared promotion should yield no chips")
 		}
 	})
 
-	t.Run("ok / stale / fail classification in declaration order", func(t *testing.T) {
+	t.Run("declared-but-never-run envs are grey none chips", func(t *testing.T) {
+		chips := projectPromoChips(promoPyramid, nil, head)
+		if len(chips) != 2 {
+			t.Fatalf("want 2 grey chips (one per declared promotion), got %d (%v)", len(chips), chips)
+		}
+		for _, c := range chips {
+			if c.Class != "none" || c.Symbol != "○" {
+				t.Errorf("an un-run promotion should be none/○, got %+v", c)
+			}
+		}
+	})
+
+	t.Run("none / ok / stale / fail classification in declaration order", func(t *testing.T) {
 		events := []event.Event{
 			promoEv(1, "staging", old, "pass"), // stale (older commit)
 			promoEv(2, "dev", head, "pass"),    // ok (at HEAD)
@@ -55,10 +68,16 @@ func TestProjectPromoChips(t *testing.T) {
 		}
 	})
 
-	t.Run("a fail is a cross regardless of commit", func(t *testing.T) {
+	t.Run("a fail is a cross regardless of commit; un-run peer stays grey", func(t *testing.T) {
 		chips := projectPromoChips(promoPyramid, []event.Event{promoEv(1, "dev", head, "fail")}, head)
-		if len(chips) != 1 || chips[0].Class != "fail" || chips[0].Symbol != "✕" {
-			t.Fatalf("a fail at HEAD should be fail/✕, got %+v", chips)
+		if len(chips) != 2 {
+			t.Fatalf("want 2 chips (dev fail + staging none), got %+v", chips)
+		}
+		if chips[0].Env != "dev" || chips[0].Class != "fail" || chips[0].Symbol != "✕" {
+			t.Errorf("dev should be fail/✕, got %+v", chips[0])
+		}
+		if chips[1].Env != "staging" || chips[1].Class != "none" {
+			t.Errorf("staging should still be the grey none chip, got %+v", chips[1])
 		}
 	})
 
@@ -69,10 +88,45 @@ func TestProjectPromoChips(t *testing.T) {
 			promoEv(3, "ghost", head, "pass"), // not declared — dropped
 		}
 		chips := projectPromoChips(promoPyramid, events, head)
-		if len(chips) != 1 || chips[0].Env != "dev" || chips[0].Class != "fail" {
-			t.Fatalf("want a single dev/fail chip, got %+v", chips)
+		if len(chips) != 2 || chips[0].Env != "dev" || chips[0].Class != "fail" {
+			t.Fatalf("want dev/fail (+ staging none), ghost dropped, got %+v", chips)
+		}
+		if chips[1].Env != "staging" || chips[1].Class != "none" {
+			t.Errorf("staging should be the grey none chip, got %+v", chips[1])
 		}
 	})
+}
+
+// allPromoGreen gates the mark-done tick: at least one declared promotion and every chip
+// green-at-HEAD. An empty set (no declared promotion) is never ratifiable, and any grey/
+// stale/fail chip withholds the tick.
+func TestAllPromoGreen(t *testing.T) {
+	const head = "cafef00d"
+	const old = "deadbeef"
+
+	if allPromoGreen(nil) {
+		t.Error("no declared promotion must not be ratifiable")
+	}
+	allGreen := projectPromoChips(promoPyramid, []event.Event{
+		promoEv(1, "dev", head, "pass"),
+		promoEv(2, "staging", head, "pass"),
+	}, head)
+	if !allPromoGreen(allGreen) {
+		t.Errorf("every promotion green-at-HEAD should be ratifiable, got %+v", allGreen)
+	}
+	oneStale := projectPromoChips(promoPyramid, []event.Event{
+		promoEv(1, "dev", head, "pass"),
+		promoEv(2, "staging", old, "pass"), // stale → withholds the tick
+	}, head)
+	if allPromoGreen(oneStale) {
+		t.Error("a stale promotion must withhold the tick")
+	}
+	oneUnrun := projectPromoChips(promoPyramid, []event.Event{
+		promoEv(1, "dev", head, "pass"), // staging never run → grey none
+	}, head)
+	if allPromoGreen(oneUnrun) {
+		t.Error("an un-run promotion must withhold the tick")
+	}
 }
 
 // projectPromoteSurface gates on Review and projects one panel per declared promotion,
