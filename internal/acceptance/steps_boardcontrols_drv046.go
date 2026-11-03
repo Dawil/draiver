@@ -307,8 +307,8 @@ func thenBCProdFlippedGreen(w *World, sr *StepRun) error {
 // inline spinner element bound to htmx's hx-indicator and an aria-busy toggle, so a
 // reviewer sees the check is in flight. (The spinner is CSS-hidden until htmx adds
 // .htmx-request to it for the request's duration; catching that sub-second flash in a
-// screenshot is impractical, so the mechanism is asserted structurally and corroborated
-// by the mixed-chip screenshot.)
+// screenshot is impractical, so the mechanism is asserted structurally here and the
+// actuating chip strip — prod now flipped green after the click — is screenshotted.)
 func thenBCSpinnerMechanism(w *World, sr *StepRun) error {
 	b, err := currentBCBoard(w)
 	if err != nil {
@@ -332,7 +332,10 @@ func thenBCSpinnerMechanism(w *World, sr *StepRun) error {
 	if err := bcAssertStyleContains(b, ".promo-spin.htmx-request"); err != nil {
 		return err
 	}
-	return nil
+	// Screenshot the actuating chip strip after the click flipped prod green — the
+	// board's clickable promotion controls, the spec's "chip check" capture (the
+	// in-flight spinner itself is asserted structurally above, not captured).
+	return shoot(w, sr, "/", "board-controls-chip-check", true, "", "")
 }
 
 func givenBCAllGreen(w *World, sr *StepRun) error {
@@ -468,6 +471,10 @@ func thenBCDonePostRefused(w *World, sr *StepRun) error {
 	if a.State != project.Review {
 		return fmt.Errorf("a refused done POST must not change state; want Review, got %q", a.State)
 	}
+	// Evidence artefact: the mark-done gate held on a non-green card — no tick rendered,
+	// the POST was refused 400, and the attempt stayed in Review (nothing written).
+	attachText(sr, "board-controls-done-refused",
+		"mark-done tick absent on a non-green card; POST /done refused 400; state stayed Review (no `done` event appended)")
 	return nil
 }
 
@@ -511,6 +518,17 @@ func thenBCSystemLogStartedThenPass(w *World, sr *StepRun) error {
 			return fmt.Errorf("every System Logs line must be stamped with its recorded time, got %+v", e)
 		}
 	}
+	// Evidence artefact: the started → pass arc as it lands in the attempt's System
+	// Logs, each line with its own recorded timestamp.
+	var arc strings.Builder
+	arc.WriteString("prod promotion check — System Logs arc:\n")
+	for _, e := range events {
+		if e.Fields["env"] != "prod" {
+			continue
+		}
+		fmt.Fprintf(&arc, "  %s  %s  (verdict=%s)\n", e.TS, e.Message, e.Fields["verdict"])
+	}
+	attachText(sr, "board-controls-system-logs-arc", arc.String())
 	return nil
 }
 
