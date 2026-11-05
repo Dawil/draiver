@@ -526,26 +526,26 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 	s.gw = repo.New(s.root, s.actor)
 	tmpl, err := template.New("").
 		Funcs(template.FuncMap{
-			"stateLabel":    stateLabel,
-			"badge":         func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
-			"cardHref":      cardHref,
+			"stateLabel":     stateLabel,
+			"badge":          func(s project.State, oob bool) badgeVM { return badgeVM{State: s, OOB: oob} },
+			"cardHref":       cardHref,
 			"canEnable":      canEnable,
 			"canArchive":     canArchive,
 			"canMarkDone":    s.canMarkDone,
 			"restartContext": restartContext,
-			"archiveAction": archiveAction,
-			"reviewLink":    reviewLink,
-			"shortSHA":      shortSHA,
-			"provenance":    func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
-			"repoSettings":  s.repoSettingsPanel,
-			"cachePanel":    cachePanel,
-			"cohortRow":     cohortRow,
-			"sessionDot":    s.sessionDot,
-			"pyramidBadge":  s.pyramidBadge,
-			"promoChips":    s.promoChips,
-			"gitPosition":   s.gitPosition,
-			"paletteVars":   paletteVars,
-			"inlineMD":      s.inlineMD,
+			"archiveAction":  archiveAction,
+			"reviewLink":     reviewLink,
+			"shortSHA":       shortSHA,
+			"provenance":     func(a project.Attempt) provenanceVM { return provenanceVM{Attempt: a} },
+			"repoSettings":   s.repoSettingsPanel,
+			"cachePanel":     cachePanel,
+			"cohortRow":      cohortRow,
+			"sessionDot":     s.sessionDot,
+			"pyramidBadge":   s.pyramidBadge,
+			"promoChips":     s.promoChips,
+			"gitPosition":    s.gitPosition,
+			"paletteVars":    paletteVars,
+			"inlineMD":       s.inlineMD,
 		}).
 		ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
@@ -1696,6 +1696,75 @@ func (s *Server) emitSystem(id, att string, ev systemlog.SystemEvent) {
 	_ = systemlog.Append(s.root, id, att, time.Now, ev)
 }
 
+// relaySystemOutput relays an operator action's captured subprocess output into the
+// System Logs stream (drv-048): it splits output on newlines and appends one
+// SystemEvent per non-blank line under class, each stamped at emit time like every
+// other system line, so the diagnostic stdout/stderr a check or control produced
+// interleaves with the started/verdict summary events a reviewer already sees.
+// failed marks every line with the error role so a failed command's output reads
+// red. It is best-effort by construction — emitSystem swallows its write error — so
+// relaying the output can never fail the action it observes (the emitSystem /
+// appendHealth discipline). A trailing '\r' is trimmed so a CRLF stream renders
+// cleanly; blank lines are dropped (renderSystemLine shows nothing for them anyway).
+func (s *Server) relaySystemOutput(id, att, class, output string, failed bool) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		s.emitSystem(id, att, systemlog.SystemEvent{Class: class, Message: line, Error: failed})
+	}
+}
+
+// systemRelay is a line-buffered io.Writer that relays a LIVE subprocess stream into
+// the System Logs panel (drv-048) — the "stop sending to io.Discard" substrate wired
+// as the stdout/stderr writer of a streaming operator action (handlePromote's
+// promote.Run). It buffers bytes until a '\n', then relays everything up to it as one
+// system line under class, exactly the discipline sseLineWriter uses for SSE framing.
+// isErr selects the role each line takes: a stderr relay sets it so the command's
+// error output reads red in the panel, stdout stays the neutral system role. relay is
+// the sink (typically a Server.relaySystemOutput closure bound to id/att); it is
+// best-effort, so a Write never reports an error back to the subprocess copy loop.
+type systemRelay struct {
+	relay func(line string, isErr bool)
+	isErr bool
+	buf   []byte
+}
+
+func (w *systemRelay) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.emitLine(string(w.buf[:i]))
+		w.buf = w.buf[i+1:]
+	}
+	return len(p), nil
+}
+
+// emitLine relays one physical line, trimming a trailing CR and dropping a blank one
+// (a blank system line renders nothing). It is the shared tail of Write and flush.
+func (w *systemRelay) emitLine(line string) {
+	line = strings.TrimRight(line, "\r")
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	w.relay(line, w.isErr)
+}
+
+// flush relays any held partial final line — output the command wrote without a
+// trailing newline — and must be called once the subprocess has returned, so the last
+// line is not silently dropped. It is idempotent on an empty buffer.
+func (w *systemRelay) flush() {
+	if len(w.buf) == 0 {
+		return
+	}
+	w.emitLine(string(w.buf))
+	w.buf = nil
+}
+
 // sseLineWriter adapts streamlog's line-oriented io.Writer output to Server-Sent
 // Events: it buffers bytes until a newline, then emits everything up to it as one
 // `data: <line>\n\n` record and flushes. A stray CR is trimmed so it cannot break
@@ -2021,6 +2090,14 @@ func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, verb stri
 	// (ok / noop / fail) from the result banner. This is the operational view of the
 	// action; a non-noop sync still records its own durable `note` separately.
 	s.emitSystem(id, att, gitSystemEvent(verb, result))
+	// drv-048: the summary above keeps only the first line (truncateFirstLine); relay
+	// the rest of the report — everything the old summary dropped — as its own system
+	// lines so a failed push/sync shows its full output (a merge conflict, a reject)
+	// in the panel, not just the truncated headline. A single-line result relays
+	// nothing (no duplication of the headline). A failure reads red.
+	if body := trimFirstLine(result.Message); body != "" {
+		s.relaySystemOutput(id, att, systemlog.ClassGit, body, result.Kind == "fail")
+	}
 	vm, err := s.detail(id, att)
 	if err != nil {
 		s.fail(w, err)
@@ -2062,6 +2139,18 @@ func gitSystemEvent(verb string, result gitResultVM) systemlog.SystemEvent {
 		Fields:  map[string]string{"verb": verb, "outcome": outcome},
 		Error:   result.Kind == "fail",
 	}
+}
+
+// trimFirstLine returns everything AFTER the first line of s (the complement of
+// truncateFirstLine's headline), with surrounding blank lines trimmed — the git
+// report body the one-line summary event drops, relayed verbatim into the System
+// Logs stream (drv-048). A single-line (or empty) report yields "", so nothing is
+// relayed and the headline is not duplicated.
+func trimFirstLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return strings.Trim(s[i+1:], "\r\n")
+	}
+	return ""
 }
 
 // truncateFirstLine keeps the first line of s, trimmed, capped to max runes with an

@@ -84,7 +84,7 @@ type reviewEnvVM struct {
 	// Instance and Port are the parameterisation draiver injected, shown as panel meta
 	// once a launch has allocated them.
 	Instance string
-	Port      int
+	Port     int
 	// CanUp gates the launch button (shown at rest: Down / Failed / TeardownFailed).
 	// CanDown gates the teardown button (shown while there is something live or leaked
 	// to tear down). Poll arms the webui status poll while the env is in motion.
@@ -310,6 +310,18 @@ func (s *Server) reviewEnvManager() *reviewenv.Manager {
 	if cfg, err := config.Load(""); err == nil {
 		opt.ReviewLinkHosts = cfg.ReviewLinkHosts
 		opt.MaxAge = time.Duration(cfg.ReviewEnvMaxAgeMinutes) * time.Minute
+	}
+	// drv-048: relay the bring-up/teardown command output of the two board buttons into
+	// the System Logs stream, tagged review-env-up / -down by the `up` flag, so a
+	// reviewer sees the healthcheck/up output that explains a launch or teardown. Only
+	// Launch and Teardown call this sink; the status poll (Probe) never does, so a
+	// polling panel does not spam the stream.
+	opt.Relay = func(a project.Attempt, up bool, output string, failed bool) {
+		class := systemlog.ClassReviewEnvUp
+		if !up {
+			class = systemlog.ClassReviewEnvDn
+		}
+		s.relaySystemOutput(a.Ticket, a.ID, class, output, failed)
 	}
 	return reviewenv.New(opt)
 }
