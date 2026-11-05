@@ -161,6 +161,17 @@ type Options struct {
 	// Logf is an optional operational logger for best-effort warnings (a down failure,
 	// a leak). Nil discards.
 	Logf func(string, ...any)
+	// Relay, when non-nil, receives the combined output of each OPERATOR-initiated
+	// bring-up/teardown command — the `up` and confirm-up healthchecks of Launch, the
+	// `down` and confirm-down probes of Teardown — so a caller (the webui) can stream
+	// it into the drv-048 System Logs panel. up distinguishes a Launch command (true)
+	// from a Teardown command (false) so the caller can tag the right system-log class;
+	// failed says the command exited non-zero (so the caller can colour its output with
+	// the error role). It is deliberately primitive (no systemlog dependency) and
+	// best-effort — a relay must never fail the lifecycle action. Nil disables relaying
+	// entirely: the status poll (Probe) and the daemon reaper leave it nil, so their
+	// probes never spam the panel; only the two board buttons wire it.
+	Relay func(a project.Attempt, up bool, output string, failed bool)
 }
 
 // Manager runs the review-env lifecycle. It is stateless beyond its Options — every
@@ -189,6 +200,18 @@ func (m *Manager) logf(format string, args ...any) {
 	if m.opt.Logf != nil {
 		m.opt.Logf(format, args...)
 	}
+}
+
+// relay hands one operator-initiated command's captured output to the configured
+// relay sink (drv-048), if any. up tags the command as a Launch (true) or Teardown
+// (false) command; failed says it exited non-zero. Best-effort and nil-safe: a
+// missing sink (Probe, the reaper) or empty output is a no-op, and the sink must
+// never fail the lifecycle action.
+func (m *Manager) relay(a project.Attempt, up bool, output string, failed bool) {
+	if m.opt.Relay == nil || strings.TrimSpace(output) == "" {
+		return
+	}
+	m.opt.Relay(a, up, output, failed)
 }
 
 // Load returns an attempt's current record for one environment and whether one
@@ -400,15 +423,21 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	}
 
 	// up — a non-zero exit is an infrastructure fault; tear the worktree back down so
-	// a failed launch leaks nothing.
+	// a failed launch leaks nothing. The bring-up output is relayed into the System
+	// Logs stream either way (drv-048), so an operator sees WHY `up` failed.
 	if out, err := m.runScript(ctx, wtPath, env.Up, scriptEnv); err != nil {
+		m.relay(a, true, out, true)
 		m.removeWorktree(ctx, a.Repo, wtPath)
 		return m.fail(a, rec, fmt.Sprintf("up failed: %v\n%s", err, out))
+	} else {
+		m.relay(a, true, out, false)
 	}
 
 	// confirm up — every healthcheck must be green before the URL is revealed.
 	for _, hc := range env.Healthchecks {
-		if out, err := m.runScript(ctx, wtPath, hc.Script, scriptEnv); err != nil {
+		out, err := m.runScript(ctx, wtPath, hc.Script, scriptEnv)
+		m.relay(a, true, out, err != nil)
+		if err != nil {
 			m.runScript(ctx, wtPath, env.Down, scriptEnv) // best-effort down
 			m.removeWorktree(ctx, a.Repo, wtPath)
 			return m.fail(a, rec, fmt.Sprintf("healthcheck %q red after up — environment never came ready:\n%s", hc.Name, strings.TrimSpace(out)))
@@ -482,18 +511,24 @@ func (m *Manager) Teardown(ctx context.Context, a project.Attempt, env, reason s
 	}
 
 	// down — best-effort; a down failure never blocks the confirm-down probe (the
-	// probe, not down's exit code, is the authority on whether the env is gone).
+	// probe, not down's exit code, is the authority on whether the env is gone). The
+	// teardown output is relayed into the System Logs stream either way (drv-048).
 	if strings.TrimSpace(rec.Down) != "" {
-		if out, derr := m.runScript(ctx, rec.Worktree, rec.Down, rec.ScriptEnv); derr != nil {
+		out, derr := m.runScript(ctx, rec.Worktree, rec.Down, rec.ScriptEnv)
+		m.relay(a, false, out, derr != nil)
+		if derr != nil {
 			m.logf("reviewenv: %s/%s down failed (continuing to confirm): %v\n%s", a.Ticket, a.ID, derr, out)
 		}
 	}
 
 	// confirm down — the same probes, red-expected. Any that stays green means the
-	// service is still answering: a leak.
+	// service is still answering: a leak. A still-green probe's output is relayed as an
+	// error line (the service should have been gone), a red (expected) one as neutral.
 	var stillGreen []string
 	for _, hc := range rec.Healthchecks {
-		if _, err := m.runScript(ctx, rec.Worktree, hc.Script, rec.ScriptEnv); err == nil {
+		out, err := m.runScript(ctx, rec.Worktree, hc.Script, rec.ScriptEnv)
+		m.relay(a, false, out, err == nil)
+		if err == nil {
 			stillGreen = append(stillGreen, hc.Name)
 		}
 	}
