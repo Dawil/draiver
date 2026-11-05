@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
@@ -34,9 +35,25 @@ import (
 type promoChipVM struct {
 	Env    string
 	Slug   string
-	Class  string // "none" | "ok" | "stale" | "fail"
-	Symbol string // "○" | "✓" | "·" | "✕"
+	Class  string // "none" | "ok" | "stale" | "fail" | "run"
+	Symbol string // "○" | "✓" | "·" | "✕" | "" (run spins instead of a glyph)
 	Label  string // screen-reader / tooltip summary
+}
+
+// promoCheckStaleAfter bounds how long an in-progress `promotion-check` marker pins
+// the spinner (drv-049). A real qa check never approaches this; it exists only to
+// reconcile an ABANDONED marker — a check whose process died before recording a
+// terminal/cleared event — so a killed check never leaves a chip spinning forever.
+// The common blocked/env-fault case is cleared promptly by its own `cleared` marker,
+// not by this TTL, so the window can be generous without ever stranding a long check.
+const promoCheckStaleAfter = 15 * time.Minute
+
+// promoCheckLive reports whether an in-progress marker should still spin the chip at
+// render time: it is in progress AND its start is within the staleness window. A
+// marker older than promoCheckStaleAfter is treated as abandoned and reconciled to
+// cleared, so the chip falls back to its last recorded verdict.
+func promoCheckLive(ps project.PromotionStatus, now time.Time) bool {
+	return ps.InProgress && now.Sub(ps.StartedAt) < promoCheckStaleAfter
 }
 
 // promoChips is the FuncMap entry the board card calls. It is best-effort presentation
@@ -56,7 +73,7 @@ func (s *Server) promoChips(a project.Attempt) []promoChipVM {
 	if !ok || st.Pyramid == nil {
 		return nil
 	}
-	return projectPromoChips(st.Pyramid, a.Events, st.Head)
+	return projectPromoChips(st.Pyramid, a.Events, st.Head, time.Now())
 }
 
 // projectPromoChips is the pure, I/O-free core of the board-chip projection (the live
@@ -68,7 +85,7 @@ func (s *Server) promoChips(a project.Attempt) []promoChipVM {
 // env gets a grey `none` chip rather than being skipped — so a reviewer can see (and
 // click) a pending promotion. The pyramid's Promotions stay the authority, so an env
 // with a recorded result but no current declaration (removed/renamed) still folds off.
-func projectPromoChips(p *pyramid.Pyramid, events []event.Event, head string) []promoChipVM {
+func projectPromoChips(p *pyramid.Pyramid, events []event.Event, head string, now time.Time) []promoChipVM {
 	if p == nil || len(p.Promotions) == 0 {
 		return nil
 	}
@@ -77,7 +94,7 @@ func projectPromoChips(p *pyramid.Pyramid, events []event.Event, head string) []
 	for _, pr := range p.Promotions {
 		// statuses[env] is the zero PromotionStatus (Outcome == "") when nothing has been
 		// run for this env yet — promoChip renders that as the grey `none` chip.
-		chips = append(chips, promoChip(pr.Environment, statuses[pr.Environment], head))
+		chips = append(chips, promoChip(pr.Environment, statuses[pr.Environment], head, now))
 	}
 	return chips
 }
@@ -87,9 +104,15 @@ func projectPromoChips(p *pyramid.Pyramid, events []event.Event, head string) []
 // always a cross regardless of commit (the latest verdict was red); a pass is green only
 // when its commit still describes the tip, else muted-stale. The glyph (○/✓/·/✕) plus
 // the title/aria-label keep every state legible without colour alone.
-func promoChip(env string, ps project.PromotionStatus, head string) promoChipVM {
+func promoChip(env string, ps project.PromotionStatus, head string, now time.Time) promoChipVM {
 	c := promoChipVM{Env: env, Slug: reviewEnvSlug(env)}
 	switch {
+	case promoCheckLive(ps, now):
+		// drv-049: a durable in-progress marker spins the chip from server state, so the
+		// 3s morph poll keeps redrawing the spinning chip until a terminal verdict lands.
+		// No glyph — the CSS spinner carries the "in flight" meaning (plus the aria-label).
+		c.Class, c.Symbol = "run", ""
+		c.Label = "promotion to " + env + " — check in progress"
 	case ps.Outcome == "":
 		c.Class, c.Symbol = "none", "○"
 		c.Label = "promotion to " + env + " not yet checked"
@@ -161,7 +184,7 @@ type promotePanelVM struct {
 	EnvSlug string
 	Base    string // the branch the environment tracks (descriptive, v1)
 	// Class is the status styling hook and State the human-facing phase:
-	// "none" (not yet promoted) | "ok" (promoted @ HEAD) | "stale" | "fail".
+	// "none" (not yet promoted) | "ok" (promoted @ HEAD) | "stale" | "fail" | "run".
 	Class      string
 	StatusLine string
 	// Commit/Head are short SHAs for the status line (populated once a result exists).
@@ -174,14 +197,14 @@ type promotePanelVM struct {
 // so the enumeration is unit-testable off canned inputs, mirroring projectReviewEnvs.
 // It returns nil — render nothing — for a non-Review attempt or one whose pyramid
 // declares no promotion.
-func projectPromoteSurface(a project.Attempt, p *pyramid.Pyramid, head string) *promoteSurfaceVM {
+func projectPromoteSurface(a project.Attempt, p *pyramid.Pyramid, head string, now time.Time) *promoteSurfaceVM {
 	if a.State != project.Review || p == nil || len(p.Promotions) == 0 {
 		return nil
 	}
 	statuses := project.DerivePromotions(a.Events)
 	vm := &promoteSurfaceVM{Attempt: a}
 	for _, pr := range p.Promotions {
-		vm.Panels = append(vm.Panels, projectPromotePanel(a, pr, statuses[pr.Environment], head))
+		vm.Panels = append(vm.Panels, projectPromotePanel(a, pr, statuses[pr.Environment], head, now))
 	}
 	return vm
 }
@@ -189,7 +212,7 @@ func projectPromoteSurface(a project.Attempt, p *pyramid.Pyramid, head string) *
 // projectPromotePanel projects one declared promotion plus its latest recorded status
 // into a panel VM. A zero PromotionStatus (no result yet) is the resting "not yet
 // promoted" state.
-func projectPromotePanel(a project.Attempt, pr pyramid.Promotion, ps project.PromotionStatus, head string) *promotePanelVM {
+func projectPromotePanel(a project.Attempt, pr pyramid.Promotion, ps project.PromotionStatus, head string, now time.Time) *promotePanelVM {
 	vm := &promotePanelVM{
 		Attempt: a,
 		EnvName: pr.Environment,
@@ -198,6 +221,12 @@ func projectPromotePanel(a project.Attempt, pr pyramid.Promotion, ps project.Pro
 		Head:    shortSHA(head),
 	}
 	switch {
+	case promoCheckLive(ps, now):
+		// drv-049: a durable in-progress marker also drives the attempt-page panel, so a
+		// fresh load mid-check (e.g. a board-origin check running for this env) shows the
+		// same spinning state the board chip does.
+		vm.Class = "run"
+		vm.StatusLine = "check in progress…"
 	case ps.Outcome == "":
 		vm.Class = "none"
 		vm.StatusLine = "not yet promoted"
@@ -228,7 +257,7 @@ func (s *Server) promoteSurface(ctx context.Context, a project.Attempt) *promote
 	if !ok {
 		return nil
 	}
-	return projectPromoteSurface(a, st.Pyramid, st.Head)
+	return projectPromoteSurface(a, st.Pyramid, st.Head, time.Now())
 }
 
 // promoteResultVM drives the OOB "promote-result" banner, mirroring rerunResultVM:
@@ -310,6 +339,23 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// started → pass|fail arc, not only the terminal verdict below.
 	s.emitSystem(id, att, promotionStartedSystemEvent(envName, st.Head))
 
+	// drv-049: record the durable, server-rendered "check in progress" marker on the
+	// attempt log — the state the board chip spinner folds from (project.DerivePromotions),
+	// so every 3s morph re-render keeps drawing the spinner until the terminal verdict
+	// below clears it, instead of the poll reconciling a transient client class away. It
+	// is distinct from the system-log twin emitted just above (an operational stream the
+	// promotion fold does not read). The terminal branch below clears it on every outcome.
+	if _, err := s.gw.AppendAt(id, att, event.Event{
+		Type:        "promotion-check",
+		Environment: envName,
+		Commit:      st.Head,
+		Outcome:     "started",
+		Body:        "Promotion check to `" + envName + "` started @ `" + shortSHA(st.Head) + "`.",
+	}); err != nil {
+		s.fail(w, err)
+		return
+	}
+
 	// drv-048: relay the check's own stdout/stderr into the System Logs stream instead
 	// of discarding it, so the qa/healthcheck output (and the reason a promotion was
 	// blocked) interleaves, in real recorded time, between the started line above and
@@ -361,7 +407,26 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		// Reload so the re-rendered fragments reflect the just-appended event.
+		// Reload so the re-rendered fragments reflect the just-appended event (the
+		// promotion-result also clears the drv-049 in-progress marker via the fold).
+		if a, err = project.LoadAttempt(s.root, id, att); err != nil {
+			s.fail(w, err)
+			return
+		}
+	default:
+		// drv-049: a blocked/env-fault/no-promotion outcome records no durable verdict,
+		// but the in-progress marker appended before the run must still be cleared so the
+		// chip settles back to its prior resting state (never spins until the TTL). The
+		// clear leaves the last recorded verdict untouched (see DerivePromotions).
+		if _, err := s.gw.AppendAt(id, att, event.Event{
+			Type:        "promotion-check",
+			Environment: envName,
+			Outcome:     "cleared",
+			Body:        "Promotion check to `" + envName + "` ended with no verdict (`" + string(outcome.Status) + "`).",
+		}); err != nil {
+			s.fail(w, err)
+			return
+		}
 		if a, err = project.LoadAttempt(s.root, id, att); err != nil {
 			s.fail(w, err)
 			return

@@ -345,27 +345,67 @@ func DeriveArchived(events []event.Event) bool {
 type PromotionStatus struct {
 	Commit  string // the HEAD commit the promotion verified
 	Outcome string // "pass" | "fail" — the qa verdict
+	// InProgress marks a check that has recorded a `promotion-check` started marker
+	// with no terminal verdict yet (drv-049). It is the durable, server-rendered twin
+	// of the board spinner: while true the chip spins from server state, so the 3s
+	// morph poll keeps redrawing it instead of reconciling a transient client class
+	// away. A later `promotion-result` (pass/fail) or a `promotion-check` cleared
+	// marker (the blocked/env-fault path) clears it.
+	InProgress bool
+	// StartedAt is the live started marker's recorded timestamp (drv-049), so a
+	// presentation caller can treat an abandoned marker (a check whose process died
+	// before recording a terminal/cleared event) as cleared past a TTL rather than
+	// pinning a spinner forever. Zero when not in progress.
+	StartedAt time.Time
 }
 
-// DerivePromotions folds an attempt's `promotion-result` events into the latest
-// status per environment (drv-043). It mirrors DeriveEnabled/DeriveArchived exactly:
-// a pure projection over the append-only log, last-event-wins, defaulting to the
-// empty map when no promotion has been recorded. The map is keyed by the event's
-// Environment; an event with a blank Environment is ignored (it names no environment
-// to key on). The returned Commit/Outcome let a presentation caller render a per-env
-// chip — green when Outcome is pass and Commit == HEAD, stale when it is an older
-// commit, failed when Outcome is fail — beside the Review badge.
+// DerivePromotions folds an attempt's `promotion-result` and `promotion-check`
+// events into the latest status per environment (drv-043, extended drv-049). It
+// mirrors DeriveEnabled/DeriveArchived: a pure projection over the append-only log,
+// last-event-wins, defaulting to the empty map when nothing has been recorded. The
+// map is keyed by the event's Environment; an event with a blank Environment is
+// ignored (it names no environment to key on).
+//
+// A `promotion-result` sets the latest Commit/Outcome and clears any in-progress
+// marker (it IS the terminal verdict). A `promotion-check` is the drv-049 durable
+// spinner marker: Outcome `started` opens the in-progress state (recording the
+// commit being checked and the marker's timestamp); any other `promotion-check`
+// outcome (`cleared`) closes it without disturbing the last recorded verdict — so a
+// blocked check that ran after a prior pass settles back to that pass, not to none.
+//
+// The returned Commit/Outcome/InProgress let a presentation caller render a per-env
+// chip — spinning while InProgress, else green when Outcome is pass and Commit ==
+// HEAD, stale at an older commit, failed when Outcome is fail — beside the Review badge.
 func DerivePromotions(events []event.Event) map[string]PromotionStatus {
 	out := map[string]PromotionStatus{}
 	for _, e := range events {
-		if e.Type != "promotion-result" {
-			continue
-		}
 		env := strings.TrimSpace(e.Environment)
 		if env == "" {
 			continue
 		}
-		out[env] = PromotionStatus{Commit: e.Commit, Outcome: e.Outcome}
+		switch e.Type {
+		case "promotion-result":
+			// A terminal verdict: update the recorded commit/outcome and clear any
+			// pending in-progress marker.
+			s := out[env]
+			s.Commit, s.Outcome = e.Commit, e.Outcome
+			s.InProgress, s.StartedAt = false, time.Time{}
+			out[env] = s
+		case "promotion-check":
+			s := out[env]
+			if strings.TrimSpace(e.Outcome) == "started" {
+				// Open the in-progress state WITHOUT touching the last recorded
+				// Commit/Outcome: if this check is later abandoned and reconciled past
+				// the TTL, the chip must fall back to the genuine prior verdict, never
+				// to a green derived from the un-finished check's start commit.
+				s.InProgress, s.StartedAt = true, e.TS
+			} else {
+				// "cleared" (blocked/env-fault/abandoned): close the in-progress state,
+				// leaving the last recorded verdict untouched.
+				s.InProgress, s.StartedAt = false, time.Time{}
+			}
+			out[env] = s
+		}
 	}
 	return out
 }

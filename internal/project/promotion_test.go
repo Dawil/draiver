@@ -2,6 +2,7 @@ package project
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Dawil/draiver/internal/event"
 )
@@ -9,6 +10,11 @@ import (
 // promo builds a promotion-result event for the fold tests.
 func promo(seq int, env, commit, outcome string) event.Event {
 	return event.Event{Seq: seq, Type: "promotion-result", Environment: env, Commit: commit, Outcome: outcome}
+}
+
+// checkEv builds a drv-049 `promotion-check` marker (Outcome "started"/"cleared").
+func checkEv(seq int, env, commit, outcome string, ts time.Time) event.Event {
+	return event.Event{Seq: seq, Type: "promotion-check", Environment: env, Commit: commit, Outcome: outcome, TS: ts}
 }
 
 // DerivePromotions folds promotion-result events into the latest status per
@@ -53,6 +59,49 @@ func TestDerivePromotions(t *testing.T) {
 		})
 		if len(got) != 0 {
 			t.Fatalf("a test-result is not a promotion-result, want empty, got %v", got)
+		}
+	})
+
+	// drv-049: a `promotion-check` started marker opens the durable in-progress state;
+	// a terminal `promotion-result` or a `cleared` marker closes it.
+	ts := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+
+	t.Run("a started marker marks the env in progress and records its timestamp", func(t *testing.T) {
+		got := DerivePromotions([]event.Event{checkEv(1, "dev", "aaa", "started", ts)})
+		s := got["dev"]
+		if !s.InProgress || !s.StartedAt.Equal(ts) {
+			t.Fatalf("dev should be in progress at %v, got %+v", ts, s)
+		}
+		// A started marker carries no verdict: Outcome/Commit stay empty so a later TTL
+		// reconcile falls back to none, never a false green.
+		if s.Outcome != "" || s.Commit != "" {
+			t.Errorf("a started marker must not set a verdict, got %+v", s)
+		}
+	})
+
+	t.Run("a promotion-result after a start clears in progress", func(t *testing.T) {
+		got := DerivePromotions([]event.Event{
+			checkEv(1, "dev", "aaa", "started", ts),
+			promo(2, "dev", "aaa", "pass"),
+		})
+		s := got["dev"]
+		if s.InProgress || s.Outcome != "pass" || s.Commit != "aaa" {
+			t.Errorf("a terminal verdict should clear in progress and record pass@aaa, got %+v", s)
+		}
+	})
+
+	t.Run("a cleared marker closes in progress without disturbing the prior verdict", func(t *testing.T) {
+		got := DerivePromotions([]event.Event{
+			promo(1, "dev", "aaa", "pass"),
+			checkEv(2, "dev", "bbb", "started", ts),
+			checkEv(3, "dev", "", "cleared", ts),
+		})
+		s := got["dev"]
+		if s.InProgress {
+			t.Errorf("a cleared marker should close in progress, got %+v", s)
+		}
+		if s.Outcome != "pass" || s.Commit != "aaa" {
+			t.Errorf("the prior pass@aaa must survive a cleared re-check, got %+v", s)
 		}
 	})
 }
