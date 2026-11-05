@@ -883,11 +883,21 @@
 {{define "promote-panel"}}<div class="promote-panel promote-{{.Class}}" id="promote-env-{{.EnvSlug}}" data-testid="promote-panel" data-promote-env="{{.EnvName}}" data-promote-class="{{.Class}}">
   <p class="promote-env">Environment <code data-testid="promote-env-name">{{.EnvName}}</code>{{if .Base}} <span class="promote-base" data-testid="promote-base">· tracks <code>{{.Base}}</code></span>{{end}}</p>
   <p class="promote-status" data-testid="promote-status"><span class="promote-chip promote-chip-{{.Class}}" data-testid="promote-chip-{{.EnvSlug}}">{{.StatusLine}}</span></p>
+  {{/* drv-049: no hx-confirm — a promotion check is a read-only verify (it records a
+       verdict but never deploys, merges, or pushes), so the click-through is friction
+       without safety value, mirroring drv-046's removal from the board chips (decision
+       #25). The Check button now carries the same in-progress feedback the board chip
+       has: an inline spinner bound to hx-indicator (revealed while the POST is in flight)
+       and an aria-busy toggle. The attempt page is NOT in the 3s-polled/morphed region,
+       so this transient indicator is never clobbered here; a load during a board-origin
+       check for this env also shows the durable `run` state via promote-{{.Class}}. */}}
   <div class="promote-actions">
     <button type="button" class="action-promote" data-testid="action-promote-{{.EnvSlug}}"
       hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/promote/{{.EnvName}}"
       hx-target="[data-testid=log-region]" hx-swap="innerHTML"
-      hx-confirm="Check the promotion to {{.EnvName}}? This runs the repo's qa check against the reviewed commit and records the verdict — draiver does not deploy, merge, or push.">Check</button>
+      hx-indicator="find .promo-spin"
+      hx-on::before-request="this.setAttribute('aria-busy','true')"
+      hx-on::after-request="this.removeAttribute('aria-busy')">Check<span class="promo-spin" data-testid="promote-spin-{{.EnvSlug}}" aria-hidden="true"><svg viewBox="0 0 16 16" width="10" height="10"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-dasharray="26 12"/></svg></span></button>
   </div>
 </div>{{end}}
 

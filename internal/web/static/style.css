@@ -242,10 +242,22 @@ body {
 .promo-ok { color: var(--done); border-color: color-mix(in srgb, var(--done) 55%, var(--line)); }
 .promo-stale { color: var(--muted); border-style: dashed; }
 .promo-fail { color: var(--alert); border-color: color-mix(in srgb, var(--alert) 55%, var(--line)); }
-/* Inline loading spinner shown only while the chip's promote POST is in flight. htmx
-   adds .htmx-request to the hx-indicator target (the .promo-spin) for the request's
-   duration; the "tiny loading gif" is a CSS keyframe spin on an inline SVG, so no binary
-   asset is hand-typed (the card already draws its glyphs as inline SVG). */
+/* drv-049: a check in progress is a DURABLE, server-rendered state — the chip carries
+   the `run` class whenever the server folds an in-progress `promotion-check` marker, so
+   the spinner survives the 3s morph poll (every re-render redraws the `run` chip) instead
+   of being reconciled away with a transient client class. The muted border/colour match
+   the resting states; the spinner itself carries the motion. */
+.promo-run { color: var(--muted); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.promo-run .promo-spin { display: inline-flex; }
+/* Inline loading spinner. Two reveal paths, deliberately complementary:
+   - .promo-run (drv-049): the durable server state above — the board chip's real source,
+     morph-safe, and the attempt-page panel's load-time in-progress state.
+   - .htmx-request (drv-046): the transient path htmx toggles on the hx-indicator target
+     for the lifetime of the in-flight POST — instant click feedback, and the attempt-page
+     Check button's in-progress feedback (that button is not in a polled/morphed region,
+     so the transient class is never clobbered there).
+   The "tiny loading gif" is a CSS keyframe spin on an inline SVG, so no binary asset is
+   hand-typed (the card already draws its glyphs as inline SVG). */
 .promo-spin { display: none; margin-left: 3px; line-height: 0; color: currentColor; }
 .promo-spin.htmx-request { display: inline-flex; }
 .promo-spin svg { animation: promo-spin 0.7s linear infinite; }
@@ -278,6 +290,10 @@ body {
 .promote-panel.promote-stale { border-left-color: var(--muted); }
 .promote-panel.promote-fail { border-left-color: var(--alert); }
 .promote-panel.promote-none { border-left-color: var(--muted); }
+/* drv-049: a check in progress — the durable, load-time in-progress state (a board-origin
+   check running for this env) reveals the inline spinner inside the Check button. */
+.promote-panel.promote-run { border-left-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.promote-panel.promote-run .promo-spin { display: inline-flex; }
 .promote-env { margin: 0; font-size: 13px; }
 .promote-base { color: var(--muted); font-size: 12px; }
 .promote-status { margin: 0; }
@@ -286,6 +302,7 @@ body {
 .promote-chip-stale { color: var(--muted); }
 .promote-chip-fail { color: var(--alert); }
 .promote-chip-none { color: var(--muted); }
+.promote-chip-run { color: var(--muted); }
 .promote-result { font-size: 12px; white-space: pre-wrap; border-radius: 6px; padding: 6px 9px; }
 .promote-result.promote-ok { color: var(--done); background: color-mix(in srgb, var(--done) 12%, transparent); }
 .promote-result.promote-warn { color: var(--review); background: color-mix(in srgb, var(--review) 12%, transparent); }
