@@ -456,7 +456,7 @@ func TestLaunchParamOverride(t *testing.T) {
 	rec, err := m.Launch(context.Background(), a, env, map[string]string{
 		"ENV_NAME":            "staging",
 		reviewenv.EnvInstance: "HACK", // override of an injected var: must be ignored
-		"UNDECLARED":          "x",     // not a declared param: must be ignored
+		"UNDECLARED":          "x",    // not a declared param: must be ignored
 	})
 	if err != nil || rec.State != reviewenv.Up {
 		t.Fatalf("launch: state=%q err=%v msg=%q", rec.State, err, rec.Message)
@@ -505,3 +505,176 @@ func TestLaunchRejectsNonReviewReadyEnv(t *testing.T) {
 	}
 }
 
+// relayCall records one Relay invocation (drv-048), so a test can assert the
+// bring-up/teardown output was handed to the sink with the right up/failed flags.
+type relayCall struct {
+	up     bool
+	output string
+	failed bool
+}
+
+// TestLaunchRelaysBringUpOutput pins drv-048's review-env-up relay: Launch hands the
+// `up` command's output and each confirm-up healthcheck's output to the Relay sink,
+// tagged up=true, so the webui can stream them into the System Logs panel. A green
+// launch relays with failed=false.
+func TestLaunchRelaysBringUpOutput(t *testing.T) {
+	repo := newRepo(t)
+	root := store.Root{Dir: t.TempDir()}
+	a := seedAttempt(t, root, repo, "DRV-1", "0001")
+	markers := t.TempDir()
+	marker := filepath.Join(markers, "$"+reviewenv.EnvInstance+".$"+reviewenv.EnvPort)
+
+	var calls []relayCall
+	env := &pyramid.Environment{
+		Name:         "review",
+		Up:           "echo booting the service; touch " + marker,
+		Down:         "rm -f " + marker,
+		Healthchecks: []pyramid.Healthcheck{{Name: "marker", Script: "echo probing; test -f " + marker}},
+		URL:          "http://localhost:${" + reviewenv.EnvPort + "}/",
+	}
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir(),
+		Relay: func(_ project.Attempt, up bool, output string, failed bool) {
+			calls = append(calls, relayCall{up: up, output: output, failed: failed})
+		},
+	})
+	rec, err := m.Launch(context.Background(), a, env, nil)
+	if err != nil || rec.State != reviewenv.Up {
+		t.Fatalf("launch: %q %v", rec.State, err)
+	}
+
+	// Both the up command's output and the healthcheck's output were relayed, tagged as
+	// bring-up (up=true) and green (failed=false).
+	var sawUp, sawProbe bool
+	for _, c := range calls {
+		if !c.up {
+			t.Errorf("a Launch relay must be tagged up=true: %+v", c)
+		}
+		if c.failed {
+			t.Errorf("a green launch must relay failed=false: %+v", c)
+		}
+		if strings.Contains(c.output, "booting the service") {
+			sawUp = true
+		}
+		if strings.Contains(c.output, "probing") {
+			sawProbe = true
+		}
+	}
+	if !sawUp {
+		t.Errorf("the up command's output was not relayed: %+v", calls)
+	}
+	if !sawProbe {
+		t.Errorf("the healthcheck's output was not relayed: %+v", calls)
+	}
+}
+
+// TestLaunchRelaysFailedBringUpAsError: a red `up` relays its output with failed=true,
+// so the webui colours the bring-up output red in the panel.
+func TestLaunchRelaysFailedBringUpAsError(t *testing.T) {
+	repo := newRepo(t)
+	root := store.Root{Dir: t.TempDir()}
+	a := seedAttempt(t, root, repo, "DRV-1", "0001")
+
+	var calls []relayCall
+	env := &pyramid.Environment{
+		Name:         "review",
+		Up:           "echo cannot bind port; exit 1",
+		Down:         "true",
+		Healthchecks: []pyramid.Healthcheck{{Name: "never", Script: "false"}},
+		URL:          "http://localhost:${" + reviewenv.EnvPort + "}/",
+	}
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir(),
+		Relay: func(_ project.Attempt, up bool, output string, failed bool) {
+			calls = append(calls, relayCall{up: up, output: output, failed: failed})
+		},
+	})
+	rec, err := m.Launch(context.Background(), a, env, nil)
+	if err != nil {
+		t.Fatalf("Launch returned error: %v", err)
+	}
+	if rec.State != reviewenv.Failed {
+		t.Fatalf("state = %q, want failed", rec.State)
+	}
+	var sawFailedUp bool
+	for _, c := range calls {
+		if c.up && c.failed && strings.Contains(c.output, "cannot bind port") {
+			sawFailedUp = true
+		}
+	}
+	if !sawFailedUp {
+		t.Errorf("the failed up output was not relayed as an error: %+v", calls)
+	}
+}
+
+// TestTeardownRelaysDownOutput: Teardown relays the `down` and confirm-down probe
+// output tagged up=false, so the webui streams it under review-env-down. A confirmed
+// teardown's probes are red-as-expected, so they relay failed=false (not a leak).
+func TestTeardownRelaysDownOutput(t *testing.T) {
+	repo := newRepo(t)
+	root := store.Root{Dir: t.TempDir()}
+	a := seedAttempt(t, root, repo, "DRV-1", "0001")
+	markers := t.TempDir()
+	marker := filepath.Join(markers, "$"+reviewenv.EnvInstance+".$"+reviewenv.EnvPort)
+
+	var calls []relayCall
+	env := &pyramid.Environment{
+		Name:         "review",
+		Up:           "touch " + marker,
+		Down:         "echo stopping the service; rm -f " + marker,
+		Healthchecks: []pyramid.Healthcheck{{Name: "marker", Script: "test -f " + marker}},
+		URL:          "http://localhost:${" + reviewenv.EnvPort + "}/",
+	}
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir(),
+		Relay: func(_ project.Attempt, up bool, output string, failed bool) {
+			calls = append(calls, relayCall{up: up, output: output, failed: failed})
+		},
+	})
+	if up, err := m.Launch(context.Background(), a, env, nil); err != nil || up.State != reviewenv.Up {
+		t.Fatalf("launch: %q %v", up.State, err)
+	}
+	calls = nil // keep only the teardown relays
+	rec, err := m.Teardown(context.Background(), a, "review", "button")
+	if err != nil || rec.State != reviewenv.Down {
+		t.Fatalf("Teardown: %q %v", rec.State, err)
+	}
+	var sawDown bool
+	for _, c := range calls {
+		if c.up {
+			t.Errorf("a Teardown relay must be tagged up=false: %+v", c)
+		}
+		if strings.Contains(c.output, "stopping the service") {
+			sawDown = true
+			if c.failed {
+				t.Errorf("a down command that exited 0 must relay failed=false: %+v", c)
+			}
+		}
+	}
+	if !sawDown {
+		t.Errorf("the down command's output was not relayed: %+v", calls)
+	}
+}
+
+// TestProbeNeverRelays: the status poll (Probe) runs the same healthchecks but must
+// NOT relay — a polling panel would otherwise spam the System Logs stream every tick.
+func TestProbeNeverRelays(t *testing.T) {
+	repo := newRepo(t)
+	root := store.Root{Dir: t.TempDir()}
+	a := seedAttempt(t, root, repo, "DRV-1", "0001")
+	markers := t.TempDir()
+
+	var calls []relayCall
+	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir(),
+		Relay: func(_ project.Attempt, up bool, output string, failed bool) {
+			calls = append(calls, relayCall{up: up, output: output, failed: failed})
+		},
+	})
+	if up, err := m.Launch(context.Background(), a, markerEnv(markers), nil); err != nil || up.State != reviewenv.Up {
+		t.Fatalf("launch: %q %v", up.State, err)
+	}
+	calls = nil // only count Probe's relays
+	if _, err := m.Probe(context.Background(), a, "review"); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("Probe must not relay any output, got %d calls: %+v", len(calls), calls)
+	}
+}

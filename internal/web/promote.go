@@ -3,7 +3,6 @@ package web
 import (
 	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -311,7 +310,19 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// started → pass|fail arc, not only the terminal verdict below.
 	s.emitSystem(id, att, promotionStartedSystemEvent(envName, st.Head))
 
-	outcome, err := promote.Run(r.Context(), s.root, a.Repo, id, att, envName, io.Discard, io.Discard)
+	// drv-048: relay the check's own stdout/stderr into the System Logs stream instead
+	// of discarding it, so the qa/healthcheck output (and the reason a promotion was
+	// blocked) interleaves, in real recorded time, between the started line above and
+	// the pass|fail verdict below. stderr lines take the error role so they read red.
+	// Best-effort like emitSystem: a relay write never fails the check it observes.
+	relay := func(line string, isErr bool) {
+		s.emitSystem(id, att, systemlog.SystemEvent{Class: systemlog.ClassPromotion, Message: line, Error: isErr})
+	}
+	relayOut := &systemRelay{relay: relay}
+	relayErr := &systemRelay{relay: relay, isErr: true}
+	outcome, err := promote.Run(r.Context(), s.root, a.Repo, id, att, envName, relayOut, relayErr)
+	relayOut.flush()
+	relayErr.flush()
 	if err != nil {
 		s.fail(w, err)
 		return
