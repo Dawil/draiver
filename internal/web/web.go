@@ -595,6 +595,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/restart-context", s.handleRestartContext)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/enable", s.handleEnable)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/archive", s.handleArchive)
+	mux.HandleFunc("POST /ticket/{id}/{attempt}/star", s.handleStar)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/push", s.handleGitPush)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/git/sync", s.handleGitSync)
 	mux.HandleFunc("POST /ticket/{id}/{attempt}/review-env/{env}/up", s.handleReviewEnvUp)
@@ -1382,6 +1383,7 @@ func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store") // defeat bfcache: Back re-fetches fresh
+	applyFaves(&vm, parseFaves(r))
 	s.render(w, "board_page.html", vm)
 }
 
@@ -1394,6 +1396,10 @@ func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
 	// Keep the favicon in sync without coupling it to the board's data-testid
 	// counts: emit the variant as a custom event htmx fires after the swap.
 	emitFaviconTrigger(w, vm)
+	// Apply the viewer's favourites so each 3s poll re-emits the same favourites-first
+	// order (drv-050): the order is derived from the cookie the server reads every
+	// render, so the morph swap keeps pinned cards on top with nothing client-side.
+	applyFaves(&vm, parseFaves(r))
 	s.render(w, "board.html", vm)
 }
 
@@ -1920,7 +1926,10 @@ func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Re-render just this card; htmx swaps it in place (outerHTML on .card-wrap),
-	// dropping the button and recomputing the session-dot off the fresh state.
+	// dropping the button and recomputing the session-dot off the fresh state. Carry
+	// the viewer's favourite bit (drv-050) so the star glyph/label stay correct on the
+	// swapped-in card fragment.
+	a.Favourited = parseFaves(r)[faveRef(a.Ticket, a.ID)]
 	s.render(w, "card", a)
 }
 
@@ -1983,6 +1992,57 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emitFaviconTrigger(w, vm)
+	applyFaves(&vm, parseFaves(r))
+	s.render(w, "board.html", vm)
+}
+
+// handleStar toggles this card's per-viewer favourite (POST
+// /ticket/{id}/{attempt}/star, drv-050) and re-renders the board region so the card
+// relocates to its new in-column position in one htmx swap. Favourite is a view
+// preference of the person looking at the board, NOT ticket state: the server
+// persists nothing — the whole effect is a cookie read-modify-write. It reads the
+// favourites cookie, toggles this card's ref in the set, writes the updated cookie
+// back on the response, then renders the board with the just-updated set applied
+// (so the moved card and its lit star reflect the toggle immediately, before the
+// next 3s poll). The route is keyed by the same `{ticket}/{id}` ref every other
+// card action uses, so two attempts of one ticket are independently starrable.
+//
+// Unlike archive/enable/done it writes no durable event and needs no attempt load
+// beyond an existence check — the toggle is purely a cookie edit — but it keeps the
+// same same-origin guard and NotFound-on-unknown behaviour as the other writes, and
+// honours the operator's current ?view= (HX-Current-URL) so a star on the ledgers
+// view re-renders the ledgers view, mirroring handleArchive.
+func (s *Server) handleStar(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	id := r.PathValue("id")
+	att := r.PathValue("attempt")
+	if !s.root.AttemptExists(id, att) {
+		http.NotFound(w, r)
+		return
+	}
+	// Toggle this card's ref in the viewer's favourite set and write the cookie back.
+	faves := parseFaves(r)
+	ref := faveRef(id, att)
+	if faves[ref] {
+		delete(faves, ref)
+	} else {
+		faves[ref] = true
+	}
+	writeFavesCookie(w, faves)
+	// Re-render the whole board region with the just-updated set applied, so the card
+	// moves to (or leaves) the top of its column in the same swap. Keep the favicon in
+	// sync like the other board-region writers, even though a star changes no attention
+	// state — it is cheap and keeps every board-region handler uniform.
+	vm, err := s.board(viewFromCurrentURL(r))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	emitFaviconTrigger(w, vm)
+	applyFaves(&vm, faves)
 	s.render(w, "board.html", vm)
 }
 
@@ -2639,6 +2699,7 @@ func (s *Server) handleRestartContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		emitFaviconTrigger(w, bvm)
+		applyFaves(&bvm, parseFaves(r))
 		s.render(w, "board.html", bvm)
 		return
 	}

@@ -445,6 +445,7 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// appears/disappears in one swap — mirroring handleEnable's closest-.card-wrap /
 	// outerHTML swap. The attempt-page origin keeps the original log+OOB fragments below.
 	if r.URL.Query().Get("surface") == "card" {
+		a.Favourited = parseFaves(r)[faveRef(a.Ticket, a.ID)]
 		s.render(w, "card", a)
 		return
 	}
@@ -583,6 +584,7 @@ func (s *Server) handleMarkDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emitFaviconTrigger(w, vm)
+	applyFaves(&vm, parseFaves(r))
 	s.render(w, "board.html", vm)
 }
 

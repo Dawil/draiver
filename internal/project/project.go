@@ -144,6 +144,14 @@ type Attempt struct {
 	Coordinator bool
 	WakeChild   string
 	QueueDepth  int
+
+	// Favourited is the per-viewer "starred" presentation bit (drv-050), filled by
+	// the web board caller from the viewing user's favourites cookie (applyFaves) —
+	// exactly as Desired/Live/WaitingReason are filled. It is a view preference of the
+	// person looking at the board, never ticket state: empty on a log-only load and off
+	// the hash chain, and the server persists nothing. When true the card's star renders
+	// filled/visible and the card sorts above non-favourites within its column.
+	Favourited bool
 }
 
 // isLifecycle reports whether an event type moves the control state: the last
