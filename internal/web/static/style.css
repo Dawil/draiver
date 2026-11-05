@@ -81,11 +81,13 @@ body {
    room on the tile so the corner actions never sit over the ticket id — 36px for
    the archive button alone, more when the play button is also present. */
 .card-actions { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; z-index: 1; }
-.card-wrap:has(.card-actions) .card { padding-right: 36px; }
-/* Two corner buttons (play+archive, mark-done+archive, or restart-context+archive) need
-   the wider reserve. */
+/* Every card now carries at least two corner buttons — the always-present favourite
+   star (drv-050) beside the archive X — so the base reserve holds two. */
+.card-wrap:has(.card-actions) .card { padding-right: 62px; }
+/* Three corner buttons (star+play+archive, star+mark-done+archive, or
+   star+restart-context+archive) need the wider reserve. */
 .card-wrap:has(.enable-form) .card, .card-wrap:has(.markdone-form) .card,
-.card-wrap:has(.restart-context-card-form) .card { padding-right: 62px; }
+.card-wrap:has(.restart-context-card-form) .card { padding-right: 88px; }
 /* Green play button: enable a parked Running attempt into supervision. Colour is
    the eucalypt --dot-running (the same green the running dot uses); the play
    triangle carries the meaning as shape, not colour alone, and it is a real
@@ -140,6 +142,30 @@ body {
 }
 .archive-close:hover { background: var(--dot-disabled); color: var(--panel-2); }
 .archive-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Favourite star (drv-050): a per-viewer pin, styled to match the archive X — the same
+   circular 22px geometry and the same hover/focus-within reveal, so it is keyboard-
+   reachable and uncluttered at rest. The resting (un-favourited) star uses the muted
+   grey --dot-disabled, like the archive close; the on-state uses --accent. No hex is
+   typed — every colour comes from a --* custom property. The glyph already carries the
+   state as shape (filled vs outline), so colour only reinforces it. A FAVOURITED card's
+   star stays visible even when the card is not hovered (.star-on forces opacity 1) —
+   otherwise the operator could not see what is pinned. */
+.star-form { margin: 0; opacity: 0; transition: opacity .12s ease; }
+.card-wrap:hover .star-form, .card-wrap:focus-within .star-form { opacity: 1; }
+.star-form.star-on { opacity: 1; }
+.star-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; line-height: 0; cursor: pointer;
+  border-radius: 50%; background: transparent;
+  border: 1px solid var(--dot-disabled); color: var(--dot-disabled);
+}
+.star-btn:hover { background: var(--dot-disabled); color: var(--panel-2); }
+.star-btn-on {
+  border: 1px solid var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.star-btn-on:hover { background: var(--accent); color: var(--panel-2); }
+.star-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card-review {
   position: absolute; bottom: 8px; right: 10px; z-index: 1;
   font-size: 11px; text-decoration: none; white-space: nowrap;

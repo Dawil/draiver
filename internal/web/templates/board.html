@@ -125,6 +125,25 @@
       </button>
     </form>
     {{end}}
+    {{/* Favourite star (drv-050): a per-viewer pin that floats this card to the top of
+         its column. Rendered on EVERY card (independent of canArchive), as a sibling of
+         the archive form, styled to match the archive X. A real <form>/<button> like the
+         other actions; POSTs to /star which toggles the ref in the viewer's cookie and
+         re-renders the board region so the card relocates. The glyph carries state as
+         SHAPE (filled when favourited, outline when not), not colour alone, and the
+         aria-label/title reflect the current state. Hidden at rest and revealed on
+         hover/focus like the archive X — but when favourited the CSS forces it visible
+         so the operator can always see what is pinned. */}}
+    <form class="star-form{{if $a.Favourited}} star-on{{end}}" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/star"
+          hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/star" hx-target="#board-region" hx-swap="innerHTML">
+      <button type="submit" class="star-btn{{if $a.Favourited}} star-btn-on{{end}}"
+              data-testid="star-btn-{{$a.Ticket}}-{{$a.ID}}" data-favourited="{{$a.Favourited}}"
+              aria-label="{{if $a.Favourited}}Unfavourite this ticket{{else}}Favourite this ticket{{end}}"
+              title="{{if $a.Favourited}}Unfavourite this ticket{{else}}Favourite this ticket{{end}}">
+        {{if $a.Favourited}}<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.6l1.9 3.85 4.25.62-3.08 3 .73 4.23L8 11.3l-3.8 2l.73-4.23-3.08-3 4.25-.62z" fill="currentColor"/></svg>
+        {{else}}<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.6l1.9 3.85 4.25.62-3.08 3 .73 4.23L8 11.3l-3.8 2l.73-4.23-3.08-3 4.25-.62z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>{{end}}
+      </button>
+    </form>
     {{if canArchive .}}{{with archiveAction $a}}
     <form class="archive-form" method="post" action="/ticket/{{$a.Ticket}}/{{$a.ID}}/archive"
           hx-post="/ticket/{{$a.Ticket}}/{{$a.ID}}/archive" hx-target="#board-region" hx-swap="innerHTML"
