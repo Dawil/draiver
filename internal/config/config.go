@@ -36,6 +36,13 @@ const (
 	// reaper (drv-020) when the operator sets none: two hours of no interaction before
 	// a launched-but-forgotten review env is torn down.
 	DefaultReviewEnvMaxAgeMinutes = 120
+
+	// DefaultAsyncJobReapMinutes is the builtin deadline for the async-job
+	// liveness-reap (drvctl-057) when the operator sets none: 30 minutes without a
+	// landed `test-result` before a parked worker's detached runner is presumed dead
+	// and force-answered. Comfortably above the ~5-minute acceptance climb observed in
+	// the wild, so a runner still legitimately climbing is never reaped mid-flight.
+	DefaultAsyncJobReapMinutes = 30
 )
 
 // Config is the operator's resolved supervisor tunables. Every field carries a
@@ -123,6 +130,18 @@ type Config struct {
 	// the reaper — teardown then happens only on the explicit button or when the ticket
 	// is marked Done.
 	ReviewEnvMaxAgeMinutes int `json:"review_env_max_age_minutes"`
+
+	// AsyncJobReapMinutes is the deadline knob for the async-job liveness-reap
+	// (drvctl-057): a worker that fired `draiver test --detach && draiver park` parks
+	// Pending behind a single wake source — the detached runner's eventual
+	// `test-result`. A runner that spawns and then dies or hangs before landing any
+	// result (SIGKILL, a `timeout` wrapper, OOM, a host reboot, a wedged rung) leaves
+	// no doorbell, so the controlplane force-answers the launch — landing a terminal
+	// fail `test-result` that wakes the worker to iterate — once it has gone this many
+	// minutes without a result. Default 30 (well above the ~5-minute acceptance climb
+	// observed in the wild, so a healthy climb is never reaped). 0 disables the reaper
+	// — a stuck runner then clears only via the manual `draiver park --clear`.
+	AsyncJobReapMinutes int `json:"async_job_reap_minutes"`
 
 	// OverlayDir is a global folder of developer-owned test-pyramid overlay repos
 	// (drv-041), looked up by codebase basename: a codebase at path P with no in-repo
@@ -253,6 +272,7 @@ func Default() Config {
 		ContextLimit:           DefaultContextLimit,
 		DefaultSupervision:     DefaultSupervision,
 		ReviewEnvMaxAgeMinutes: DefaultReviewEnvMaxAgeMinutes,
+		AsyncJobReapMinutes:    DefaultAsyncJobReapMinutes,
 	}
 }
 
@@ -279,6 +299,7 @@ type file struct {
 	DefaultSupervision                 *string              `json:"default_supervision,omitempty"`
 	BDDArtefactKeep                    *int                 `json:"bdd_artefact_keep,omitempty"`
 	ReviewEnvMaxAgeMinutes             *int                 `json:"review_env_max_age_minutes,omitempty"`
+	AsyncJobReapMinutes                *int                 `json:"async_job_reap_minutes,omitempty"`
 	OverlayDir                         *string              `json:"overlay_dir,omitempty"`
 	Repos                              map[string]*repoFile `json:"repos,omitempty"`
 }
@@ -371,6 +392,9 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.ReviewEnvMaxAgeMinutes != nil {
 		c.ReviewEnvMaxAgeMinutes = *f.ReviewEnvMaxAgeMinutes
+	}
+	if f.AsyncJobReapMinutes != nil {
+		c.AsyncJobReapMinutes = *f.AsyncJobReapMinutes
 	}
 	if f.OverlayDir != nil {
 		c.OverlayDir = *f.OverlayDir

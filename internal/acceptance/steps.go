@@ -137,6 +137,12 @@ var registry = map[string]StepFunc{
 	"an operator clears the stuck async-job wake source":                              whenOperatorClears,
 	"the cleared result is a fail the review gate does not count as green":            thenClearedResultGateSafe,
 
+	// --- features/manager-as-worker/async-reap.feature (drvctl-057) ---
+	"a worker parked behind a detached test whose runner died without a result": givenParkedBehindDeadRunner,
+	"the reaper force-answers the overdue launch":                               whenReaperFiresOnOverdue,
+	"a worker parked behind a detached test still within the reap deadline":     givenParkedWithinDeadline,
+	"no terminal result has been fabricated for the launch":                     thenNoReapWithinDeadline,
+
 	// --- features/manager-as-worker/resume-on-wake.feature (drvctl-056) ---
 	"a resumed session being given its first driving turn":                       givenResumedSessionDriven,
 	"the agent is nudged to continue its work, not cold-started from the brief":  thenNudgedNotBriefed,

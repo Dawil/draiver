@@ -384,6 +384,24 @@ func (w world) reconcilerConfirm(t *testing.T, f *factory, p *fakeProc, confirm 
 	return r
 }
 
+// reconcilerReap is reconciler with the async-job liveness-reap deadline set
+// (drvctl-057), so a test can trip (or deliberately not trip) the reaper that
+// force-answers a parked worker whose detached runner died without landing a result.
+func (w world) reconcilerReap(t *testing.T, f *factory, p *fakeProc, reapMaxAge time.Duration) *reconcile.Reconciler {
+	t.Helper()
+	r, err := reconcile.New(reconcile.Options{
+		Root:               w.root,
+		Adapters:           f.adapters,
+		Actor:              "agent:claude-code",
+		Proc:               p,
+		AsyncJobReapMaxAge: reapMaxAge,
+	})
+	if err != nil {
+		t.Fatalf("reconcile.New: %v", err)
+	}
+	return r
+}
+
 // reconcilerLog is reconciler with an operational log sink attached, so a test
 // can assert on the per-attempt errors a tick swallows (a bad repo path skips
 // just that attempt, drvctl-015).

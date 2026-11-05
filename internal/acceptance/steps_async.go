@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/completion"
+	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/store"
@@ -320,6 +322,145 @@ func thenClearedResultGateSafe(w *World, sr *StepRun) error {
 			"  outcome: fail   refs: [<launch>]   actor: human:operator\n"+
 			"# review-gate fold (cmd/review.go) excludes Outcome=fail → required rung still outstanding:\n"+
 			"  "+outstanding[0].Name+" (not green at HEAD) — the gate stays shut.")
+	return nil
+}
+
+// ---- drvctl-057: automatic liveness-reap of a dead detached runner ----
+
+// These steps pin the agent/human-facing contract of the automatic reap over the
+// same real engines park-async leans on — wake.Pending (does the launch still hold
+// the worker parked?) and the review-gate fold (is the reaped result gate-safe?). The
+// reconciler's deadline decision and its `woken-by` authoring that re-admits the woken
+// worker are exercised against the real reconciler at the unit rung
+// (internal/reconcile/async_jobs_test.go); here we pin that an overdue dead launch is
+// force-answered with the shared terminal-fail shape — so the worker wakes to iterate
+// rather than sleeping in Pending forever — and that a launch still inside the
+// deadline is left untouched (no false reap).
+
+const reapDeadline = time.Duration(config.DefaultAsyncJobReapMinutes) * time.Minute
+
+// launchTSOf returns the timestamp of the launch marker at seq — the deadline anchor
+// the reap decision measures against.
+func launchTSOf(root store.Root, launchSeq int) (time.Time, error) {
+	events, err := ticketlog.Read(root, asyncTicket, asyncAtt)
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, e := range events {
+		if e.Seq == launchSeq {
+			return e.TS, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("no event at seq %d", launchSeq)
+}
+
+// givenParkedBehindDeadRunner seeds `launch + park` with the launch stamped well past
+// the reap deadline: its detached runner spawned and then died without landing any
+// result, so the launch is overdue and the worker would otherwise sleep forever.
+func givenParkedBehindDeadRunner(w *World, sr *StepRun) error {
+	root, err := seedAsyncData(w)
+	if err != nil {
+		return err
+	}
+	if _, err := appendAsync(root, event.Event{Type: "created", Body: "start"}); err != nil {
+		return err
+	}
+	overdue := time.Now().Add(-reapDeadline - time.Minute)
+	if _, err := appendAsync(root, event.Event{Type: "async-job", Rung: "unit", TS: overdue, Body: "launched detached `draiver test` (runner later died mid-climb)"}); err != nil {
+		return err
+	}
+	if _, err := appendAsync(root, event.Event{Type: "park", Body: "parked behind the detached test"}); err != nil {
+		return err
+	}
+	w.set("root", root)
+	return nil
+}
+
+// whenReaperFiresOnOverdue models the reconciler's liveness-reap action: having
+// confirmed the launch really is overdue against the real shipped default deadline, it
+// lands the shared terminal fail result (wake.AsyncLaunchFailResult — the one
+// "answer launch N" discipline) stamped with the reconciler's spine actor, exactly as
+// whenOperatorClears models `park --clear` without invoking the cobra command.
+func whenReaperFiresOnOverdue(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	src, err := asyncSource(root)
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		return fmt.Errorf("precondition: expected a pending async-job source to reap, found none")
+	}
+	launchTS, err := launchTSOf(root, src.Ref)
+	if err != nil {
+		return err
+	}
+	// The genuine deadline rule triggers the reap — not an unconditional land.
+	if age := time.Since(launchTS); age <= reapDeadline {
+		return fmt.Errorf("precondition: launch #%d is not overdue (age %s ≤ deadline %s)", src.Ref, age, reapDeadline)
+	}
+	reaped := wake.AsyncLaunchFailResult(src.Ref, src.Rung,
+		"Automatic liveness-reap: the detached runner landed no result within the deadline and is presumed dead. No climb ran.")
+	reaped.Actor = "agent:spine" // the reconciler's own actor, not a human or an agent verdict
+	if _, err := ticketlog.Append(root, asyncTicket, asyncAtt, reaped); err != nil {
+		return err
+	}
+	return nil
+}
+
+// givenParkedWithinDeadline seeds `launch + park` with the launch stamped just now: a
+// detached runner still legitimately climbing, comfortably inside the reap deadline.
+func givenParkedWithinDeadline(w *World, sr *StepRun) error {
+	root, err := seedAsyncData(w)
+	if err != nil {
+		return err
+	}
+	if _, err := appendAsync(root, event.Event{Type: "created", Body: "start"}); err != nil {
+		return err
+	}
+	// Zero TS ⇒ ticketlog stamps now, so the launch is well within the deadline.
+	if _, err := appendAsync(root, event.Event{Type: "async-job", Rung: "unit", Body: "launched detached `draiver test` (still climbing)"}); err != nil {
+		return err
+	}
+	if _, err := appendAsync(root, event.Event{Type: "park", Body: "parked behind the detached test"}); err != nil {
+		return err
+	}
+	w.set("root", root)
+	return nil
+}
+
+// thenNoReapWithinDeadline asserts the no-false-reap contract (AC #4): a launch still
+// inside the deadline is left untouched — no terminal result is fabricated, so the
+// worker stays parked waiting for the real verdict and the reaper never fires
+// mid-flight.
+func thenNoReapWithinDeadline(w *World, sr *StepRun) error {
+	root := w.get("root").(store.Root)
+	src, err := asyncSource(root)
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		return fmt.Errorf("a launch within the deadline must still be a live async-job source, got none")
+	}
+	launchTS, err := launchTSOf(root, src.Ref)
+	if err != nil {
+		return err
+	}
+	if age := time.Since(launchTS); age > reapDeadline {
+		return fmt.Errorf("fixture is not within the deadline: launch age %s > %s", age, reapDeadline)
+	}
+	events, err := ticketlog.Read(root, asyncTicket, asyncAtt)
+	if err != nil {
+		return err
+	}
+	for _, e := range events {
+		if e.Type == "test-result" {
+			return fmt.Errorf("a launch within the deadline must not be reaped, found fabricated test-result #%d", e.Seq)
+		}
+	}
+	attachText(sr, "no-false-reap",
+		fmt.Sprintf("# launch age (<%s) is inside the reap deadline → the reconciler does NOT reap:\n", reapDeadline)+
+			"#   no terminal result fabricated, the async-job source stays live, the worker\n"+
+			"#   waits for the real verdict. A healthy ~5-minute climb is never cut short.")
 	return nil
 }
 

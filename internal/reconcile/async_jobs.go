@@ -26,10 +26,12 @@ package reconcile
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/wake"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -85,14 +87,20 @@ func (r *Reconciler) reconcileAsyncWorker(w project.Attempt, live map[worktree.K
 	}
 
 	// Phase from the worker's own log: the latest launch, park and activation, plus
-	// which results a prior `woken-by` already handled.
+	// which results a prior `woken-by` already handled. lastLaunchTS/lastLaunchRung
+	// carry the latest launch's deadline anchor and target rung — the inputs the
+	// liveness-reap (drvctl-057) needs to force-answer a launch whose runner died.
 	var lastLaunchSeq, lastParkSeq, lastActivationSeq int
+	var lastLaunchTS time.Time
+	var lastLaunchRung string
 	handledResult := map[int]bool{}
 	for _, e := range w.Events {
 		switch e.Type {
 		case asyncJobType:
 			if e.Seq > lastLaunchSeq {
 				lastLaunchSeq = e.Seq
+				lastLaunchTS = e.TS
+				lastLaunchRung = e.Rung
 			}
 		case "park":
 			if e.Seq > lastParkSeq {
@@ -137,6 +145,22 @@ func (r *Reconciler) reconcileAsyncWorker(w project.Attempt, live map[worktree.K
 		// has not parked yet is still mid-turn and live; leave it desired so we never
 		// reap a session that is still running.
 		if lastParkSeq > lastLaunchSeq {
+			// Liveness-reap (drvctl-057): a parked worker's only waker is the detached
+			// runner's eventual `test-result`. A runner that spawned and then died or hung
+			// before landing one (SIGKILL, a `timeout` wrapper, OOM, a host reboot, a wedged
+			// rung) leaves no doorbell, so absent intervention the attempt sleeps in Pending
+			// forever. Once the launch is overdue past the configured deadline, force-answer
+			// it ourselves — the automatic third caller of wake.AsyncLaunchFailResult beside
+			// `park --clear` and launchDetached's spawn-failure path. We land the terminal
+			// fail result but leave the worker trimmed this tick; the NEXT tick sees it as
+			// the oldest unhandled async result and wakes the worker via the unchanged
+			// oldestUnhandledAsyncResult → woken-by path, so there is one wake, authored
+			// exactly as a real result's would be.
+			if r.asyncLaunchOverdue(lastLaunchTS) {
+				if err := r.reapDeadAsyncLaunch(w, lastLaunchSeq, lastLaunchRung); err != nil {
+					return err
+				}
+			}
 			delete(out, key)
 		}
 		return nil
@@ -194,6 +218,44 @@ func oldestUnhandledAsyncResult(events []event.Event, handled map[int]bool) int 
 		}
 	}
 	return 0
+}
+
+// asyncLaunchOverdue reports whether a parked worker's unanswered launch (stamped
+// launchTS) has gone longer than the configured reap deadline — the liveness signal
+// the reaper triggers on (drvctl-057). A zero/disabled deadline never fires (the
+// reaper is off, matching ReviewEnvMaxAge's floor), and a launch with no timestamp is
+// never reaped blind. Uses the reconciler's injectable clock so a test can trip it
+// deterministically, exactly as the review-env reaper does.
+func (r *Reconciler) asyncLaunchOverdue(launchTS time.Time) bool {
+	if r.opt.AsyncJobReapMaxAge <= 0 || launchTS.IsZero() {
+		return false
+	}
+	return r.opt.Now().Sub(launchTS) > r.opt.AsyncJobReapMaxAge
+}
+
+// reapDeadAsyncLaunch lands the terminal fail `test-result` that force-answers a
+// launch whose detached runner is presumed dead (drvctl-057). It reuses
+// wake.AsyncLaunchFailResult — the one terminal-result shape (drv-031) — so the reap
+// is byte-identical to the operator `park --clear` and the spawn-failure answers, and
+// stamps the reconciler's spine actor so the log honestly records a controlplane
+// intervention rather than an agent verdict. Outcome "fail" guarantees the review gate
+// never reads it as green; Refs → the launch pairs it with the launch it closes.
+func (r *Reconciler) reapDeadAsyncLaunch(w project.Attempt, launchSeq int, rung string) error {
+	ev := wake.AsyncLaunchFailResult(launchSeq, rung, reapAsyncBody(launchSeq, r.opt.AsyncJobReapMaxAge))
+	ev.Actor = r.opt.Actor
+	if _, err := ticketlog.Append(r.opt.Root, w.Ticket, w.ID, ev); err != nil {
+		return fmt.Errorf("reconcile: reap dead async launch #%d on %s/%s: %w", launchSeq, w.Ticket, w.ID, err)
+	}
+	return nil
+}
+
+// reapAsyncBody renders the terminal `test-result` the liveness-reap lands. Like the
+// operator `park --clear` body it is explicit that no climb verdict exists — the
+// `Outcome: fail` only ends the wait so the attempt wakes to iterate — and names the
+// deadline that tripped it so a resuming agent (and the board) can see why. The board
+// renders event bodies as Markdown.
+func reapAsyncBody(launchSeq int, deadline time.Duration) string {
+	return fmt.Sprintf("Automatic liveness-reap: the detached `draiver test` launched by `async-job` #%d landed no `test-result` within %s — its runner is presumed dead or hung (SIGKILL, a `timeout` wrapper, OOM, a host reboot, or a rung wedged on a server that never came up). **No climb ran to a verdict** — this is not a test result; `Outcome: fail` only ends the wait so the attempt wakes to iterate. Relaunch `draiver test --detach && draiver park` if the detached runner is still wanted.", launchSeq, deadline)
 }
 
 // wokenByAsyncBody renders the wake-reason recorded on the async activation event —
