@@ -38,3 +38,19 @@ Feature: Polling regions morph instead of clobbering selection
     Scenario: The innerHTML-era selection workarounds are retired
       Given a board and a running attempt detail page
       Then the detail page ships no innerHTML-era focus-snapshot or is-target workaround
+
+  Rule: A focused input survives the morph poll via idiomorph, not hx-preserve (drvweb-026)
+
+    The resolve textarea was the one polled input that also carried hx-preserve. On
+    every 3s poll htmx's own hx-preserve handling detached the live focused textarea
+    before the morph ran, yanking focus mid-keystroke. The fix drops hx-preserve and
+    makes morph alone keep a focused input: idiomorph's restoreFocus holds focus and
+    caret, and a global ignoreActiveValue default stops the empty server value from
+    clobbering the half-typed answer. The dynamic focus/caret/value survival is proven
+    by the Playwright e2e in e2e/tests/detail.spec.ts; this static scenario guards that
+    the global default stays wired on every polling page.
+
+    @drvweb-026
+    Scenario: Both polling pages default idiomorph to ignoreActiveValue after loading the extension
+      Given a board and a running attempt detail page
+      Then both polling pages set idiomorph's ignoreActiveValue default after loading the extension
