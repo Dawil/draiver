@@ -1111,6 +1111,66 @@ func TestAsyncWakeResumesParkedSession(t *testing.T) {
 	}
 }
 
+// TestDecisionReopenResumeNamesTheDecision is drvctl-058's headline regression
+// guard. A Review attempt whose human adds a `decision` flips back to Running
+// (drv-002) and the next tick RESUMES the kept-warm session. The decision was
+// appended *after* the session claimed review, so the restored context predates it
+// and the plain continuation nudge gives no signal the log changed — the agent
+// re-claims review having never read the decision. The resume turn must instead
+// carry a wake note naming the unseen decision (by seq + headline) and tell the
+// agent to read and act on it before handing off.
+func TestDecisionReopenResumeNamesTheDecision(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	ticket := "WRK"
+	att := w.newTicket(t, ticket)
+
+	// The attempt already ran a session (recorded, resumable id) and claimed review;
+	// the session has since been reaped (no live pid in the table).
+	sess, _ := session.Open(w.root, ticket, att)
+	t.Cleanup(func() { sess.Close() })
+	if err := sess.WriteIdentity(session.Identity{Adapter: "claude-code", SessionID: "reviewed-id"}); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	appendEvt(t, w.root, ticket, att, event.Event{Type: "review", Actor: "agent:x", Body: "Claimed review; all green."})
+	// A human reopens the Review with a decision — the stale-context hazard.
+	decision, err := ticketlog.Append(w.root, ticket, att, event.Event{
+		Type: "decision", Actor: "human:webui", Body: "Pull, resolve conflicts, and re-raise the PR against main.",
+	})
+	if err != nil {
+		t.Fatalf("append decision: %v", err)
+	}
+
+	f := &factory{}
+	r := w.reconciler(t, f, newProc())
+	t.Cleanup(r.Close)
+
+	// The decision reopened the attempt to Running: the tick admits it, which RESUMES
+	// the kept-warm id rather than cold-starting.
+	if err := r.Tick(ctx); err != nil {
+		t.Fatalf("resume tick: %v", err)
+	}
+	waitFor(t, "reopened session resumed", func() bool {
+		return f.count() == 1 && len(f.at(0).prompted()) > 0
+	})
+	resumed := f.at(0)
+	if resumed.resumedWith() != "reviewed-id" {
+		t.Fatalf("a decision-reopen must resume the kept-warm id, got %q", resumed.resumedWith())
+	}
+	p := resumed.prompted()[0]
+	if strings.Contains(p, "BRIEF") {
+		t.Fatalf("a decision-reopen resumes (nudge), it must not cold-start (brief): %q", p)
+	}
+	// The wake note must name the unseen decision — by type and seq — so the agent
+	// reads and acts on it instead of re-claiming review with stale context.
+	if !strings.Contains(p, "decision") || !strings.Contains(p, fmt.Sprintf("#%d", decision.Seq)) {
+		t.Fatalf("resume turn must name the unseen decision #%d so the agent acts on it: %q", decision.Seq, p)
+	}
+	if !strings.Contains(p, "recall") {
+		t.Fatalf("resume turn must point the agent at `draiver recall` to read the unseen decision: %q", p)
+	}
+}
+
 // TestPermissionGateEscalates: a gated tool (Bash under the ReadOnly base) surfaced
 // as a permission callback is denied, recorded as an escalation, and halts the
 // session — flipping the attempt to Needs-me.

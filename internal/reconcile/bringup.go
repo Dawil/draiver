@@ -18,10 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"time"
 
 	"github.com/Dawil/draiver/internal/completion"
+	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
+	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/manage"
 	"github.com/Dawil/draiver/internal/project"
@@ -164,7 +167,7 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 			// otherwise injects it) now only briefs a fresh spawn. If the id is in fact
 			// unresumable the confirm still times out and the primed turn dies with the
 			// killed process — no double-prompt reaches the fresh spawn.
-			if perr := protocol.InjectResumeNudge(ctx, a.Ticket, r.asyncWakeNote(a.Ticket, a.ID), handle); perr != nil {
+			if perr := protocol.InjectResumeNudge(ctx, a.Ticket, r.resumeWakeNote(a.Ticket, a.ID), handle); perr != nil {
 				r.opt.Logf("reconcile: prime resume nudge %s/%s: %v", a.Ticket, a.ID, perr)
 			}
 			if confirmed, cerr := r.confirmOnline(ctx, handle); cerr != nil {
@@ -289,41 +292,85 @@ func (r *Reconciler) resumeHasHeadroom(ticket, attempt string) bool {
 	return m.Usage.ContextTokens < ceiling
 }
 
-// asyncWakeNote returns the wake-reason line appended to a resume nudge when the
-// attempt was just woken by its own detached test's result landing (drvctl-056):
-// the resumed session kept the context in which it launched the test, so it only
-// needs to be told the verdict is in — read it and claim review / iterate —
-// rather than cold-starting and re-deriving its just-done state with a recall
-// round-trip (the drvctl-055 cold-start-on-wake this amends). It reloads the
-// attempt fresh because the `woken-by` activation is authored during desired() on
-// the same tick, so the attempt handed to admit/bringUp predates it. Empty when
-// this resume is not an async wake (the plain continuation nudge is used) or the
-// attempt cannot be reloaded.
-func (r *Reconciler) asyncWakeNote(ticket, attempt string) string {
+// resumeWakeNote returns the "what changed while you were parked" line appended to
+// a resumed session's continuation nudge: it names the authoritative events that
+// landed on the attempt's log *after* the previous session handed off — input the
+// restored context predates and the agent has therefore never seen (drvctl-058).
+// Without it a Review→Running decision-reopen (or an escalation→resolution reopen)
+// resumes into stale context — the plain continuation nudge gives no signal the log
+// changed, so the agent re-claims review having never read the decision.
+//
+// The watermark is the attempt's last *session-authored* event: an `agent:`-actored
+// event that is neither an async-landed `test-result` nor a spine-authored
+// `woken-by`. Both of those carry an `agent:` actor (the detached runner inherits
+// the worker's `DRAIVER_ACTOR`; the reconciler stamps its own `opt.Actor` on the
+// activation) yet are external input the parked session never saw, so keying the
+// watermark on a bare `agent:` prefix would let the `woken-by` (seq above the
+// test-result) advance it past the result and hide the very thing the wake must
+// surface. Everything above the watermark is unseen; this also subsumes drvctl-056's
+// `lastWoken <= lastPark` guard, since any real hand-off re-waters the mark.
+//
+// The detached-test wake (drvctl-056) becomes the single-`test-result` special case
+// of this note: the resumed session kept the context in which it launched the test,
+// so it is told to read the verdict and hand off without re-deriving its just-done
+// work. Empty when nothing authoritative landed (a pure continuation resume keeps
+// the plain nudge) or the attempt cannot be reloaded. It reloads the attempt fresh
+// because a `woken-by` activation is authored during desired() on the same tick, so
+// the attempt handed to admit/bringUp predates it.
+func (r *Reconciler) resumeWakeNote(ticket, attempt string) string {
 	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
 	if err != nil {
 		return ""
 	}
-	var lastPark, lastWoken, resultSeq int
+	watermark := 0
 	for _, e := range a.Events {
-		switch e.Type {
-		case "park":
-			if e.Seq > lastPark {
-				lastPark = e.Seq
-			}
-		case wokenByType:
-			// A woken-by naming this attempt's OWN ticket is an async wake; WokenSeq is
-			// the test-result it answered (mirrors reconcileAsyncWorker's reading).
-			if e.WokenChild == a.Ticket && e.WokenSeq > 0 && e.Seq > lastWoken {
-				lastWoken = e.Seq
-				resultSeq = e.WokenSeq
-			}
+		if e.Seq <= watermark || !strings.HasPrefix(e.Actor, "agent:") {
+			continue
+		}
+		// Async-landed / spine-authored events carry an agent: actor but are external
+		// input, not something the parked session saw — they must not water the mark.
+		if e.Type == testResultType || e.Type == wokenByType {
+			continue
+		}
+		watermark = e.Seq
+	}
+	var unseen []event.Event
+	for _, e := range a.Events {
+		if e.Seq > watermark && authoritativeWake(e.Type) {
+			unseen = append(unseen, e)
 		}
 	}
-	// Only a wake *after* the latest park is live: an older woken-by was already
-	// handled in a prior session.
-	if lastWoken <= lastPark || resultSeq == 0 {
+	if len(unseen) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("You were woken because the detached `draiver test` you launched has landed its verdict: `test-result` #%d is now on your log. Read it with `draiver recall %s %d`, then claim `review` if it is green or iterate if it is red — you still have the context from when you launched it, so no need to rederive your just-done work.", resultSeq, ticket, resultSeq)
+	// Test-result specialisation: the lone landed verdict of a detached-test wake.
+	// The agent still holds the context from when it launched the test, so point it
+	// at the result and let it hand off without a recall round-trip (drvctl-056).
+	if len(unseen) == 1 && unseen[0].Type == testResultType {
+		seq := unseen[0].Seq
+		return fmt.Sprintf("You were woken because the detached `draiver test` you launched has landed its verdict: `test-result` #%d is now on your log. Read it with `draiver recall %s %d`, then claim `review` if it is green or iterate if it is red — you still have the context from when you launched it, so no need to rederive your just-done work.", seq, ticket, seq)
+	}
+	// Generalised: external input (a decision/resolution/…) landed while this session
+	// was parked that its restored context predates. Name each so the agent reads and
+	// acts on it before handing off, instead of re-claiming review with stale context.
+	var b strings.Builder
+	b.WriteString("You were resumed, but authoritative events landed on your log **after** the point your restored context ends — you have not seen them:\n")
+	for _, e := range unseen {
+		fmt.Fprintf(&b, "- `%s` #%d — %s\n", e.Type, e.Seq, kb.Headline(e.Body))
+	}
+	fmt.Fprintf(&b, "\nRead each with `draiver recall %s <seq>` (or re-ground with `draiver brief %s`), act on it, and only then claim `review` or `escalate`. Do not re-claim review with stale context.", ticket, ticket)
+	return b.String()
+}
+
+// authoritativeWake reports whether an event type landing while a session was parked
+// is something the resumed agent must read and act on before it hands off
+// (drvctl-058) — as opposed to bookkeeping (`woken-by`, `created`, `enable`, …) it
+// can ignore. `test-result` is included so a detached-test wake surfaces (it never
+// waters the watermark, so it is always above it).
+func authoritativeWake(eventType string) bool {
+	switch eventType {
+	case "decision", "resolution", "note", "gotcha", testResultType:
+		return true
+	}
+	return false
 }

@@ -1,4 +1,4 @@
-@drvctl-056 @manager-as-worker
+@drvctl-056 @drvctl-058 @manager-as-worker
 Feature: The resume fast-path comes online, and the wake it answers
   drvctl-056 fixes a resume that was dead on arrival. The supervisor confirmed a
   resumed `claude` session "online" by waiting for its system/init frame BEFORE
@@ -29,3 +29,18 @@ Feature: The resume fast-path comes online, and the wake it answers
     Scenario: The wake nudge names the landed test-result
       Given a session resumed because its detached test landed a result on its own log
       Then the driving turn tells the agent to read that result and hand off
+
+  Rule: A resume tells the agent about events that landed while it was parked
+
+    drvctl-058 generalises the async-test wake into a "what changed while you were
+    parked" note. When a human adds a `decision` to a Review attempt it flips back to
+    Running and the kept-warm session resumes — but its restored context ends at the
+    moment it claimed review, so the decision appended afterwards is unseen. The plain
+    continuation nudge gives no signal the log changed, so without this the agent
+    re-claims review having never read the decision. The resume turn must name the
+    unseen decision and tell the agent to read and act on it before handing off. The
+    async test-result wake above is now the test-result specialisation of this note.
+
+    Scenario: The resume nudge names a decision added while the session was parked
+      Given a session resumed after a human added a decision to its review
+      Then the driving turn names the unseen decision and tells the agent to act on it before handing off
