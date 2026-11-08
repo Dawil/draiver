@@ -142,6 +142,8 @@ var registry = map[string]StepFunc{
 	"the agent is nudged to continue its work, not cold-started from the brief":  thenNudgedNotBriefed,
 	"a session resumed because its detached test landed a result on its own log": givenResumedByAsyncResult,
 	"the driving turn tells the agent to read that result and hand off":          thenWakeNudgeNamesResult,
+	"a session resumed after a human added a decision to its review":             givenResumedAfterDecisionReopen,
+	"the driving turn names the unseen decision and tells the agent to act on it before handing off": thenReopenNudgeNamesDecision,
 
 	// --- features/codebase-ledger/type.feature (drv-037) ---
 	"a ticket authored with no type field":                             givenTicketNoType,

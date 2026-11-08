@@ -89,3 +89,42 @@ func thenWakeNudgeNamesResult(w *World, sr *StepRun) error {
 			"# agent reads the verdict and hands off with no recall round-trip:\n"+nudge)
 	return nil
 }
+
+// ---- a decision-reopen resume names the unseen decision (drvctl-058) ----
+
+func givenResumedAfterDecisionReopen(w *World, sr *StepRun) error {
+	p := &capturePrompter{}
+	// The generalised "what changed while you were parked" note (drvctl-058): a human
+	// added a `decision` *after* the session claimed review, so the restored context
+	// predates it. The note names the unseen decision by seq + headline and tells the
+	// agent to read and act on it before handing off — the watermark derivation that
+	// produces it is pinned at the unit rung (internal/reconcile), mirroring the async
+	// wake's split; here we pin the agent-facing turn the resume actually delivers.
+	wakeNote := "You were resumed, but authoritative events landed on your log after the point your restored context ends — you have not seen them:\n" +
+		"- `decision` #12 — Pull, resolve conflicts, and re-raise the PR\n\n" +
+		"Read each with `draiver recall " + resumeTicket + " <seq>` (or re-ground with `draiver brief " + resumeTicket + "`), act on it, and only then claim `review` or `escalate`. Do not re-claim review with stale context."
+	if err := protocol.InjectResumeNudge(context.Background(), resumeTicket, wakeNote, p); err != nil {
+		return err
+	}
+	w.set("nudge", p.got)
+	return nil
+}
+
+func thenReopenNudgeNamesDecision(w *World, sr *StepRun) error {
+	nudge := w.get("nudge").(string)
+	if strings.Contains(nudge, "BRIEF") {
+		return fmt.Errorf("a decision-reopen must resume (nudge), not cold-start (brief):\n%s", nudge)
+	}
+	// The composed turn continues the work AND names the unseen decision, pointing the
+	// agent at recall so it reads and acts before re-claiming review.
+	for _, want := range []string{"resuming", "decision", "#12", "recall"} {
+		if !strings.Contains(nudge, want) {
+			return fmt.Errorf("decision-reopen nudge missing %q:\n%s", want, nudge)
+		}
+	}
+	attachText(sr, "decision-reopen-nudge",
+		"# a Review-then-reopened attempt resumes into context that predates the human\n"+
+			"# decision; the delivered turn names it so the agent reads and acts before\n"+
+			"# re-claiming review, instead of silently re-claiming with stale context:\n"+nudge)
+	return nil
+}
