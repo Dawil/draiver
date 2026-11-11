@@ -98,7 +98,7 @@ func TestApplyFavesPartitionsStable(t *testing.T) {
 	}
 	vm := boardVM{Running: col("A", "B", "C", "D", "E")}
 	faves := map[string]bool{"D/0001": true, "B/0001": true}
-	applyFaves(&vm, faves)
+	applyBoardOrder(&vm, faves, false)
 	var order []string
 	for _, a := range vm.Running {
 		order = append(order, a.Ticket)

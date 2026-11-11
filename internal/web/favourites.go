@@ -33,6 +33,51 @@ const (
 	favesMaxRefs       = 200
 )
 
+// Board sort preference (drvweb-027): a per-viewer toggle that re-sorts the columns
+// oldest-first by age, composed over the favourites partition. Like a favourite it is
+// a view preference of the person looking at the board — NOT ticket state — so it
+// lives entirely in that web user's cookie and the server persists nothing. The
+// cookie is re-read on every board render, so the 3s poll re-applies the same order.
+const (
+	// sortCookie holds the board's age-sort preference. Its only meaningful value is
+	// sortAge ("age"); any other value (or an absent cookie) means the default order.
+	// Same Path=/ SameSite=Lax HttpOnly, long-lived, non-Secure attributes as the
+	// favourites cookie (the dev board is plain HTTP; the server owns every read/write).
+	sortCookie = "draiver_sort"
+	// sortAge is the one on-value: age-sort ON (oldest-first within each partition).
+	sortAge = "age"
+)
+
+// parseSort reports whether age-sort is ON for this viewer — the sortCookie equals
+// sortAge. A missing or unrecognised cookie is OFF (today's default order), so a
+// stale cookie can never break a render.
+func parseSort(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	c, err := r.Cookie(sortCookie)
+	return err == nil && c.Value == sortAge
+}
+
+// writeSortCookie writes the age-sort preference back onto the response. OFF expires
+// the cookie (Max-Age<0) so returning to the default order clears it entirely rather
+// than leaving an `age=off`-style husk — unset IS the default.
+func writeSortCookie(w http.ResponseWriter, on bool) {
+	c := &http.Cookie{
+		Name:     sortCookie,
+		Value:    sortAge,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   favesMaxAge,
+	}
+	if !on {
+		c.MaxAge = -1 // delete the cookie when age-sort is off (the default)
+		c.Value = ""
+	}
+	http.SetCookie(w, c)
+}
+
 // faveRef is the canonical favourite key for a card: the same `ticket/id` ref that
 // keys every other per-attempt card action, so a favourite is unambiguous and two
 // attempts of one ticket are independently starrable.
@@ -146,22 +191,41 @@ func writeFavesCookie(w http.ResponseWriter, set map[string]bool) {
 	http.SetCookie(w, c)
 }
 
-// applyFaves layers the per-viewer favourites over an already-assembled boardVM: it
-// sets the Favourited presentation bit on every card whose ref is in the set, then
-// stably reorders each of the five columns so favourited cards rise above
-// non-favourited ones. The sort is STABLE, so within each partition the existing
-// alphabetical order board() delivered (ticket id, then attempt id, via LoadAll) is
-// preserved — favourites alphabetical among themselves, non-favourites untouched.
-// board() stays request-blind; this is the single post-step every render path runs.
-func applyFaves(vm *boardVM, faves map[string]bool) {
+// applyBoardOrder layers the per-viewer view preferences over an already-assembled
+// boardVM — the single post-step every render path runs, so board() stays
+// request-blind. It sets the Favourited presentation bit on every card whose ref is
+// in the set, records the age-sort toggle state on the vm (so the Oldest tile's
+// pressed state is set here, once), then reorders each of the five columns.
+//
+// The comparator is layered (drvweb-027 composes with drv-050, it does not fight it):
+// favourited-before-non-favourited ALWAYS wins first, so the favourite partition is
+// never disrespected. Then WITHIN each partition, if age-sort is on, older-created
+// first; otherwise the sort falls through to STABLE, preserving the alphabetical
+// order board() delivered (ticket id, then attempt id, via LoadAll) — exactly today's
+// behaviour. A card with no created event (empty Events) sorts as the zero time.
+func applyBoardOrder(vm *boardVM, faves map[string]bool, sortByAge bool) {
+	vm.SortByAge = sortByAge
 	cols := []*[]project.Attempt{&vm.Running, &vm.Pending, &vm.NeedsMe, &vm.Review, &vm.Done}
 	for _, col := range cols {
 		for i := range *col {
 			(*col)[i].Favourited = faves[faveRef((*col)[i].Ticket, (*col)[i].ID)]
 		}
 		sort.SliceStable(*col, func(i, j int) bool {
-			// favourited sorts before non-favourited; equal-favourited keeps order.
-			return (*col)[i].Favourited && !(*col)[j].Favourited
+			ci, cj := (*col)[i], (*col)[j]
+			// Favourited sorts before non-favourited (the drv-050 partition).
+			if ci.Favourited != cj.Favourited {
+				return ci.Favourited
+			}
+			// Within a partition: age-sort orders older-created first; else stable
+			// (equal under the comparator → the alphabetical LoadAll order survives).
+			if sortByAge {
+				ti, _ := attemptCreated(ci)
+				tj, _ := attemptCreated(cj)
+				if !ti.Equal(tj) {
+					return ti.Before(tj)
+				}
+			}
+			return false
 		})
 	}
 }

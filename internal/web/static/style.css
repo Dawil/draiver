@@ -23,6 +23,9 @@
 body {
   margin: 0; background: var(--bg); color: var(--ink);
   font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* positioning context for the flow-metrics strip (drvweb-027), which is absolutely
+     lifted from the polled board region up to the header's top-right. */
+  position: relative;
 }
 .topbar { padding: 18px 24px; border-bottom: 1px solid var(--line); }
 .topbar h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
@@ -223,6 +226,55 @@ body {
 /* Attention dot on the Ledgers tab: a ledger needs the operator (Needs-me/Review),
    in the Stuck crimson so it reads with the same urgency as the Stuck column. */
 .board-view-attention { color: var(--alert); font-size: 10px; line-height: 1; }
+/* Flow-metrics strip (drvweb-027, review #11): four at-a-glance tiles floated to the
+   top-RIGHT of the page, on the "Draiver" header's level. They stay in the polled board
+   region (before .columns in document order, so they refresh on the 3s poll and the
+   acceptance order holds), and position:absolute — anchored to the position:relative
+   body — lifts them visually into the topbar's empty right side. Rendered borderless
+   (no tile chrome) as a 2x2 grid of floating value-over-caption tiles; each tile carries
+   an (i) info-bubble (.provenance-info, top-right corner) you hover for its meaning. The
+   Oldest tile is also the age-sort toggle (a real <form>/<button>), so it carries a
+   pressed state. */
+.flow-metrics {
+  position: absolute; top: 16px; right: 24px; z-index: 5;
+  display: grid; grid-template-columns: repeat(2, auto); gap: 10px 26px;
+  justify-items: start; padding: 0;
+}
+.flow-metrics .metric {
+  position: relative;
+  display: flex; flex-direction: column; gap: 1px; min-width: 104px;
+  padding: 0 18px 0 0; text-align: left;
+}
+.flow-metrics .metric-value { font-size: 18px; font-weight: 600; color: var(--ink); line-height: 1.2; }
+.flow-metrics .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.flow-metrics .metric-sub { text-transform: none; letter-spacing: 0; color: var(--accent); font-weight: 600; }
+/* The (i) bubble sits in each tile's top-right corner and, since the strip lives at the
+   page top, its tooltip opens DOWNWARD and right-anchored so it never clips off-screen. */
+.flow-metrics .provenance-info { position: absolute; top: 1px; right: 0; }
+.flow-metrics .provenance-info::after {
+  left: auto; right: 0; bottom: auto; top: calc(100% + 7px);
+  text-transform: none; letter-spacing: normal;
+}
+/* Oldest tile is a borderless button posting /board/sort: no default button chrome,
+   inherit the floating-tile layout, and read as clickable (hover underlines the value).
+   The pressed (age-sort on) state tints the value + label with the accent, mirroring the
+   view toggle's on-state without reintroducing a border. */
+.metric-oldest { margin: 0; padding: 0 18px 0 0; border: 0; background: none; }
+.metric-oldest .metric-btn {
+  font: inherit; cursor: pointer; width: 100%;
+  display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  padding: 0; border: 0; background: none; color: inherit; text-align: left;
+}
+.metric-oldest .metric-btn:hover .metric-value { text-decoration: underline; }
+.metric-oldest .metric-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.metric-oldest-on .metric-btn .metric-value,
+.metric-oldest-on .metric-btn .metric-label { color: var(--accent); }
+/* Below the two-column width, drop the absolute lift and let the strip flow at the top
+   of the board region as a plain 2x2 grid, so it never overlaps the title on narrow
+   screens. */
+@media (max-width: 720px) {
+  .flow-metrics { position: static; margin: 12px 24px 0; justify-self: start; }
+}
 /* Test-pyramid badge (drvweb-021). A compact pill of rungs (unit ✓ · integration ✓)
    surfacing the highest logged rung whose commit == current HEAD. Green when it
    describes HEAD; muted with a "stale" flag when the last recorded result predates

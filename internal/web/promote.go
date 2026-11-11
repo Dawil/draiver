@@ -584,7 +584,7 @@ func (s *Server) handleMarkDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emitFaviconTrigger(w, vm)
-	applyFaves(&vm, parseFaves(r))
+	applyBoardOrder(&vm, parseFaves(r), parseSort(r))
 	s.render(w, "board.html", vm)
 }
 

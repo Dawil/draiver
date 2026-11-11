@@ -126,6 +126,11 @@ type Server struct {
 	// non-nil error (e.g. reconcile.ErrNoController when no `ctl up` is running) is
 	// surfaced verbatim in the restart-result banner.
 	restart func(ctx context.Context, ticket, att string) error
+	// now is the clock the board's flow metrics are computed against (drvweb-027). It
+	// defaults to time.Now; threading it through a seam (rather than calling time.Now()
+	// deep in the metric math) keeps the metrics unit-testable with a fixed clock, the
+	// same discipline the replay path uses to avoid render-time now (web.go handleReplay).
+	now func() time.Time
 }
 
 // Option configures a Server at construction. It keeps New's zero-config form
@@ -499,7 +504,7 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 			parser.WithASTTransformers(util.Prioritized(linkPolicy{}, 100)),
 		),
 	)
-	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui", supDefault: project.SupervisionPassthrough}
+	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui", supDefault: project.SupervisionPassthrough, now: time.Now}
 	// gatherPyramidState is a method, so bind it once s exists; tests overwrite the
 	// field with a stub, exactly as they do s.alive.
 	s.pyramidGit = s.gatherPyramidState
@@ -578,6 +583,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleBoardPage)
 	mux.HandleFunc("GET /board", s.handleBoardPartial)
+	mux.HandleFunc("POST /board/sort", s.handleSort)
 	mux.HandleFunc("GET /cache", s.handleCacheRollup)
 	mux.HandleFunc("GET /favicon-state", s.handleFaviconState)
 	mux.HandleFunc("GET /ticket/{id}", s.handleAttemptIndex)
@@ -647,6 +653,17 @@ type boardVM struct {
 	// icon (drv-039).
 	StuckTotal  int
 	ReviewTotal int
+
+	// Metrics is the flow-metrics strip (drvweb-027): four at-a-glance numbers about
+	// how the flow is doing (oldest unresolved ticket, p85 dev-cycle, total
+	// unresolved, 4-week throughput), computed over code tickets in board() and
+	// rendered inside the polled region so they refresh on the 3s poll. See metrics.go.
+	Metrics metricsVM
+	// SortByAge is the viewer's age-sort toggle (drvweb-027), set by applyBoardOrder
+	// from the draiver_sort cookie — it drives the Oldest tile's pressed/on state and
+	// (via the same post-step) the oldest-first ordering within each favourite
+	// partition. A per-viewer view preference like Favourited, not board state.
+	SortByAge bool
 }
 
 // boardView is the board's type filter (drv-039). It is parsed from the `?view=`
@@ -1257,6 +1274,11 @@ func (s *Server) board(view boardView) (boardVM, error) {
 	escalated := project.DeriveEscalated(attempts, edges, s.supDefault)
 	var vm boardVM
 	vm.View = string(view)
+	// Flow metrics (drvweb-027) are a pure projection over the attempts just loaded —
+	// no new disk read — and are computed over code tickets regardless of the current
+	// view, so switching to the ledgers view never blanks the flow numbers. The clock
+	// is threaded in via s.now so the math stays unit-testable (see metrics.go).
+	vm.Metrics = computeMetrics(attempts, s.now())
 	for _, a := range attempts {
 		// An archived attempt lands in no column — that is the whole board effect of
 		// archive: the card stops being emitted (see DeriveArchived / handleArchive).
@@ -1383,7 +1405,7 @@ func (s *Server) handleBoardPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store") // defeat bfcache: Back re-fetches fresh
-	applyFaves(&vm, parseFaves(r))
+	applyBoardOrder(&vm, parseFaves(r), parseSort(r))
 	s.render(w, "board_page.html", vm)
 }
 
@@ -1399,7 +1421,7 @@ func (s *Server) handleBoardPartial(w http.ResponseWriter, r *http.Request) {
 	// Apply the viewer's favourites so each 3s poll re-emits the same favourites-first
 	// order (drv-050): the order is derived from the cookie the server reads every
 	// render, so the morph swap keeps pinned cards on top with nothing client-side.
-	applyFaves(&vm, parseFaves(r))
+	applyBoardOrder(&vm, parseFaves(r), parseSort(r))
 	s.render(w, "board.html", vm)
 }
 
@@ -1992,7 +2014,7 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emitFaviconTrigger(w, vm)
-	applyFaves(&vm, parseFaves(r))
+	applyBoardOrder(&vm, parseFaves(r), parseSort(r))
 	s.render(w, "board.html", vm)
 }
 
@@ -2042,7 +2064,37 @@ func (s *Server) handleStar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emitFaviconTrigger(w, vm)
-	applyFaves(&vm, faves)
+	applyBoardOrder(&vm, faves, parseSort(r))
+	s.render(w, "board.html", vm)
+}
+
+// handleSort toggles this viewer's board-wide age-sort preference (POST /board/sort,
+// drvweb-027) — the control is the Oldest metric tile. Like the favourite star it is a
+// view preference of the person looking at the board, NOT ticket state: the server
+// persists nothing, the whole effect is a cookie read-modify-write. It flips the
+// draiver_sort cookie, writes it back, then re-renders the board region with the new
+// order applied so the columns re-sort (oldest-first within each favourite partition)
+// and the tile flips to its pressed state in one htmx swap, before the next 3s poll.
+//
+// Board-scoped (not per-card): there is no {id}/{attempt}. It keeps handleStar's
+// same-origin guard and honours the operator's current ?view= (HX-Current-URL) so a
+// toggle on the ledgers view re-renders the ledgers view, and keeps the favicon
+// trigger uniform even though a sort changes no attention state.
+func (s *Server) handleSort(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "draiver: cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	// Flip the current preference and persist it in the viewer's cookie.
+	on := !parseSort(r)
+	writeSortCookie(w, on)
+	vm, err := s.board(viewFromCurrentURL(r))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	emitFaviconTrigger(w, vm)
+	applyBoardOrder(&vm, parseFaves(r), on)
 	s.render(w, "board.html", vm)
 }
 
@@ -2699,7 +2751,7 @@ func (s *Server) handleRestartContext(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		emitFaviconTrigger(w, bvm)
-		applyFaves(&bvm, parseFaves(r))
+		applyBoardOrder(&bvm, parseFaves(r), parseSort(r))
 		s.render(w, "board.html", bvm)
 		return
 	}
