@@ -475,6 +475,7 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		ContextLimit:       contextLimit,
 		DefaultSupervision: defaultSupervision,
 		ReviewEnvMaxAge:    time.Duration(cfg.ReviewEnvMaxAgeMinutes) * time.Minute,
+		AsyncJobReapMaxAge: time.Duration(cfg.AsyncJobReapMinutes) * time.Minute,
 		PermPolicy:         permPolicy,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,

@@ -14,6 +14,14 @@
 // async-job source (a detached `draiver test` whose result lands on the
 // attempt's own log) behind the same Pending seam, so park generalises past the
 // manager with no change to its callers.
+//
+// An async-job source is only live while its launch is unanswered, so a runner that
+// dies after spawning (landing no result) would keep the source "live" forever and
+// sleep the worker in Pending — the one hole in the no-sleep-forever contract that
+// park's launch-time guard could not see. drvctl-057 closes it from the reconciler:
+// once a parked worker's launch is overdue, the liveness-reap force-answers it with
+// AsyncLaunchFailResult (the automatic third caller below), so the guarantee now
+// holds whether the runner fails to spawn OR dies after spawning.
 package wake
 
 import (
@@ -62,9 +70,17 @@ const testResultType = "test-result"
 // Outcome "fail" (so the review gate at cmd/review.go never counts it green) and Refs
 // pointing back at the launch so the async pass pairs it with the launch it closes.
 // It is the ONE "land a terminal result answering launch N" discipline (drv-031) —
-// the event *shape* that must stay in lockstep across callers that leave no dangling
-// wake source: `draiver park --clear` of an async-job source, launchDetached's
-// spawn-failure path, and a future reconciler liveness-reap (the automatic half).
+// the event *shape* that must stay in lockstep across the three callers that leave no
+// dangling wake source, all now existing:
+//
+//  1. operator `draiver park --clear` of an async-job source (the manual half,
+//     cmd/park.go runParkClear),
+//  2. launchDetached's spawn-failure path (cmd/test_detach.go) — the runner never
+//     started, so nothing would ever answer the launch, and
+//  3. the reconciler's automatic liveness-reap (drvctl-057,
+//     reconcile.reconcileAsyncWorker) — the runner spawned and then died/hung before
+//     landing any result, so the launch is force-answered once overdue.
+//
 // Each caller stamps the Actor and appends via its own path (operator actor for the
 // CLI, the spine actor for the reconciler), so the shape stays here while provenance
 // stays with the caller.

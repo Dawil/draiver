@@ -179,6 +179,21 @@ type Options struct {
 	// honours regardless of this value).
 	ReviewEnvMaxAge time.Duration
 
+	// AsyncJobReapMaxAge is the deadline for the async-job liveness-reap (drvctl-057,
+	// config.AsyncJobReapMinutes resolved to a duration). A worker that fired
+	// `draiver test --detach && draiver park` parks Pending behind the detached
+	// runner's eventual `test-result`; a runner that spawns and then dies or hangs
+	// before landing any result (SIGKILL, OOM, host reboot, a wedged rung) leaves no
+	// doorbell, so the worker would sleep in Pending forever. Once a parked worker's
+	// launch has gone unanswered this long, reconcileAsyncJobs force-answers it —
+	// landing a terminal fail `test-result` (wake.AsyncLaunchFailResult) that the
+	// existing doorbell path then wakes it on — the automatic third caller beside
+	// `park --clear` and launchDetached's spawn-failure path. Threaded through Now so a
+	// test can trip it deterministically. Zero disables the reaper (a stuck runner then
+	// clears only via the manual `draiver park --clear`), the same floor ReviewEnvMaxAge
+	// uses.
+	AsyncJobReapMaxAge time.Duration
+
 	// Now sources the current time; defaults to time.Now.
 	Now func() time.Time
 
