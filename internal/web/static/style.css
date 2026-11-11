@@ -223,6 +223,36 @@ body {
 /* Attention dot on the Ledgers tab: a ledger needs the operator (Needs-me/Review),
    in the Stuck crimson so it reads with the same urgency as the Stuck column. */
 .board-view-attention { color: var(--alert); font-size: 10px; line-height: 1; }
+/* Flow-metrics strip (drvweb-027): four at-a-glance tiles pinned top-RIGHT above the
+   columns, inside the polled board region so they refresh on the 3s poll. Each tile is
+   a big value over a small caption; the Oldest tile is also the age-sort toggle (a
+   real <form>/<button>), so it carries a pressed state. */
+.flow-metrics {
+  display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap;
+  padding: 12px 24px 0; align-items: stretch;
+}
+.flow-metrics .metric {
+  display: flex; flex-direction: column; gap: 2px; min-width: 96px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); text-align: right;
+}
+.flow-metrics .metric-value { font-size: 18px; font-weight: 600; color: var(--ink); line-height: 1.2; }
+.flow-metrics .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.flow-metrics .metric-sub { text-transform: none; letter-spacing: 0; color: var(--accent); font-weight: 600; }
+/* Oldest tile is a button posting /board/sort: no default button chrome, inherit the
+   tile layout, and read as clickable. The pressed (age-sort on) state takes the accent
+   border + tint, mirroring the view toggle's on-state. */
+.metric-oldest { margin: 0; padding: 0; border: 0; background: none; }
+.metric-oldest .metric-btn {
+  font: inherit; cursor: pointer; width: 100%;
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-end;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: inherit; text-align: right;
+}
+.metric-oldest .metric-btn:hover { border-color: var(--accent); }
+.metric-oldest .metric-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.metric-oldest-on .metric-btn { border-color: var(--accent); background: var(--accent-bg); }
+@media (max-width: 560px) { .flow-metrics { justify-content: flex-start; } }
 /* Test-pyramid badge (drvweb-021). A compact pill of rungs (unit ✓ · integration ✓)
    surfacing the highest logged rung whose commit == current HEAD. Green when it
    describes HEAD; muted with a "stale" flag when the last recorded result predates
