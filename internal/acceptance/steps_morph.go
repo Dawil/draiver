@@ -26,14 +26,15 @@ import (
 
 func init() {
 	drvweb025 := map[string]StepFunc{
-		"a board and a running attempt detail page": givenMorphRunning,
-		"the board region polls with a morph swap, not an innerHTML replace":                     thenBoardMorphs,
-		"the idiomorph extension is served locally and enabled, with no external script":         thenIdiomorphLocal,
-		"the attempt live region polls with a morph swap, not an innerHTML replace":              thenLiveRegionMorphs,
-		"the live fragment still carries its out-of-band state badge and log count":              thenLiveFragmentOOB,
-		"a Done attempt detail page":                                                             givenMorphDone,
-		"the live endpoint answers 286 so htmx stops polling":                                    thenLiveSelfCancels,
-		"the detail page ships no innerHTML-era focus-snapshot or is-target workaround":          thenWorkaroundsRetired,
+		"a board and a running attempt detail page":                                                givenMorphRunning,
+		"the board region polls with a morph swap, not an innerHTML replace":                       thenBoardMorphs,
+		"the idiomorph extension is served locally and enabled, with no external script":           thenIdiomorphLocal,
+		"the attempt live region polls with a morph swap, not an innerHTML replace":                thenLiveRegionMorphs,
+		"the live fragment still carries its out-of-band state badge and log count":                thenLiveFragmentOOB,
+		"a Done attempt detail page":                                                               givenMorphDone,
+		"the live endpoint answers 286 so htmx stops polling":                                      thenLiveSelfCancels,
+		"the detail page ships no innerHTML-era focus-snapshot or is-target workaround":            thenWorkaroundsRetired,
+		"both polling pages set idiomorph's ignoreActiveValue default after loading the extension": thenPollPagesIgnoreActiveValue,
 	}
 	for text, fn := range drvweb025 {
 		if _, clash := registry[text]; clash {
@@ -193,6 +194,44 @@ func thenWorkaroundsRetired(w *World, sr *StepRun) error {
 		}
 	}
 	return shootMorph(w, sr, "/ticket/"+tabTicket+"/"+tabAtt, "workarounds-retired", `[data-testid="ticket-detail"]`)
+}
+
+// thenPollPagesIgnoreActiveValue guards drvweb-026's fix mechanism: every page that
+// morphs on its poll sets idiomorph's ignoreActiveValue default, so a focused input's
+// half-typed value is never clobbered by the empty server value on a tick. The default
+// must be set AFTER the extension that defines the Idiomorph global is loaded. The
+// attempt page must also no longer ship the hx-preserve that fought the morph. The
+// dynamic focus/caret/value survival is proven by the Playwright e2e; this is the
+// static, gate-run guard that the global knob stays wired.
+func thenPollPagesIgnoreActiveValue(w *World, sr *StepRun) error {
+	const extScript = `/static/idiomorph-ext.min.js`
+	const setDefault = `Idiomorph.defaults.ignoreActiveValue = true`
+	for _, page := range []struct{ name, path string }{
+		{"board", "/"},
+		{"attempt detail", "/ticket/" + tabTicket + "/" + tabAtt},
+	} {
+		html, err := getHTML(w, page.path)
+		if err != nil {
+			return err
+		}
+		ext := strings.Index(html, extScript)
+		if ext < 0 {
+			return fmt.Errorf("%s page does not load the idiomorph extension", page.name)
+		}
+		def := strings.Index(html, setDefault)
+		if def < 0 {
+			return fmt.Errorf("%s page does not set %q — a focused input's value would be clobbered on every poll", page.name, setDefault)
+		}
+		if def < ext {
+			return fmt.Errorf("%s page sets ignoreActiveValue before loading the extension that defines Idiomorph; the default would never apply", page.name)
+		}
+		// The hx-preserve that fought the morph (drvweb-026) is gone — morph alone
+		// now keeps focus, caret and value.
+		if strings.Contains(html, "hx-preserve") {
+			return fmt.Errorf("%s page still ships hx-preserve, which fights the morph swap and detaches the focused node every poll", page.name)
+		}
+	}
+	return shootMorph(w, sr, "/ticket/"+tabTicket+"/"+tabAtt, "ignore-active-value-default", `[data-testid="ticket-detail"]`)
 }
 
 // shootMorph captures a full-page Playwright screenshot of the current board's page

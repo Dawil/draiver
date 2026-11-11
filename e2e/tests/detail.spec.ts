@@ -149,6 +149,86 @@ test.describe("attempt detail", () => {
     expect(after).toBe(selected);
   });
 
+  // drvweb-026: the resolve textarea is the one polled input where a half-typed
+  // answer must survive the 3s log-region morph. drvweb-025 kept it with
+  // hx-preserve="true", but hx-preserve runs htmx's own node-retention on every swap
+  // and fights the morph (detaching the focused node — the reported focus loss). The
+  // fix removes hx-preserve and keeps the field a morph-native way: idiomorph's
+  // restoreFocus holds focus + caret, and the global Idiomorph.defaults
+  // .ignoreActiveValue=true stops the morph from overwriting the focused textarea's
+  // value with the empty value the server renders.
+  //
+  // The load-bearing, reproducible assertion here is the VALUE (and caret): with the
+  // ignoreActiveValue default undone, the very next poll overwrites the half-typed
+  // answer with "" and collapses the caret to 0 — so this test goes red if the global
+  // default is ever dropped. (Focus itself is restored by idiomorph's restoreFocus
+  // default regardless, so the activeElement check alone would not catch a regression;
+  // the source-level guard that hx-preserve stays gone lives in the unit + BDD rungs.)
+  test("a half-typed resolve answer survives a 3s poll with focus, caret and value intact", async ({ page }) => {
+    await page.goto("/ticket/PROJ-101/0001");
+
+    // PROJ-101/0001 has an open escalation (seq 3); its resolve box is live.
+    const box = page.getByTestId("resolve-input-3");
+    await expect(box).toBeVisible();
+    await expect(page.getByTestId("unresolved-3")).toBeVisible();
+
+    // Type a half answer, then park the caret in the MIDDLE of it (not at the end,
+    // so a caret collapse/jump is caught, not just a wholesale value loss).
+    const typed = "Round JPY to whole yen";
+    const caret = "Round JPY".length;
+    await box.focus();
+    await box.pressSequentially(typed);
+    await box.evaluate((el: HTMLTextAreaElement, pos) => el.setSelectionRange(pos, pos), caret);
+
+    const activeTestId = () =>
+      page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null);
+    expect(await activeTestId()).toBe("resolve-input-3");
+
+    // Let at least one 3s /live poll morph the log region.
+    await page.waitForTimeout(3600);
+
+    // Focus is still on the textarea...
+    expect(await activeTestId()).toBe("resolve-input-3");
+    // ...the half-typed value was NOT clobbered by the empty server value (the
+    // red-green discriminator: without ignoreActiveValue this is "" after the poll)...
+    await expect(box).toHaveValue(typed);
+    // ...and the caret stayed put rather than collapsing to 0.
+    const sel = await box.evaluate((el: HTMLTextAreaElement) => ({
+      s: el.selectionStart,
+      e: el.selectionEnd,
+    }));
+    expect(sel).toEqual({ s: caret, e: caret });
+  });
+
+  // drvweb-026 AC: resolving still works end to end. Submitting the typed answer
+  // swaps the resolved fragment into the log region — the resolve box is gone (its
+  // id leaves the DOM) and the escalation now reads "resolved by #N". We resolve via
+  // the UI (a real write) and restore the fixture afterward, like the append test.
+  test("submitting the resolution swaps in the resolved state and removes the box", async ({ page }) => {
+    const fixtureDir = path.join(__dirname, "..", ".fixture-data");
+    const logDir = path.join(fixtureDir, "PROJ-101", "attempts", "0001", "log");
+    const before = new Set(readdirSync(logDir));
+
+    try {
+      await page.goto("/ticket/PROJ-101/0001");
+      const box = page.getByTestId("resolve-input-3");
+      await box.focus();
+      await box.fill("Round JPY to whole yen, half-up.");
+      await page.getByTestId("resolve-submit-3").click();
+
+      // The escalation flips to resolved: the resolve box and its unresolved note
+      // are gone, and the resolved link-note appears — all from the one swap.
+      await expect(page.getByTestId("resolved-3")).toContainText("resolved by");
+      await expect(page.getByTestId("resolve-input-3")).toHaveCount(0);
+      await expect(page.getByTestId("unresolved-3")).toHaveCount(0);
+    } finally {
+      // Restore the open-escalation fixture for the other specs.
+      for (const f of readdirSync(logDir)) {
+        if (!before.has(f)) rmSync(path.join(logDir, f));
+      }
+    }
+  });
+
   // drvweb-025 (AC 3): when the log DOES change, morph mutates only the changed
   // nodes — a new entry is inserted while a selection held on an untouched entry
   // survives. The 204/innerHTML paths could not do this; morph can. We append a

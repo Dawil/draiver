@@ -365,10 +365,10 @@ func TestDeepLinkAnchors(t *testing.T) {
 	// :target reference survives — no JS .is-target mirror needed (drvweb-025).
 	page := get(t, h, "/ticket/PROJ-1/0001").Body.String()
 	for _, want := range []string{
-		`id="event-1"`,            // event is a URL fragment target
-		`id="event-2"`,            //
-		`href="#event-1"`,         // seq label is a copyable permalink
-		`href="#event-2"`,         //
+		`id="event-1"`,              // event is a URL fragment target
+		`id="event-2"`,              //
+		`href="#event-1"`,           // seq label is a copyable permalink
+		`href="#event-2"`,           //
 		`hx-swap="morph:innerHTML"`, // the poll morphs, so :target-carrying nodes persist
 	} {
 		if !strings.Contains(page, want) {
@@ -1643,9 +1643,11 @@ func postResolve(t *testing.T, h http.Handler, id, att string, seq int, answer s
 }
 
 // TestResolveBoxRendersForOpenEscalationOnly pins the render contract: an open
-// escalation carries a resolution box (with the hx-preserve'd textarea so the 3s
-// poll never clobbers a half-typed answer), and once resolved it shows only the
-// "resolved by #N" note with no box.
+// escalation carries a resolution box with a stable-id textarea (morph reuses it in
+// place across the 3s poll), and once resolved it shows only the "resolved by #N"
+// note with no box. drvweb-026: the textarea must NOT carry hx-preserve — it fought
+// the morph swap and detached the focused node every poll; morph alone now keeps the
+// field (restoreFocus + the global ignoreActiveValue default).
 func TestResolveBoxRendersForOpenEscalationOnly(t *testing.T) {
 	root := seedEscalation(t)
 	h := newServerOver(t, root)
@@ -1655,13 +1657,16 @@ func TestResolveBoxRendersForOpenEscalationOnly(t *testing.T) {
 		`data-testid="resolve-form-2"`,
 		`data-testid="resolve-input-2"`,
 		`id="resolve-input-2"`,
-		`hx-preserve="true"`,
 		`data-testid="resolve-submit-2"`,
 		"/ticket/ESC-1/0001/resolve",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("open escalation detail missing %q", want)
 		}
+	}
+	// drvweb-026 regression guard: hx-preserve must be gone from the resolve textarea.
+	if strings.Contains(page, "hx-preserve") {
+		t.Errorf("resolve textarea still ships hx-preserve, which fights the morph swap and detaches the focused node every poll")
 	}
 
 	// Answer it out of band; the box must disappear, leaving only the resolved note.
@@ -1678,29 +1683,41 @@ func TestResolveBoxRendersForOpenEscalationOnly(t *testing.T) {
 }
 
 // TestResolveInputKeepsFocusAcrossPoll pins the focus-retention contract
-// (drvweb-014, reworked by drvweb-025): the 3s log-region poll must not steal the
-// cursor out of a half-typed resolve answer. The bespoke beforeSwap/afterSwap
-// snapshot-and-refocus script is gone — the log region now morphs (idiomorph)
-// instead of innerHTML-swapping, so an unchanged textarea is never detached, and
-// idiomorph's built-in restoreFocus re-homes the active input by id (with its
-// selection) when a change does move it; hx-preserve still guards the typed value.
-// The inline script was removed, so we pin the mechanism that replaced it: the
-// morph swap on the log region, the idiomorph extension served + enabled, and
-// hx-preserve on the textarea. The live-browser proof lives in the e2e specs.
+// (drvweb-014, reworked by drvweb-025, fixed by drvweb-026): the 3s log-region poll
+// must not steal the cursor out of a half-typed resolve answer. The bespoke
+// beforeSwap/afterSwap snapshot-and-refocus script is gone — the log region morphs
+// (idiomorph) instead of innerHTML-swapping, so an unchanged textarea is never
+// detached, idiomorph's built-in restoreFocus re-homes the active input by id (with
+// its selection) when a change does move it, and the global ignoreActiveValue default
+// keeps the typed-but-unsubmitted value. drvweb-026: hx-preserve is NOT the value
+// mechanism — it ran htmx's own node-retention on every swap and fought the morph,
+// detaching the focused textarea each poll; it has been removed. We pin the mechanism
+// that replaced it: the morph swap on the log region, the extension served + enabled,
+// and the global ignoreActiveValue default set after it loads. Live-browser proof in
+// the e2e specs.
 func TestResolveInputKeepsFocusAcrossPoll(t *testing.T) {
 	root := seedEscalation(t)
 	h := newServerOver(t, root)
 
 	page := get(t, h, "/ticket/ESC-1/0001").Body.String()
 	for _, want := range []string{
-		`hx-ext="morph"`,            // idiomorph enabled on the polling region...
-		`hx-swap="morph:innerHTML"`, // ...which morphs children instead of replacing them
-		`src="/static/idiomorph-ext.min.js"`, // the extension is served locally (no CDN)
-		`hx-preserve="true"`,                  // the typed-but-unsubmitted answer is kept
+		`hx-ext="morph"`,                              // idiomorph enabled on the polling region...
+		`hx-swap="morph:innerHTML"`,                   // ...which morphs children instead of replacing them
+		`src="/static/idiomorph-ext.min.js"`,          // the extension is served locally (no CDN)
+		`Idiomorph.defaults.ignoreActiveValue = true`, // the typed-but-unsubmitted answer is kept by morph, not hx-preserve
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("detail page missing resolve-focus mechanism marker %q", want)
 		}
+	}
+	// drvweb-026 regression guard: the hx-preserve that fought the morph is gone.
+	if strings.Contains(page, "hx-preserve") {
+		t.Errorf("detail page still ships hx-preserve on a polled input; it fights the morph swap and detaches the focused node every poll")
+	}
+	// The global default must be set AFTER the extension that defines Idiomorph loads,
+	// or it would throw / never apply.
+	if ext, def := strings.Index(page, "/static/idiomorph-ext.min.js"), strings.Index(page, "Idiomorph.defaults.ignoreActiveValue = true"); ext >= 0 && def >= 0 && def < ext {
+		t.Errorf("ignoreActiveValue default is set before the idiomorph extension loads; it would never apply")
 	}
 
 	// The vendored extension is reachable and self-hosted.

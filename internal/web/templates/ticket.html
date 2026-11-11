@@ -9,6 +9,18 @@
   {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/idiomorph-ext.min.js"></script>
+  <script>
+    // drvweb-026: never overwrite the value of the element the user is actively
+    // editing during a morph. The log region self-polls every 3s and morphs; a
+    // focused resolve textarea would otherwise have its half-typed answer replaced
+    // by the empty server value on each tick. idiomorph's restoreFocus already keeps
+    // focus + caret; ignoreActiveValue keeps the value too — so morph alone preserves
+    // a half-typed input, with no hx-preserve (which fought the morph and detached the
+    // focused node every poll). Set as a default so any current/future polled input
+    // is covered. Runs after idiomorph-ext defines the Idiomorph global above (both
+    // lib scripts load synchronously, so this executes once Idiomorph exists).
+    window.Idiomorph && (Idiomorph.defaults.ignoreActiveValue = true);
+  </script>
   <script src="/static/favicon.js" defer></script>
   <script src="/static/reltime.js" defer></script>
 </head>
@@ -395,8 +407,11 @@
          - the resolve-textarea focus/caret snapshot (it refocused and restored the
            caret after every innerHTML swap blurred it). Morph never detaches an
            unchanged textarea, and idiomorph's built-in restoreFocus re-homes the
-           active input by id and restores its selection when a change does move it;
-           hx-preserve still keeps the typed-but-unsubmitted value.
+           active input by id and restores its selection when a change does move it.
+           The typed-but-unsubmitted value is kept by idiomorph's ignoreActiveValue
+           (set globally in the head), NOT by hx-preserve — hx-preserve ran its own
+           node-retention on every swap and fought the morph, detaching the focused
+           textarea each poll (drvweb-026); it has been removed.
          - the `.is-target` class mirror + afterSettle re-apply (innerHTML replaced
            the <li id="event-N"> nodes, dropping the browser's native :target ref).
            Morph reuses those nodes by id, so native :target — and the CSS that keys
@@ -703,16 +718,20 @@
                    seq, so with several open at once each box answers exactly one.
                    The response is the attempt-live fragment swapped into the log
                    region — the escalation flips to "resolved by #N" and the badge
-                   leaves Stuck from one swap. The <textarea> carries a stable id +
-                   hx-preserve so the 3s poll swap of this region never clobbers a
-                   half-typed answer (and it correctly vanishes once resolved,
-                   since the id is gone from the fragment). */}}
+                   leaves Stuck from one swap. The <textarea> carries a stable id so
+                   the morph poll of this region reuses it in place (restoreFocus
+                   keeps focus + caret); the half-typed answer survives because the
+                   region's morph runs with ignoreActiveValue (set globally in the
+                   head), so the empty server value never clobbers the focused box.
+                   It correctly vanishes once resolved, since the id is gone from
+                   the fragment. NB: no hx-preserve — it fought the morph swap and
+                   detached the focused node every poll (drvweb-026). */}}
               <p class="link-note unresolved" data-testid="unresolved-{{.Seq}}">→ unresolved — needs a human</p>
               <form class="resolve-form" data-testid="resolve-form-{{.Seq}}"
                 hx-post="/ticket/{{$.Attempt.Ticket}}/{{$.Attempt.ID}}/resolve"
                 hx-target="[data-testid=log-region]" hx-swap="innerHTML">
                 <input type="hidden" name="seq" value="{{.Seq}}">
-                <textarea id="resolve-input-{{.Seq}}" hx-preserve="true" name="answer"
+                <textarea id="resolve-input-{{.Seq}}" name="answer"
                   class="resolve-input" data-testid="resolve-input-{{.Seq}}" rows="2"
                   placeholder="Answer this escalation (markdown)…"></textarea>
                 <button type="submit" class="resolve-submit" data-testid="resolve-submit-{{.Seq}}">Resolve</button>

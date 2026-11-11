@@ -9,6 +9,13 @@
   {{paletteVars}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/idiomorph-ext.min.js"></script>
+  <script>
+    // drvweb-026: morph never overwrites the value of the actively-edited element.
+    // The board region self-polls every 3s and morphs; the board has no polled input
+    // today, but setting this default means any future one is covered for free (the
+    // same global the attempt page sets, which is where the resolve-textarea bug was).
+    window.Idiomorph && (Idiomorph.defaults.ignoreActiveValue = true);
+  </script>
   <script src="/static/favicon.js" defer></script>
 </head>
 <body>
