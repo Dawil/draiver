@@ -15,15 +15,21 @@
     {{if gt .LedgerAttention 0}}<span class="board-view-attention" data-testid="ledgers-attention" role="img" aria-label="{{.LedgerAttention}} ledger(s) need attention" title="{{.LedgerAttention}} ledger(s) need attention">●</span>{{end}}</a>
 </nav>
 {{/* Flow-metrics strip (drvweb-027): four at-a-glance numbers about how the flow is
-     doing, sitting top-right ABOVE the columns and INSIDE this polled region, so all
-     four refresh on the 3s poll with no extra wiring — the same reason the column
-     counts live here. Computed over code tickets only (board()/computeMetrics).
+     doing. INSIDE this polled region (so all four refresh on the 3s poll with no extra
+     wiring — the same reason the column counts live here) and kept ABOVE .columns in
+     document order, but CSS lifts it with position:absolute into the top-right of the
+     page so it floats at the "Draiver" header level (drvweb-027 review #11). Rendered
+     borderless as a 2x2 grid of floating tiles; each tile carries a reused info-bubble
+     (hover for what the metric means). Computed over code tickets only
+     (board()/computeMetrics).
 
      The Oldest tile doubles as the age-sort toggle: a real <form>/<button> posting to
      /board/sort (handleSort) with hx-target="#board-region" so a click re-sorts the
      columns oldest-first within each favourite partition and the tile flips to its
      pressed (aria-pressed/.metric-oldest-on) state in one swap. The choice is
-     cookie-backed and server-applied, so it survives the 3s poll. The other three are
+     cookie-backed and server-applied, so it survives the 3s poll. Its info-bubble is a
+     SIBLING of the button (not nested inside it) so clicking (i) never submits the sort
+     form and we avoid interactive-inside-button invalid HTML. The other three are
      static readouts. */}}
 <div class="flow-metrics" data-testid="flow-metrics">
   <form class="metric metric-oldest{{if .SortByAge}} metric-oldest-on{{end}}" method="post" action="/board/sort"
@@ -34,18 +40,22 @@
       <span class="metric-value" data-testid="metric-oldest-value">{{if .Metrics.OldestHasData}}{{.Metrics.OldestAge}}{{else}}—{{end}}</span>
       <span class="metric-label">Oldest{{if .Metrics.OldestHasData}} <span class="metric-sub" data-testid="metric-oldest-ticket">{{.Metrics.OldestTicket}}</span>{{end}}</span>
     </button>
+    {{template "info-bubble" "Age of the oldest unresolved code ticket (Running, Pending, Needs-me or Review), and the ticket it belongs to. Click the tile to sort every column oldest-first."}}
   </form>
   <div class="metric" data-testid="metric-devcycle">
     <span class="metric-value" data-testid="metric-devcycle-value">{{.Metrics.ExpectedDevCycle}}</span>
     <span class="metric-label">Expected Dev-Cycle</span>
+    {{template "info-bubble" "85th-percentile time from a ticket's creation to Done, across resolved code tickets. Shows — below three resolved samples."}}
   </div>
   <div class="metric" data-testid="metric-unresolved">
     <span class="metric-value" data-testid="metric-unresolved-value">{{.Metrics.TotalUnresolved}}</span>
     <span class="metric-label">Total Unresolved</span>
+    {{template "info-bubble" "Count of code tickets not yet Done (Running, Pending, Needs-me, Review). Excludes archived attempts and codebase ledgers — the population behind Oldest."}}
   </div>
   <div class="metric" data-testid="metric-throughput">
     <span class="metric-value" data-testid="metric-throughput-value">{{.Metrics.Throughput4w}}</span>
     <span class="metric-label">4 Week Throughput</span>
+    {{template "info-bubble" "Number of code tickets that reached Done in the last 28 days."}}
   </div>
 </div>
 <div class="columns">
