@@ -72,6 +72,43 @@ func TestComputeMetrics_ExcludesLedgersAndArchived(t *testing.T) {
 	}
 }
 
+// TestComputeMetrics_ArchivedDoneStillCounts proves review #22: a ticket completed
+// (Done) and THEN archived is a real resolution — it still feeds Throughput and
+// Dev-Cycle. An archived ticket that never reached Done (cancelled or paused
+// indefinitely) counts nowhere: not resolved, and not unresolved either.
+func TestComputeMetrics_ArchivedDoneStillCounts(t *testing.T) {
+	doneArchived := mkMetricAttempt("DONE_ARCH", 10*day, project.Done, 2*day)
+	doneArchived.Archived = true // completed, then archived → still a resolution (cycle 8d, done 2d)
+	cancelledArchived := mkMetricAttempt("CANCEL_ARCH", 8*day, project.Running, -1)
+	cancelledArchived.Archived = true // archived without ever reaching Done → counts nowhere
+
+	attempts := []project.Attempt{
+		doneArchived,
+		cancelledArchived,
+		mkMetricAttempt("D1", 6*day, project.Done, 1*day), // resolved, cycle 5d, done 1d
+		mkMetricAttempt("D2", 9*day, project.Done, 1*day), // resolved, cycle 8d, done 1d
+		mkMetricAttempt("R", 3*day, project.Running, -1),  // the only unresolved ticket
+	}
+	m := computeMetrics(attempts, fixedNow)
+
+	// Throughput (done within 28d): DONE_ARCH (2d) + D1 (1d) + D2 (1d) = 3.
+	if m.Throughput4w != 3 {
+		t.Errorf("Throughput4w = %d, want 3 — a Done+archived ticket counts; an archived-not-Done one does not", m.Throughput4w)
+	}
+	// Dev-Cycle: DONE_ARCH must be one of the 3 samples (8d, 5d, 8d), clearing the floor.
+	if m.ExpectedDevCycle == emDash {
+		t.Error("Dev-Cycle must include the Done+archived ticket, so three samples clear the floor (got em dash)")
+	}
+	if want := humanDuration(8 * day); m.ExpectedDevCycle != want {
+		t.Errorf("ExpectedDevCycle = %q, want %q (p85 of cycles 5d,8d,8d)", m.ExpectedDevCycle, want)
+	}
+	// The cancelled-archived ticket is neither resolved nor unresolved; only R is unresolved.
+	if m.TotalUnresolved != 1 || m.OldestTicket != "R" {
+		t.Errorf("TotalUnresolved = %d oldest = %q, want 1 / R (archived-not-Done excluded from unresolved)",
+			m.TotalUnresolved, m.OldestTicket)
+	}
+}
+
 func TestComputeMetrics_EmptyUnresolvedSet(t *testing.T) {
 	m := computeMetrics([]project.Attempt{mkMetricAttempt("D", 10*day, project.Done, 2*day)}, fixedNow)
 	if m.OldestHasData {

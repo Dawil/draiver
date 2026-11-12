@@ -8,7 +8,9 @@ Feature: Flow-metrics strip above the board, with an age-sort toggle on Oldest
   # board region: Oldest (age of the oldest unresolved code ticket, and its name), Expected
   # Dev-Cycle (p85 of resolved created→done durations), Total Unresolved (the population behind
   # Oldest), and 4-Week Throughput (tickets done within 28 days). All four are computed over
-  # CODE tickets only — archived attempts and codebase ledgers are excluded. The Oldest tile is
+  # CODE tickets only — codebase ledgers are excluded, and so is an archived ticket that never
+  # reached Done (cancelled/paused). But a ticket completed (Done) and THEN archived is a real
+  # resolution and still counts toward Dev-Cycle and Throughput (review #22). The Oldest tile is
   # also the age-sort toggle: clicking it re-sorts each column oldest-first WITHIN each favourite
   # partition (composing with drv-050), cookie-backed so the order survives the poll.
 
@@ -35,6 +37,12 @@ Feature: Flow-metrics strip above the board, with an age-sort toggle on Oldest
     Given a flow board seeded with a spread of code tickets, a ledger, and an archived attempt
     When I open the flow board
     Then 4 Week Throughput counts only the resolved tickets done within 28 days
+
+  Scenario: Archived tickets count toward resolved metrics only when they reached Done
+    Given a flow board where one archived ticket was completed and another was cancelled before Done
+    When I open the flow board
+    Then 4 Week Throughput counts the archived ticket that reached Done
+    And the archived ticket that never reached Done is counted in neither Throughput nor Total Unresolved
 
   Scenario: Clicking Oldest toggles age-sort, lights the pressed state, and survives the poll
     Given a flow board seeded with a spread of code tickets, a ledger, and an archived attempt

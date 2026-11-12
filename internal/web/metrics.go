@@ -15,10 +15,15 @@ import (
 // no render-time time.Now(): the clock is threaded in (s.now), so the math is
 // unit-testable with a fixed clock.
 //
-// All four are computed over CODE tickets only — archived attempts and codebase
-// ledgers are excluded. A ledger never reaches Done (restingState rewrites its Done
-// back to Parked), so it would sit in "unresolved"/"Oldest" forever and skew every
-// number; and an archived attempt is off the board entirely.
+// All four are computed over CODE tickets only — codebase ledgers are always
+// excluded (a ledger never reaches Done — restingState rewrites its Done back to
+// Parked — so it would sit in "unresolved"/"Oldest" forever and skew every number).
+//
+// Archived attempts are NOT excluded wholesale (drvweb-027 review #22): a ticket that
+// was completed (Done) and then archived is still a real resolution, so it must count
+// toward Dev-Cycle and Throughput. Only an archived attempt that never reached Done
+// (cancelled or paused indefinitely) is excluded — it is neither a resolution nor an
+// unresolved in-flight ticket. So the gate is on Done-ness first, archived second.
 
 // throughputWindow is the 4-Week Throughput lookback: a code ticket counts if it
 // reached Done within this window of `now`. 28 days exactly (the AC's boundary: a
@@ -64,8 +69,8 @@ func computeMetrics(attempts []project.Attempt, now time.Time) metricsVM {
 	var devCycles []time.Duration
 
 	for _, a := range attempts {
-		// Code tickets only: exclude archived attempts and codebase ledgers.
-		if a.Archived || a.Type == project.TypeCodebase {
+		// Codebase ledgers are never a unit of flow — excluded from every metric.
+		if a.Type == project.TypeCodebase {
 			continue
 		}
 		created, ok := attemptCreated(a)
@@ -73,9 +78,11 @@ func computeMetrics(attempts []project.Attempt, now time.Time) metricsVM {
 			continue // no created event — cannot place it on any age/cycle axis
 		}
 
-		// Resolved = board state Done. Control()/BoardState() only ever map
-		// Running→Pending or NeedsMe→Pending, never into or out of Done, so the
-		// runtime Desired/Live fold cannot change Done-ness: a.State suffices.
+		// Resolved = board state Done, counted even when archived (review #22): a
+		// completed-then-archived ticket is a real resolution. Control()/BoardState()
+		// only ever map Running→Pending or NeedsMe→Pending, never into or out of Done,
+		// and `archive` is not a lifecycle event, so neither the runtime fold nor
+		// archiving changes Done-ness: a.State suffices.
 		if a.State == project.Done {
 			if doneTS, ok := attemptDoneTS(a); ok {
 				devCycles = append(devCycles, doneTS.Sub(created))
@@ -83,6 +90,12 @@ func computeMetrics(attempts []project.Attempt, now time.Time) metricsVM {
 					m.Throughput4w++
 				}
 			}
+			continue
+		}
+
+		// Not Done and archived → cancelled or paused indefinitely (review #22):
+		// counted nowhere — neither a resolution nor an in-flight ticket.
+		if a.Archived {
 			continue
 		}
 

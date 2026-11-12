@@ -42,6 +42,9 @@ func init() {
 		"Expected Dev-Cycle shows a humanised duration":                                          thenFlowDevCycle,
 		"a board with fewer than three resolved tickets shows an em dash for Expected Dev-Cycle": thenFlowDevCycleFloor,
 		"4 Week Throughput counts only the resolved tickets done within 28 days":                 thenFlowThroughput,
+		"a flow board where one archived ticket was completed and another was cancelled before Done": givenFlowArchivedDoneBoard,
+		"4 Week Throughput counts the archived ticket that reached Done":                             thenFlowArchivedDoneCounts,
+		"the archived ticket that never reached Done is counted in neither Throughput nor Total Unresolved": thenFlowArchivedNotDoneExcluded,
 		"I click the Oldest tile": whenFlowClickOldest,
 		"the columns sort oldest-first and the Oldest tile shows its pressed state": thenFlowSortedPressed,
 		"the pressed age-sort order survives a repeated board poll":                 thenFlowSurvivesPoll,
@@ -408,6 +411,49 @@ func thenFlowThroughput(w *World, sr *StepRun) error {
 	}
 	attachText(sr, "flow-metrics-throughput-28d",
 		"4 Week Throughput = 2: FM-D1 (1d) and FM-D2 (2d) are inside the 28-day window; FM-D3 (29d) is outside")
+	return nil
+}
+
+// --- scenario: archived tickets count only when they reached Done (review #22) ---
+
+// givenFlowArchivedDoneBoard seeds a Done-then-archived ticket (a real resolution), an
+// archived ticket that never reached Done (cancelled/paused), and one plain unresolved
+// Running ticket. The Done+archived one must count toward Throughput; the cancelled one
+// must count nowhere.
+func givenFlowArchivedDoneBoard(w *World, sr *StepRun) error {
+	_, err := seedFlowBoard(w, []flowCard{
+		{ticket: "FA-DONE", createdA: 10 * fmDay, kind: "done", doneA: 3 * fmDay, archived: true}, // completed, then archived
+		{ticket: "FA-CANCEL", createdA: 8 * fmDay, kind: "running", archived: true},               // archived before Done
+		{ticket: "FA-RUN", createdA: 2 * fmDay, kind: "running"},                                  // the only unresolved ticket
+	}, "flowarchboard")
+	return err
+}
+
+func thenFlowArchivedDoneCounts(w *World, sr *StepRun) error {
+	body, _ := w.get("flowbody").(string)
+	val, _ := tileValue(body, "metric-throughput-value")
+	// Only FA-DONE (done 3d ago, archived) is Done within the window → Throughput = 1.
+	if val != "1" {
+		return fmt.Errorf("4 Week Throughput = %q, want 1 — a Done-then-archived ticket must still count", val)
+	}
+	attachText(sr, "flow-metrics-archived-done-counts",
+		"FA-DONE was completed then archived; it still counts toward 4 Week Throughput (= 1), proving archived+Done is a resolution")
+	return nil
+}
+
+func thenFlowArchivedNotDoneExcluded(w *World, sr *StepRun) error {
+	body, _ := w.get("flowbody").(string)
+	total, _ := tileValue(body, "metric-unresolved-value")
+	// FA-CANCEL (archived, never Done) is neither resolved nor unresolved; only FA-RUN is.
+	if total != "1" {
+		return fmt.Errorf("Total Unresolved = %q, want 1 — an archived-not-Done ticket is cancelled, not unresolved", total)
+	}
+	oldest, _ := tileValue(body, "metric-oldest-ticket")
+	if oldest != "FA-RUN" {
+		return fmt.Errorf("Oldest = %q, want FA-RUN — the cancelled archived ticket must not surface as oldest unresolved", oldest)
+	}
+	attachText(sr, "flow-metrics-archived-not-done-excluded",
+		"FA-CANCEL was archived before reaching Done; it is counted in neither Throughput nor Total Unresolved (= 1, only FA-RUN)")
 	return nil
 }
 
