@@ -508,6 +508,7 @@ func amThenNoNotice(w *World, sr *StepRun) error {
 	if a.code != 0 {
 		return fmt.Errorf("command exited %d: %s", a.code, a.stderr)
 	}
+	attachText(sr, "no-notice", "--- stdout\n"+a.stdout+"--- stderr\n"+a.stderr)
 	return nil
 }
 
@@ -604,6 +605,7 @@ func amThenInboxUnchanged(w *World, sr *StepRun) error {
 	if strings.Contains(a.stdout+a.stderr, "📬") || strings.Contains(a.stdout, amSecret) {
 		return fmt.Errorf("inbox must not carry the notice or messages:\n%s%s", a.stdout, a.stderr)
 	}
+	attachText(sr, "inbox", "$ draiver inbox\n"+a.stdout)
 	return nil
 }
 
