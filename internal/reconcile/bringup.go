@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
@@ -30,6 +31,7 @@ import (
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/protocol"
 	"github.com/Dawil/draiver/internal/session"
+	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/watch"
 )
 
@@ -114,6 +116,15 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		return nil, err
 	}
 
+	// The session-start watermark (drvctl-059): the attempt's log tail as this session
+	// comes up. Every human→agent message at or below it is delivered by the cold-start
+	// brief or the resume note; anything above it is "unread" to the live session, and
+	// its draiver commands announce it. The seq rides into the session on its spawn env
+	// (layered over a *copy* of the shared BaseSpec.Env so sessions never alias it).
+	sessionSeq := r.logTail(a.Ticket, a.ID)
+	spec := r.opt.BaseSpec
+	spec.Env = append(append([]string(nil), r.opt.BaseSpec.Env...), agentmsg.SessionEnv(a.Ticket, a.ID, sessionSeq)...)
+
 	handle, err := manage.New(sess, wm, newAdapter, manage.Config{
 		Ticket:  a.Ticket,
 		Attempt: a.ID,
@@ -127,7 +138,7 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		// attempt that recorded no base, which falls back to HEAD as before
 		// (drvctl-021).
 		Ref:  a.Base,
-		Spec: r.opt.BaseSpec,
+		Spec: spec,
 	})
 	if err != nil {
 		_ = sess.Close()
@@ -190,6 +201,14 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 			return nil, err
 		}
 		spawned = true
+	}
+
+	// Persist the new session's watermark only now, after the resume note above was
+	// composed against the *previous* session's watermark (drvctl-059). Best-effort:
+	// it is off-chain view state, and a missing file only makes the next resume note
+	// conservative (it lists unread messages it cannot prove were delivered).
+	if err := agentmsg.WriteWatermark(r.opt.Root, a.Ticket, a.ID, sessionSeq); err != nil {
+		r.opt.Logf("reconcile: record message watermark %s/%s: %v", a.Ticket, a.ID, err)
 	}
 
 	// The protocol gate's baseline is the log tail *at session start*, so a
@@ -318,7 +337,14 @@ func (r *Reconciler) resumeHasHeadroom(ticket, attempt string) bool {
 // because a `woken-by` activation is authored during desired() on the same tick, so
 // the attempt handed to admit/bringUp predates it.
 func (r *Reconciler) resumeWakeNote(ticket, attempt string) string {
-	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+	return ResumeWakeNote(r.opt.Root, ticket, attempt)
+}
+
+// ResumeWakeNote is resumeWakeNote over an explicit data root — the exact note a
+// resumed session's driving turn carries, exported so acceptance can replay the
+// exap-023 shape against the real composition (drvctl-059).
+func ResumeWakeNote(root store.Root, ticket, attempt string) string {
+	a, err := project.LoadAttempt(root, ticket, attempt)
 	if err != nil {
 		return ""
 	}
@@ -334,9 +360,21 @@ func (r *Reconciler) resumeWakeNote(ticket, attempt string) string {
 		}
 		watermark = e.Seq
 	}
+	// Human→agent messages (drvctl-059) posted while the previous session was live
+	// and never read with `draiver messages` are unseen too — even when a later
+	// agent-authored event (typically the review claimed with --ignore-unread) put the
+	// watermark above them. The previous session's own start watermark bounds them
+	// from below (older messages were in its brief / resume note), as does the read
+	// cursor. Read errors degrade to 0, i.e. conservatively re-listing a message.
+	prevSession, _ := agentmsg.ReadWatermark(root, ticket, attempt)
+	cursor, _ := agentmsg.ReadCursor(root, ticket, attempt)
+	unreadMsg := map[int]bool{}
+	for _, e := range agentmsg.Unread(a.Events, prevSession, cursor) {
+		unreadMsg[e.Seq] = true
+	}
 	var unseen []event.Event
 	for _, e := range a.Events {
-		if e.Seq > watermark && authoritativeWake(e.Type) {
+		if (e.Seq > watermark && authoritativeWake(e.Type)) || unreadMsg[e.Seq] {
 			unseen = append(unseen, e)
 		}
 	}
@@ -356,10 +394,29 @@ func (r *Reconciler) resumeWakeNote(ticket, attempt string) string {
 	var b strings.Builder
 	b.WriteString("You were resumed, but authoritative events landed on your log **after** the point your restored context ends — you have not seen them:\n")
 	for _, e := range unseen {
-		fmt.Fprintf(&b, "- `%s` #%d — %s\n", e.Type, e.Seq, kb.Headline(e.Body))
+		msg := ""
+		if agentmsg.IsMessage(e) {
+			msg = " (📬 a message to you from the human, never read)"
+		}
+		fmt.Fprintf(&b, "- `%s` #%d — %s%s\n", e.Type, e.Seq, kb.Headline(e.Body), msg)
 	}
 	fmt.Fprintf(&b, "\nRead each with `draiver recall %s <seq>` (or re-ground with `draiver brief %s`), act on it, and only then claim `review` or `escalate`. Do not re-claim review with stale context.", ticket, ticket)
 	return b.String()
+}
+
+// logTail returns the attempt's highest log seq — the session-start watermark
+// (drvctl-059). An unreadable log degrades to 0, which only makes the in-session
+// notice conservative (it may announce a message the brief already showed).
+func (r *Reconciler) logTail(ticket, attempt string) int {
+	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+	if err != nil {
+		return 0
+	}
+	tail := 0
+	for _, e := range a.Events {
+		tail = max(tail, e.Seq)
+	}
+	return tail
 }
 
 // authoritativeWake reports whether an event type landing while a session was parked

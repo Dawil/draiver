@@ -77,8 +77,14 @@ type Event struct {
 	// `woken-by` hashes and serialises exactly as before.
 	WokenChild string `yaml:"woken_child,omitempty"`
 	WokenSeq   int    `yaml:"woken_seq,omitempty"`
-	Prev       string `yaml:"prev"`
-	Hash       string `yaml:"hash"`
+	// To marks an event as a message addressed to the agent working the attempt
+	// (drvctl-059): the board compose form sets it to "agent". It is the explicit
+	// message marker the in-session unread notice counts — actor is never used, as
+	// spine notes are stamped human:* too. omitempty, so every unmarked event hashes
+	// and serialises exactly as before.
+	To   string `yaml:"to,omitempty"`
+	Prev string `yaml:"prev"`
+	Hash string `yaml:"hash"`
 
 	Body string `yaml:"-"`
 }
@@ -104,6 +110,7 @@ type hashable struct {
 	Tags        []string `yaml:"tags,omitempty"`
 	WokenChild  string   `yaml:"woken_child,omitempty"`
 	WokenSeq    int      `yaml:"woken_seq,omitempty"`
+	To          string   `yaml:"to,omitempty"`
 	Prev        string   `yaml:"prev"`
 }
 
@@ -129,6 +136,7 @@ func (e Event) ComputeHash() string {
 		Tags:        e.Tags,
 		WokenChild:  e.WokenChild,
 		WokenSeq:    e.WokenSeq,
+		To:          e.To,
 		Prev:        e.Prev,
 	}
 	front, err := yaml.Marshal(h)

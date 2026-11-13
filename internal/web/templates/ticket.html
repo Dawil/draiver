@@ -287,6 +287,14 @@
             aria-label="Tags (optional)" placeholder="tags (optional, space-separated)">
           <input type="number" name="supersedes" min="1" class="compose-supersedes" data-testid="compose-supersedes"
             aria-label="Supersedes seq (optional)" placeholder="supersedes #">
+          {{/* drvctl-059: mark the entry as a message to the agent (event `to: agent`).
+               Checked by default — a live session's next draiver command announces
+               it as unread; uncheck for a note that is only for the humans. */}}
+          <label class="compose-to-agent" data-testid="compose-to-agent-label"
+            title="A live agent session is told it has an unread message and reads it with `draiver messages`">
+            <input type="checkbox" name="to" value="agent" data-testid="compose-to-agent" checked>
+            📬 Message the agent
+          </label>
         </div>
       </form>
 
@@ -298,7 +306,7 @@
       <div class="review-actions" data-testid="review-actions">
         <button type="button" class="action-decision" data-testid="action-decision"
           hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
-          hx-vals='{"type":"decision"}' hx-include="[data-testid=compose-body]"
+          hx-vals='{"type":"decision","to":"agent"}' hx-include="[data-testid=compose-body]"
           hx-target="[data-testid=log-region]" hx-swap="innerHTML">Decision — reopen to Running</button>
         <button type="button" class="action-done" data-testid="action-done"
           hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
@@ -703,6 +711,7 @@
             <a class="seq" href="#event-{{.Seq}}" title="Permalink to this entry">#{{.Seq}}</a>
             <span class="type type-{{.Type}}">{{.Type}}</span>
             <span class="actor">{{.Actor}}</span>
+            {{if .ToAgent}}<span class="to-agent" data-testid="to-agent-{{.Seq}}" title="A message to the agent: a live session is told it has unread messages (drvctl-059)">📬 → agent</span>{{end}}
             <time class="ts" data-testid="ts-{{.Seq}}" datetime="{{.TSISO}}" title="{{.TSFull}}">{{.TSRel}}</time>
           </div>
           {{if .Tags}}<p class="event-tags" data-testid="event-tags-{{.Seq}}">{{range .Tags}}<span class="tag-chip" data-testid="tag-chip">{{.}}</span> {{end}}</p>{{end}}

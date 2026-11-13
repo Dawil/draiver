@@ -44,6 +44,30 @@ func run(t *testing.T, args ...string) (string, int) {
 // returned error, not out.
 func runE(t *testing.T, args ...string) (string, int, error) {
 	t.Helper()
+	resetForRun(t)
+
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+	rootCmd.SetArgs(args)
+
+	err := rootCmd.Execute()
+	code := 0
+	if err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) {
+			code = ee.code
+		} else {
+			code = 1
+		}
+	}
+	return out.String(), code, err
+}
+
+// resetForRun resets the package-level flag vars and env a run reads, so tests
+// don't contaminate each other.
+func resetForRun(t *testing.T) {
+	t.Helper()
 	dataFlag, actorFlag, attemptFlag = "", "", ""
 	logType = ""
 	logRefs, logArtefacts, escalateArtefacts = nil, nil, nil
@@ -68,30 +92,24 @@ func runE(t *testing.T, args ...string) (string, int, error) {
 	archiveAccepted, archiveAbandoned = false, false
 	resolveByFlag = ""
 	logByFlag = ""
+	logTo, reviewIgnoreUnread = "", false
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog, testDetach, testOnly = false, false, false
 	parkClear = false
 	reportJSON, reportRun, reportOut = "", "", ""
 	reportInline, reportDemo = true, false
 	t.Setenv("DRAIVER_ATTEMPT", "")
-	resetFlagsChanged(rootCmd)
-
-	var out bytes.Buffer
-	rootCmd.SetOut(&out)
-	rootCmd.SetErr(&out)
-	rootCmd.SetArgs(args)
-
-	err := rootCmd.Execute()
-	code := 0
-	if err != nil {
-		var ee *exitError
-		if errors.As(err, &ee) {
-			code = ee.code
-		} else {
-			code = 1
-		}
+	// Never inherit a live supervised session's env (drvctl-059) from the shell the
+	// suite happens to run in; the messages tests opt back in via setSessionEnv.
+	sessionEnvMu.Lock()
+	optIn := sessionEnvOptIn[t.Name()]
+	sessionEnvMu.Unlock()
+	if !optIn {
+		t.Setenv("DRAIVER_SESSION_TICKET", "")
+		t.Setenv("DRAIVER_SESSION_ATTEMPT", "")
+		t.Setenv("DRAIVER_SESSION_SEQ", "")
 	}
-	return out.String(), code, err
+	resetFlagsChanged(rootCmd)
 }
 
 // newTicket creates a data root and a ticket "PROJ-1", returning the root. The
