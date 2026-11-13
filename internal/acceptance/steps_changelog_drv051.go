@@ -160,8 +160,11 @@ func thenEveryTicketHasOneEntry(w *World, sr *StepRun) error {
 	if err != nil {
 		return err
 	}
-	var missing, dup []string
+	var missing, dup, table []string
 	for _, id := range cw.commitIDs {
+		for _, e := range cw.idEntries[id] {
+			table = append(table, fmt.Sprintf("%-12s CHANGELOG.md:%d  [%s / %s]", id, e.line, e.release, e.heading))
+		}
 		switch es := cw.idEntries[id]; {
 		case len(es) == 0:
 			missing = append(missing, id)
@@ -173,6 +176,9 @@ func thenEveryTicketHasOneEntry(w *World, sr *StepRun) error {
 			dup = append(dup, id+" ("+strings.Join(at, ",")+")")
 		}
 	}
+	attachText(sr, "ticket-to-entry", fmt.Sprintf(
+		"%d ticket ids prefix commit subjects; %d are the id of a CHANGELOG entry\n\n%s\n",
+		len(cw.commitIDs), len(cw.commitIDs)-len(missing), strings.Join(table, "\n")))
 	var problems []string
 	if len(missing) > 0 {
 		problems = append(problems, fmt.Sprintf("%d ticket(s) with no CHANGELOG entry: %s",
@@ -210,6 +216,8 @@ func thenEntriesUnderHeadings(w *World, sr *StepRun) error {
 			bad = append(bad, fmt.Sprintf("%s at L%d (release %q, heading %q)", e.id, e.line, e.release, e.heading))
 		}
 	}
+	attachText(sr, "entry-headings", fmt.Sprintf("%d ticket entries checked for a release section + Keep-a-Changelog heading; %d outside\n",
+		len(cw.idEntries), len(bad)))
 	if len(bad) > 0 {
 		return fmt.Errorf("entries outside a Keep-a-Changelog heading: %s", strings.Join(bad, "; "))
 	}
