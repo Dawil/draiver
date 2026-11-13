@@ -84,6 +84,15 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	// The in-session unread-message notice (drvctl-059): every agent-facing verb
+	// opens with a count-only stderr banner when the human posted messages since the
+	// session started. It never fails a command — any error prints nothing. (Set
+	// here, not in the literal, to avoid an init cycle through rootCmd.)
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if isNoticeCommand(cmd) {
+			printUnreadNotice(cmd.ErrOrStderr())
+		}
+	}
 	rootCmd.PersistentFlags().StringVar(&dataFlag, "data", "", "data root (default $DRAIVER_DATA or ~/.draiver/data)")
 	rootCmd.PersistentFlags().StringVar(&actorFlag, "actor", "", "actor as kind:name (default $DRAIVER_ACTOR or human:$USER)")
 	rootCmd.PersistentFlags().StringVar(&attemptFlag, "attempt", "", "attempt id (default $DRAIVER_ATTEMPT or the ticket's latest attempt)")
@@ -91,7 +100,14 @@ func init() {
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
-	err := rootCmd.Execute()
+	cmd, err := rootCmd.ExecuteC()
+	// Long-output verbs repeat the unread-message notice (drvctl-059) at the very
+	// end — after any error line — so a truncated tool transcript cannot drop it.
+	defer func() {
+		if isNoticeCommand(cmd) && noticeRepeatCommands[cmd.Name()] {
+			printUnreadNotice(cmd.ErrOrStderr())
+		}
+	}()
 	if err == nil {
 		return 0
 	}

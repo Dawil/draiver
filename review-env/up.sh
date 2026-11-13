@@ -45,6 +45,14 @@ export DRAIVER_CONFIG="$CONFIG"
 "$BIN" new    DUMMY-3 --title "$ENV_NAME: needs a human"  --repo "$PWD" --base main >/dev/null 2>&1 || true
 "$BIN" escalate DUMMY-3 "seeded question for $ENV_NAME?" >/dev/null 2>&1 || true
 
+# drvctl-059: a human→agent message on the Running DUMMY-1, so the reviewer sees the
+# compose form's "📬 Message the agent" box and the "📬 → agent" badge on the posted
+# entry. To exercise the CLI notice against this data root, pretend to be the live
+# session: DRAIVER_SESSION_TICKET=DUMMY-1 DRAIVER_SESSION_ATTEMPT=0001
+# DRAIVER_SESSION_SEQ=1 draiver status  (then `draiver messages`, `draiver review DUMMY-1`).
+"$BIN" log DUMMY-1 --type decision --to agent --actor human:review \
+  "If possible, push directly to main on the forgejo remote once done." >/dev/null 2>&1 || true
+
 # drv-045: seed the in-review DUMMY-2 attempt's per-attempt system-event journal
 # (session/system.jsonl) so the reviewer sees a POPULATED System Logs panel live — the
 # new second streaming panel, separate from Agent Logs — not just a green unit test.

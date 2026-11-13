@@ -46,6 +46,7 @@ type fakeAdapter struct {
 	started    bool
 	killed     bool
 	resumeID   string
+	env        []string // the spawn/resume spec's Env (drvctl-059)
 	prompts    []string
 	decisions  map[string]agent.Decision
 
@@ -60,6 +61,7 @@ type fakeAdapter struct {
 func (a *fakeAdapter) Spawn(ctx context.Context, spec agent.SessionSpec) (string, error) {
 	a.mu.Lock()
 	a.started = true
+	a.env = append([]string(nil), spec.Env...)
 	a.mu.Unlock()
 	const id = "sess-live"
 	a.emit(agent.Event{Kind: agent.EventSystem, SessionID: id})
@@ -69,6 +71,7 @@ func (a *fakeAdapter) Spawn(ctx context.Context, spec agent.SessionSpec) (string
 func (a *fakeAdapter) Resume(ctx context.Context, sessionID string, spec agent.SessionSpec) error {
 	a.mu.Lock()
 	a.resumeID = sessionID
+	a.env = append([]string(nil), spec.Env...)
 	a.started = true
 	// A live resume comes online only after its first user turn (drvctl-056); a
 	// stale id starts a process that dies on arrival and never emits init at all, so

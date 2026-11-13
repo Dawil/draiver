@@ -722,6 +722,8 @@ body {
 .event-superseded .event-body { font-size: 13px; color: var(--muted); }
 /* Opaque, agent-owned retrieval labels (drv-026): small chips, no semantics. */
 .event-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; }
+.to-agent { font-size: 11px; color: var(--accent, #4a7bd0); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; white-space: nowrap; }
+.compose-to-agent { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
 .tag-chip { font-size: 11px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; }
 /* Inline escalation resolution: answer an open escalation from the timeline. One
    box per open escalation, sitting beneath its "unresolved" note. */

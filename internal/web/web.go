@@ -50,6 +50,7 @@ import (
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/bddexec"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/event"
@@ -198,12 +199,16 @@ var composeTypes = map[string]bool{
 // call, so the board and a terminal share one write path. The gateway stamps the
 // server's actor and runs the same attempt-existence and link checks every append
 // goes through.
-func (s *Server) appendComposed(typ, id, att, body string, tags []string, supersedes []int) error {
+//
+// to is the drvctl-059 message marker: "agent" when the human addressed the entry
+// to the agent (the compose form's default-checked "Message the agent" box, and
+// the Review "Decision — reopen" button). It is ignored for the terminal `done`.
+func (s *Server) appendComposed(typ, id, att, body string, tags []string, supersedes []int, to string) error {
 	if typ == "done" {
 		_, err := s.gw.Done(id, att, body)
 		return err
 	}
-	_, err := s.gw.AppendTyped(id, att, event.Event{Type: typ, Body: body, Tags: tags, Supersedes: supersedes})
+	_, err := s.gw.AppendTyped(id, att, event.Event{Type: typ, Body: body, Tags: tags, Supersedes: supersedes, To: to})
 	return err
 }
 
@@ -787,6 +792,10 @@ type eventVM struct {
 	// instead, so the two are mutually exclusive on any one event.
 	Superseded   bool
 	SupersededBy int
+	// ToAgent marks a human→agent message (event `to: agent`, drvctl-059): the
+	// entry the in-session unread notice counts. Rendered as a "→ agent" badge so
+	// the human can see which entries the agent will be told about.
+	ToAgent bool
 }
 
 type detailVM struct {
@@ -1521,6 +1530,7 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 			Artefacts: e.Artefacts,
 			Links:     safeLinks(e.Links),
 			Tags:      e.Tags,
+			ToAgent:   agentmsg.IsMessage(e),
 		}
 		if f, ok := view.Get(e.Seq); ok && !f.Live {
 			// An escalation retired by its resolution keeps the familiar "resolved by
@@ -1873,7 +1883,14 @@ func (s *Server) handleLogAppend(w http.ResponseWriter, r *http.Request) {
 		}
 		supersedes = []int{n}
 	}
-	if err := s.appendComposed(typ, id, att, body, tags, supersedes); err != nil {
+	// The drvctl-059 message marker: only the exact "agent" value marks the entry as
+	// a message to the agent (counted by the in-session unread notice); anything else
+	// — including an unchecked box, which posts nothing — leaves it unmarked.
+	to := ""
+	if r.FormValue("to") == agentmsg.ToAgent {
+		to = agentmsg.ToAgent
+	}
+	if err := s.appendComposed(typ, id, att, body, tags, supersedes, to); err != nil {
 		s.fail(w, err)
 		return
 	}
