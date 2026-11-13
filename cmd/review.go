@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
@@ -16,8 +17,9 @@ import (
 )
 
 var (
-	reviewURLs  []string
-	reviewLinks []string
+	reviewURLs         []string
+	reviewLinks        []string
+	reviewIgnoreUnread bool
 )
 
 var reviewCmd = &cobra.Command{
@@ -58,6 +60,19 @@ var reviewCmd = &cobra.Command{
 		att, err := resolveAttempt(root, id)
 		if err != nil {
 			return err
+		}
+
+		// The unread-message soft stop (drvctl-059): review is the point of no return
+		// — once claimed, a message the human posted mid-session neither reopens nor
+		// wakes anything — so with unread messages on the session's own attempt the
+		// claim is refused (no event appended) until they are read or deliberately
+		// ignored. It runs before the pyramid gate, and fails open: if the count
+		// cannot be computed the claim proceeds exactly as before.
+		if !reviewIgnoreUnread {
+			if sess, n, ok := sessionUnread(); ok && n > 0 && sess.Ticket == id && sess.Attempt == att {
+				// The count-only notice itself was already printed by the root pre-run.
+				return &exitError{code: ExitUnreadMessages, msg: agentmsg.ReviewHint}
+			}
 		}
 
 		// The review gate: enforce-by-process-control seam closing the test-pyramid
@@ -181,6 +196,7 @@ func quotedRungNames(levels []pyramid.Level) string {
 }
 
 func init() {
+	reviewCmd.Flags().BoolVar(&reviewIgnoreUnread, "ignore-unread", false, "claim review even though the human posted messages this session has not read (`draiver messages`)")
 	addLinkFlags(reviewCmd, &reviewURLs, &reviewLinks)
 	rootCmd.AddCommand(reviewCmd)
 }

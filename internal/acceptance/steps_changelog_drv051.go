@@ -25,6 +25,8 @@ func init() {
 		"every ticket entry sits under a Keep-a-Changelog heading inside a release section":   thenEntriesUnderHeadings,
 		"no ticket entry's bold summary names a second ticket id":                             thenNoSecondIDInSummary,
 	}
+	drv051["I build draiver and ask it for --version"] = whenAskVersion
+	drv051["it reports the version of the topmost released CHANGELOG section"] = thenVersionIsTopRelease
 	for text, fn := range drv051 {
 		registry[text] = fn
 	}
@@ -242,6 +244,40 @@ func thenNoSecondIDInSummary(w *World, sr *StepRun) error {
 	}
 	if len(bad) > 0 {
 		return fmt.Errorf("bold summaries naming a second ticket id: %s", strings.Join(bad, "; "))
+	}
+	return nil
+}
+
+func whenAskVersion(w *World, sr *StepRun) error {
+	cw, err := currentChangelog(w)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("go", "run", ".", "--version")
+	cmd.Dir = cw.root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("go run . --version: %v\n%s", err, out)
+	}
+	w.set("version-output", strings.TrimSpace(string(out)))
+	return nil
+}
+
+var topReleaseRE = regexp.MustCompile(`(?m)^## \[([0-9]+\.[0-9]+\.[0-9]+)\]`)
+
+func thenVersionIsTopRelease(w *World, sr *StepRun) error {
+	cw, err := currentChangelog(w)
+	if err != nil {
+		return err
+	}
+	got, _ := w.get("version-output").(string)
+	m := topReleaseRE.FindStringSubmatch(cw.changelog)
+	if m == nil {
+		return fmt.Errorf("CHANGELOG.md has no released ## [x.y.z] section")
+	}
+	attachText(sr, "version", fmt.Sprintf("topmost released section: %s\n$ draiver --version\n%s\n", m[1], got))
+	if !strings.HasSuffix(got, " "+m[1]) {
+		return fmt.Errorf("draiver --version printed %q, want version %s", got, m[1])
 	}
 	return nil
 }

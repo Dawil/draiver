@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/repo"
 )
@@ -18,6 +19,7 @@ var (
 	logSupersedes []int
 	logTags       []string
 	logByFlag     string
+	logTo         string
 )
 
 var logCmd = &cobra.Command{
@@ -41,11 +43,15 @@ var logCmd = &cobra.Command{
 		if logType == "" {
 			return fmt.Errorf("--type is required")
 		}
+		if logTo != "" && logTo != agentmsg.ToAgent {
+			return fmt.Errorf("--to: only %q is supported", agentmsg.ToAgent)
+		}
 		links, err := buildLinks(logURLs, logLinks)
 		if err != nil {
 			return err
 		}
 		ev := event.Event{
+			To:         logTo,
 			Type:       logType,
 			Refs:       logRefs,
 			Artefacts:  logArtefacts,
@@ -90,6 +96,7 @@ func init() {
 	logCmd.Flags().IntSliceVar(&logSupersedes, "supersedes", nil, "seq of an event this one retires from the live set (repeatable; must exist on this attempt)")
 	logCmd.Flags().StringSliceVar(&logTags, "tag", nil, "opaque retrieval label (repeatable; no meaning to draiver)")
 	logCmd.Flags().StringVar(&logByFlag, "by", "", "log on behalf of a parent Capability that `wants:` this ticket (downward direction; facts only, never review/done)")
+	logCmd.Flags().StringVar(&logTo, "to", "", "address the entry to the agent (`--to agent`): a live session is told it has an unread message (drvctl-059)")
 	addLinkFlags(logCmd, &logURLs, &logLinks)
 	rootCmd.AddCommand(logCmd)
 }

@@ -299,6 +299,25 @@ answer and log what you did, closing the escalate → resolve → action arc:
 draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_URL from a fixture; opened PROJ-140 for the real secret."
 ```
 
+### The human may also message you mid-session
+
+The human can post a message to you from the board **while your session is
+running**. You will not be re-prompted; instead, every agent-facing `draiver`
+command (`log`, `test`, `review`, `recall`, `brief`, `park`, `escalate`,
+`status`) prints a one-line, count-only notice on stderr:
+
+```
+📬 1 unread message from the human since this session started — run `draiver messages` to read.
+```
+
+It never shows the content — run `draiver messages` to read the messages in full
+(that marks them read and clears the notice). Read them before you hand off, act
+on them, and log what you did. `draiver review` refuses to record a claim while
+messages are unread; it exits nonzero with a hint. Read them and claim again, or —
+only if you have a reason to claim without reading — re-run with
+`--ignore-unread` (the unread messages are then listed in your next resume note).
+`draiver inbox` is the human's escalation inbox, not yours.
+
 ## 7. Verify with the test pyramid before you claim
 
 If the repo ships a `.test-pyramid.yaml`, prove the work green before you hand it
@@ -402,6 +421,9 @@ http://host:3000/owner/repo.git  →  http://host:3000/owner/repo/compare/main..
 A compare URL needs no forge API and works across forges, so it is the default.
 If you opened a real PR, link that instead.
 
+If a `📬 … unread message(s)` notice has appeared, run `draiver messages` first:
+`review` will not record a claim while the human's messages are unread.
+
 **c. Claim, attaching the link.** `--url` defaults the link rel to `pr`; for a
 branch-compare or diff use `--link compare=<url>` / `--link diff=<url>`:
 
@@ -427,7 +449,7 @@ codebase-level findings into the repo's ledger → when blocked,
 you fire off long self-completing work (a detached test), `launch-async && park`
 and stop (§8); the result lands on your log and wakes the attempt → when the ticket
 is worked again, a session `brief`s, reads the resolution or result, and continues
-→ when the work is done, **verify** (iterate with `draiver test`, commit, then
+→ when a `📬` notice appears, read it with `draiver messages` and act on it → when the work is done, **verify** (iterate with `draiver test`, commit, then
 `draiver test --log`), **push** to a remote, and `review` with a link the human can
 click.
 

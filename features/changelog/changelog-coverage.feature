@@ -22,3 +22,11 @@ Feature: Every merged ticket has exactly one CHANGELOG entry
     When I collect the ticket ids prefixing commit subjects and the ids of CHANGELOG entries
     Then every ticket entry sits under a Keep-a-Changelog heading inside a release section
     And no ticket entry's bold summary names a second ticket id
+
+  # #7/#12 on drv-051: the backfill was cut into real semver releases, and `draiver --version`
+  # is single-sourced from the changelog (drv-006) — so the binary must report the topmost
+  # released `## [x.y.z]` section, never `[Unreleased]`.
+  Scenario: draiver --version reports the newest released CHANGELOG section
+    Given the repository's git history and its CHANGELOG.md
+    When I build draiver and ask it for --version
+    Then it reports the version of the topmost released CHANGELOG section
