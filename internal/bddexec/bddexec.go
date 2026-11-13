@@ -185,6 +185,7 @@ func Rerun(ctx context.Context, root store.Root, repo, ticket, att string) (Outc
 	if err != nil {
 		return Outcome{}, err
 	}
+	extraEnv = pyramid.TicketEnv(extraEnv, ticket) // drv-052: $DRAIVER_TICKET, as `draiver test` exports
 	if !ok {
 		return Outcome{
 			Status: StatusNoRung,

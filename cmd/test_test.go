@@ -570,3 +570,18 @@ func TestLogFailingRunRecordsNothing(t *testing.T) {
 		t.Errorf("a failing --log run wrote an event: %d→%d", len(before), len(after))
 	}
 }
+
+// drv-052: draiver test exports the attempt's ticket id to rung commands as
+// $DRAIVER_TICKET, taken from the draiver/<ticket>/<attempt> branch — overriding any
+// stale value the caller's own environment carries.
+func TestRungSeesDraiverTicket(t *testing.T) {
+	t.Setenv("DRAIVER_TICKET", "STALE-9")
+	pyramidCheckout(t, "PROJ-52", "0001", false, [][2]string{{"unit", `test "$DRAIVER_TICKET" = PROJ-52 && echo "ticket=$DRAIVER_TICKET"`}})
+	out, code := run(t, "test")
+	if code != 0 {
+		t.Fatalf("test exited %d (rung did not see DRAIVER_TICKET=PROJ-52): %s", code, out)
+	}
+	if !strings.Contains(out, "ticket=PROJ-52") {
+		t.Errorf("rung output does not show the exported ticket: %q", out)
+	}
+}

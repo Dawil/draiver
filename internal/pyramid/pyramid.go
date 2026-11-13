@@ -548,3 +548,21 @@ func envNames(p *Pyramid) string {
 	}
 	return strings.Join(names, ", ")
 }
+
+// TicketEnvVar names the ticket id draiver exports to every rung command (run, up,
+// down, healthcheck) and promotion qa it executes for an attempt (drv-052). Rungs
+// already inherit $DRAIVER_ATTEMPT from the agent's own environment, but nothing told
+// them *which ticket* they verify; a repo-level check keyed on the ticket (e.g. "this
+// ticket has a changelog fragment") needs it. draiver attaches no meaning to it.
+const TicketEnvVar = "DRAIVER_TICKET"
+
+// TicketEnv returns the environment additions that carry ticket to a rung command,
+// layered over any other extra env (the overlay contract). A blank ticket — a run
+// outside an attempt branch — adds nothing, leaving the command to decide what an
+// unknown ticket means.
+func TicketEnv(extra []string, ticket string) []string {
+	if strings.TrimSpace(ticket) == "" {
+		return extra
+	}
+	return append(append([]string(nil), extra...), TicketEnvVar+"="+ticket)
+}
