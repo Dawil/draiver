@@ -342,7 +342,7 @@ promotion's `qa` — inherits the caller's environment plus what draiver injects
 |---|---|---|
 | **`DRAIVER_TICKET`** | run from a `draiver/<ticket>/<attempt>` branch (`draiver test`, `test --detach`, `promote`, the board's BDD rerun) | the attempt's ticket id, from the branch; overrides any inherited value |
 | `DRAIVER_ATTEMPT` | inherited, not injected — an agent exports it for its own CLI calls | the attempt id |
-| `DRAIVER_CODEBASE_DIR` / `DRAIVER_OVERLAY_DIR` | an overlay is active (drv-041, below) | the codebase / overlay worktree |
+| `DRAIVER_CODEBASE_DIR` / `DRAIVER_OVERLAY_DIR` | an overlay is active (drv-041, below) — including review environments (drv-053) | the codebase / overlay worktree (for a review env: its review checkouts) |
 | `DRAIVER_REVIEW_PORT` / `DRAIVER_REVIEW_INSTANCE` | review environments (drv-020) | the allocated port / instance id |
 | `DRAIVER_PROMOTE_ENV` / `DRAIVER_PROMOTE_BASE` | promotion `qa` (drv-043) | the promotion's env / base |
 
@@ -444,6 +444,36 @@ second directory the contract is fixed as (`internal/overlay` `ScriptEnv`,
   `run: go run $DRAIVER_OVERLAY_DIR/features/acceptance`.
 - A local (in-repo) pyramid references **neither** variable and runs byte-for-byte
   unchanged — no cwd change, no extra environment. Backward compatible.
+
+### Review environments under an overlay (drv-053)
+
+A review environment launched from the board (drv-020) honours the **same** contract.
+When the attempt has no in-repo pyramid and an overlay resolves, the review env's
+definition comes from the overlay, and Launch (`internal/reviewenv`):
+
+- **pins one overlay revision** — the tip of the attempt's overlay branch
+  `draiver/<ticket>/<attempt>`, else the overlay's default-branch `HEAD`
+  (`overlay.ReviewRevision`). Only committed state is read (`git show`), so the
+  panel, the badge, and the launch all see the same definition, an agent's
+  overlay-branch edits are what the reviewer launches, and uncommitted WIP on the
+  overlay's main never leaks into a review;
+- cuts a **dedicated detached overlay checkout** at that commit (a sibling of the
+  detached codebase review worktree, `<review-worktree>.overlay`), re-resolves the env
+  from it, and runs `up` / healthchecks / `down` with **cwd = the codebase review
+  worktree**, `DRAIVER_CODEBASE_DIR` → that worktree and `DRAIVER_OVERLAY_DIR` → the
+  overlay checkout. Both are injected (a declared param can never shadow them);
+- **persists** them in the review-env record's `script_env` alongside
+  `overlay_repo` / `overlay_commit` / `overlay_worktree`, so teardown and every
+  status-poll healthcheck replay the exact bring-up environment;
+- removes **both** checkouts on a confirmed teardown or a failed launch, and keeps
+  both on a leak (`teardown-failed`).
+
+A failed `up` now runs `down` best-effort (same env) before the checkouts are removed,
+so a half-started env does not leak; that `down` output is relayed into System Logs
+like the rest of the launch. A confirm-down healthcheck that **could not run** — it
+failed to start, or exited 126/127 (command/script not found) — is *inconclusive* and
+never counts as "confirmed down": the record goes `teardown-failed` instead. An
+in-repo pyramid's review env is unchanged: no overlay vars, no overlay checkout.
 
 > **Env-var naming (open decision, resolved).** The names are
 > **`DRAIVER_CODEBASE_DIR`** and **`DRAIVER_OVERLAY_DIR`** — *not*

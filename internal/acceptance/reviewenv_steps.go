@@ -397,7 +397,7 @@ func launchReviewEnv(w *World, overrides map[string]string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	rec, err := rb.mgr.Launch(ctx, rb.att, rb.env, overrides)
+	rec, err := rb.mgr.Launch(ctx, rb.att, rb.env, overrides, nil)
 	if err != nil {
 		return fmt.Errorf("launch errored: %w", err)
 	}
@@ -494,7 +494,7 @@ func launchReviewEnvNamed(w *World, name string) (reviewenv.Record, error) {
 	w.defer_(func() { forceKillReviewEnv(rb) })
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	rec, err := rb.mgr.Launch(ctx, rb.att, env, nil)
+	rec, err := rb.mgr.Launch(ctx, rb.att, env, nil, nil)
 	if err != nil {
 		return rec, fmt.Errorf("launch %s errored: %w", name, err)
 	}

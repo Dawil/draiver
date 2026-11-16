@@ -17,9 +17,12 @@ package overlay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/worktree"
@@ -215,4 +218,57 @@ func ResolvePyramid(ctx context.Context, wd, codebasePath, explicitOverlay, over
 			loc.Repo, loc.Via, pyramid.FileName)
 	}
 	return op, &active, active.ScriptEnv(wd), nil
+}
+
+// Revision pins an overlay repo to one exact commit — the overlay revision a review
+// environment (drv-053) resolves its env definition from and runs its scripts against.
+// Ref names what Commit was resolved from (the attempt's overlay branch, or the overlay
+// repo's HEAD as the fallback), purely for legible messages.
+type Revision struct {
+	Location
+	Commit string
+	Ref    string
+}
+
+// ReviewRevision resolves the overlay revision a review env for key should use
+// (drv-053): the tip of the attempt's overlay branch draiver/<ticket>/<attempt> — the
+// branch Cut puts the agent's overlay edits on — when it exists, else the overlay
+// repo's HEAD (its default branch, since the overlay is operated in place). Only
+// COMMITTED state is ever named, so uncommitted WIP in the overlay's main working copy
+// can never leak into a review. It has no side effects: no worktree is cut.
+func ReviewRevision(ctx context.Context, loc Location, key worktree.Key) (Revision, error) {
+	wm, err := worktree.NewManager(loc.Repo)
+	if err != nil {
+		return Revision{}, fmt.Errorf("overlay: %s is not a usable overlay repo: %w", loc.Repo, err)
+	}
+	sha, ok, err := wm.BranchSHA(ctx, key)
+	if err != nil {
+		return Revision{}, fmt.Errorf("overlay: resolve overlay branch: %w", err)
+	}
+	if ok {
+		return Revision{Location: loc, Commit: sha, Ref: "draiver/" + key.Ticket + "/" + key.Attempt}, nil
+	}
+	sha, err = worktree.HeadSHA(ctx, loc.Repo)
+	if err != nil {
+		return Revision{}, fmt.Errorf("overlay: resolve overlay HEAD: %w", err)
+	}
+	return Revision{Location: loc, Commit: sha, Ref: "HEAD"}, nil
+}
+
+// PyramidAt loads the .test-pyramid.yaml committed at rev.Commit (`git show
+// <commit>:.test-pyramid.yaml`) without a checkout. A commit carrying no pyramid is
+// (nil, nil) — "nothing there" — exactly like pyramid.Load on a pyramid-less tree.
+func PyramidAt(ctx context.Context, rev Revision) (*pyramid.Pyramid, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", rev.Repo, "show", rev.Commit+":"+pyramid.FileName)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil, nil // the commit carries no pyramid (or the path is absent)
+		}
+		return nil, fmt.Errorf("overlay: show %s:%s: %w", rev.Commit, pyramid.FileName, err)
+	}
+	return pyramid.Parse(out)
 }
