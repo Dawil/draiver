@@ -9,8 +9,11 @@ Feature: Every merged ticket has exactly one CHANGELOG entry
   # (`git log --format=%s`, ids matching ^drv(ctl|web)?-N) is the id of EXACTLY ONE entry.
   # An entry is a top-level `- **…**` bullet; its id is the ticket id closing its bold
   # summary — `- **Summary (drvweb-027).**`. A mere mention in another entry's prose does
-  # not count. drv-052 splits the changelog into per-ticket fragments on exactly this
-  # shape, so the shape is checked too. Not a UI feature: no screenshots.
+  # not count. drv-052 split the changelog into per-ticket fragments (changelog.d/) on
+  # exactly this shape, so the shape is checked too. Since drv-052 these invariants hold
+  # over the changelog AS RENDERED FROM changelog.d/ (ticket branches add a fragment;
+  # CHANGELOG.md is regenerated at release), and a `skip:` fragment accounts for its
+  # ticket without an entry. Not a UI feature: no screenshots.
 
   Scenario: Every ticket id in the git history is the id of exactly one CHANGELOG entry
     Given the repository's git history and its CHANGELOG.md

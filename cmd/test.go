@@ -495,6 +495,22 @@ func runShell(ctx context.Context, cmd *cobra.Command, wd, script string, extraE
 // is a hard error — a configured overlay that cannot run is a misconfiguration to
 // surface, not to silently skip.
 func resolvePyramid(ctx context.Context, wd string) (*pyramid.Pyramid, *overlay.Active, []string, error) {
+	p, active, extraEnv, err := resolvePyramidSource(ctx, wd)
+	if err != nil || p == nil {
+		return p, active, extraEnv, err
+	}
+	// drv-052: every rung/qa command learns which ticket it verifies via
+	// $DRAIVER_TICKET, taken from the draiver/<ticket>/<attempt> branch. Off an attempt
+	// branch nothing is added (the command sees whatever the caller exported).
+	if key, err := worktree.Identify(ctx, wd); err == nil {
+		extraEnv = pyramid.TicketEnv(extraEnv, key.Ticket)
+	}
+	return p, active, extraEnv, nil
+}
+
+// resolvePyramidSource is resolvePyramid without the per-attempt identity env: it
+// picks the in-repo pyramid or the overlay and returns the overlay's script env.
+func resolvePyramidSource(ctx context.Context, wd string) (*pyramid.Pyramid, *overlay.Active, []string, error) {
 	// 1. In-repo wins: a codebase worktree carrying its own .test-pyramid.yaml ignores
 	//    overlays entirely — today's behaviour, no cwd change, no env vars. Checked here
 	//    (not only inside overlay.ResolvePyramid) so a non-attempt branch with an in-repo

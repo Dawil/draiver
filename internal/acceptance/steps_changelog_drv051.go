@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Dawil/draiver/internal/changelog"
 )
 
 // steps_changelog_drv051.go realises drv-051's acceptance criteria
@@ -16,6 +18,12 @@ import (
 // and those entries keep the shape drv-052 splits on. It reads the real repo — the
 // git history reachable from HEAD and the checked-in CHANGELOG.md — so the check
 // cannot drift from what ships. No browser, no screenshots.
+//
+// Since drv-052 the entries are per-ticket fragments under changelog.d/ and the
+// invariants are checked over CHANGELOG.md *as rendered from those fragments* (a
+// ticket branch adds a fragment; CHANGELOG.md is regenerated at release), so a ticket
+// with a fragment is covered before anyone regenerates. A `skip:` fragment accounts
+// for its ticket without rendering an entry.
 
 func init() {
 	drv051 := map[string]StepFunc{
@@ -53,8 +61,10 @@ type clEntry struct {
 
 type changelogWorld struct {
 	root      string
-	changelog string
-	commitIDs []string // sorted, unique
+	changelog string          // rendered from changelog.d/ (drv-052)
+	committed string          // the checked-in CHANGELOG.md
+	skipped   map[string]bool // ticket ids accounted for by a `skip:` fragment
+	commitIDs []string        // sorted, unique
 	entries   []clEntry
 	idEntries map[string][]clEntry
 }
@@ -69,7 +79,29 @@ func givenChangelogRepo(w *World, sr *StepRun) error {
 	if err != nil {
 		return fmt.Errorf("read CHANGELOG.md: %v", err)
 	}
-	w.set("changelog", &changelogWorld{root: root, changelog: string(b)})
+	// drv-052: CHANGELOG.md is now an output rendered from changelog.d/ fragments and
+	// regenerated only on demand (at release), so a ticket branch adds a fragment and
+	// leaves CHANGELOG.md alone. The coverage/shape invariants therefore hold over the
+	// changelog *as rendered from every fragment*; the committed file is kept for the
+	// --version check (its released sections are what the binary embeds).
+	tree, err := changelog.Load(root)
+	if err != nil {
+		return fmt.Errorf("load changelog.d fragments: %v", err)
+	}
+	skipped := map[string]bool{}
+	for _, f := range tree.Unreleased {
+		if f.Skip != "" {
+			skipped[f.Name] = true
+		}
+	}
+	for _, r := range tree.Releases {
+		for _, f := range r.Fragments {
+			if f.Skip != "" {
+				skipped[f.Name] = true
+			}
+		}
+	}
+	w.set("changelog", &changelogWorld{root: root, changelog: string(changelog.Render(tree)), committed: string(b), skipped: skipped})
 	return nil
 }
 
@@ -168,6 +200,8 @@ func thenEveryTicketHasOneEntry(w *World, sr *StepRun) error {
 			table = append(table, fmt.Sprintf("%-12s CHANGELOG.md:%d  [%s / %s]", id, e.line, e.release, e.heading))
 		}
 		switch es := cw.idEntries[id]; {
+		case len(es) == 0 && cw.skipped[id]:
+			table = append(table, fmt.Sprintf("%-12s skip: fragment (accounted for, renders nothing)", id))
 		case len(es) == 0:
 			missing = append(missing, id)
 		case len(es) > 1:
@@ -179,11 +213,11 @@ func thenEveryTicketHasOneEntry(w *World, sr *StepRun) error {
 		}
 	}
 	attachText(sr, "ticket-to-entry", fmt.Sprintf(
-		"%d ticket ids prefix commit subjects; %d are the id of a CHANGELOG entry\n\n%s\n",
+		"%d ticket ids prefix commit subjects; %d are accounted for by a changelog.d fragment\n\n%s\n",
 		len(cw.commitIDs), len(cw.commitIDs)-len(missing), strings.Join(table, "\n")))
 	var problems []string
 	if len(missing) > 0 {
-		problems = append(problems, fmt.Sprintf("%d ticket(s) with no CHANGELOG entry: %s",
+		problems = append(problems, fmt.Sprintf("%d ticket(s) with no CHANGELOG entry (add changelog.d/<ticket-id>.md, see changelog.d/README.md): %s",
 			len(missing), strings.Join(missing, " ")))
 	}
 	if len(dup) > 0 {
@@ -271,7 +305,7 @@ func thenVersionIsTopRelease(w *World, sr *StepRun) error {
 		return err
 	}
 	got, _ := w.get("version-output").(string)
-	m := topReleaseRE.FindStringSubmatch(cw.changelog)
+	m := topReleaseRE.FindStringSubmatch(cw.committed)
 	if m == nil {
 		return fmt.Errorf("CHANGELOG.md has no released ## [x.y.z] section")
 	}

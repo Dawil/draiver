@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-ticket changelog fragments under `changelog.d/`, a generated `CHANGELOG.md`, and
+  a required `changelog` test rung (drv-052).** `CHANGELOG.md` drifted because updating it
+  was nobody's enforced job, and a shared `## [Unreleased]` heading would make concurrent
+  attempts conflict on every merge. Each ticket now writes its own
+  `changelog.d/<ticket-id>.md` — frontmatter naming the Keep-a-Changelog `section:`, then the
+  house-style entry, or `skip: <reason>` with no body for a change with nothing to tell —
+  and `CHANGELOG.md` is an output rendered by `go run ./cmd/changelog generate`
+  (`--check` reports staleness; `release X.Y.Z` moves unreleased fragments into
+  `changelog.d/X.Y.Z/` and regenerates). Rendering is a pure function of the fragment tree:
+  sections in Keep-a-Changelog order, entries by ticket prefix then number, releases
+  newest-first. Ticket branches add a fragment only; `CHANGELOG.md` is regenerated
+  explicitly, so it never conflicts. Every existing entry was migrated into a fragment —
+  released history under `changelog.d/<x.y.z>/` with a `_release.md` carrying the date —
+  and the generator reproduces the committed file from fragments alone. A new
+  **required** base rung, `changelog`, runs `go run ./cmd/changelog check`: it fails,
+  naming the expected path, unless the attempt's fragment exists and is valid, and it
+  validates every fragment so a malformed one cannot break the generator. `draiver test`
+  (and `--detach`, `promote`, the board's BDD rerun) now export **`DRAIVER_TICKET`** — the
+  attempt's ticket id from its `draiver/<ticket>/<attempt>` branch — to every rung command;
+  the check falls back to the branch when run by hand and fails, rather than passing, with
+  neither. The previous coverage guard now checks the changelog as rendered from the
+  fragments. Format and policy: `changelog.d/README.md`; acceptance coverage in
+  `features/changelog/changelog-fragments.feature`.
+
 ### Changed
 
 - **CHANGELOG.md backfilled for every merged ticket, with a BDD guard on the
@@ -52,25 +78,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker exactly once. The `wake.go` docs now list all three `AsyncLaunchFailResult`
   callers (manual `park --clear`, spawn failure, automatic reap); acceptance
   coverage in `features/manager-as-worker/async-reap.feature`.
-- **Flow-metrics grid on the board, with an age-sort toggle on Oldest
-  (drvweb-027).** A borderless 2x2 grid floats at the top right of the board, level
-  with the Draiver header, showing four flow metrics, each with a hover `(i)` info
-  icon: **Oldest** (age and name of the oldest unresolved code ticket), **Expected
-  Dev-Cycle** (p85, nearest-rank, of resolved created→done durations), **Total
-  Unresolved**, and **4-Week Throughput** (tickets done within the last 28 days).
-  The metrics (`internal/web/metrics.go`) are a pure projection over code tickets —
-  codebase ledgers are excluded — computed against an injectable clock (`s.now`) so
-  they are unit-testable; the grid lives inside the polled `/board` region so the 3s
-  poll refreshes it, and falls back to static flow on narrow screens. A ticket that
-  reached Done and was then archived still counts as resolved (Dev-Cycle,
-  Throughput); only an archived ticket that never reached Done counts nowhere.
-  Clicking **Oldest** toggles a per-viewer age sort: `POST /board/sort` flips a
-  `draiver_sort` cookie read on every render, so the order survives the poll.
-  `applyFaves` became `applyBoardOrder` — favourites still sort first, then within
-  each partition the age sort orders oldest-created first (else alphabetical), so it
-  composes with drv-050 favourites. The pressed state shows as an accent-tinted,
-  underlined tile. BDD coverage lives in `features/flow-metrics/flow-metrics.feature`
-  (`@drvweb-027`) with screenshots.
 - **Agent unread-message notice — human messages reach a live session
   (drvctl-059).** A message the human posted while an agent session was already
   running was never delivered (prompts only fire at cold-start and resume), and
@@ -91,6 +98,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   note now also lists a message posted during the previous session and never
   read, even when the review sits above it (the exap-023 #12 case). Outside a
   session nothing changes, and any error computing the notice is silent.
+- **Flow-metrics grid on the board, with an age-sort toggle on Oldest
+  (drvweb-027).** A borderless 2x2 grid floats at the top right of the board, level
+  with the Draiver header, showing four flow metrics, each with a hover `(i)` info
+  icon: **Oldest** (age and name of the oldest unresolved code ticket), **Expected
+  Dev-Cycle** (p85, nearest-rank, of resolved created→done durations), **Total
+  Unresolved**, and **4-Week Throughput** (tickets done within the last 28 days).
+  The metrics (`internal/web/metrics.go`) are a pure projection over code tickets —
+  codebase ledgers are excluded — computed against an injectable clock (`s.now`) so
+  they are unit-testable; the grid lives inside the polled `/board` region so the 3s
+  poll refreshes it, and falls back to static flow on narrow screens. A ticket that
+  reached Done and was then archived still counts as resolved (Dev-Cycle,
+  Throughput); only an archived ticket that never reached Done counts nowhere.
+  Clicking **Oldest** toggles a per-viewer age sort: `POST /board/sort` flips a
+  `draiver_sort` cookie read on every render, so the order survives the poll.
+  `applyFaves` became `applyBoardOrder` — favourites still sort first, then within
+  each partition the age sort orders oldest-created first (else alphabetical), so it
+  composes with drv-050 favourites. The pressed state shows as an accent-tinted,
+  underlined tile. BDD coverage lives in `features/flow-metrics/flow-metrics.feature`
+  (`@drvweb-027`) with screenshots.
 
 ### Fixed
 
@@ -312,6 +338,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-rung `required` in `.test-pyramid.yaml` — advisory rungs the review gate
+  does not require (drv-025).** The pyramid used to fuse *altitude* (list order on
+  the testing V) with *enforcement* (the file's top rung was the review gate), so
+  the only way to make a flaky or environment-dependent rung non-blocking was to
+  delete it or reorder it. A level now takes **`required: true|false`** (default
+  `true`, so existing files behave exactly as before), orthogonal to order: an
+  advisory (`required: false`) rung is still defined, run when it lies in the climb
+  path and reported, but a red advisory rung never blocks review, and a required
+  rung may sit above an advisory one. A pyramid with zero required rungs is
+  rejected at load. **The review gate now folds over the required set** —
+  `draiver review` is admitted only when *every* required rung is logged green at
+  the exact HEAD (`pyramid.RequiredStatus`), and a refusal names the outstanding
+  rung(s); `HighestAtHEAD` now only drives the web badge. **`draiver test`** halts
+  only at the first non-green *required* rung (advisory reds are recorded and the
+  climb continues), and bare `draiver test` climbs to the **highest required rung**
+  rather than the file's top; an explicit `RUNG` still climbs into advisory rungs.
+  This supersedes drv-011's floor semantics: the repo `default_test_rung` /
+  `TestRung` setting no longer touches the gate (`FloorTarget` is gone) and is now
+  purely the iteration ceiling that lowers bare `draiver test`'s climb. The repo's
+  own `integration` rung becomes `required: false`, so its gate is `unit` +
+  `acceptance`; `docs/test-pyramid.md` and
+  `features/test-pyramid/required-gate.feature` cover the new semantics.
 - **Progressive-reveal brief — `supersedes`, a headline index, and `draiver
   recall` (drv-026).** `brief` used to replay the entire attempt log verbatim, so
   every cold start (and every respawn) cost O(total log). The brief is now a
@@ -348,140 +396,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the live log region like Resolve does. Ordinary, permission and already-resolved
   escalations do not show the button. BDD coverage in
   `features/attempt-page/restart-context.feature`.
-- **Per-rung `required` in `.test-pyramid.yaml` — advisory rungs the review gate
-  does not require (drv-025).** The pyramid used to fuse *altitude* (list order on
-  the testing V) with *enforcement* (the file's top rung was the review gate), so
-  the only way to make a flaky or environment-dependent rung non-blocking was to
-  delete it or reorder it. A level now takes **`required: true|false`** (default
-  `true`, so existing files behave exactly as before), orthogonal to order: an
-  advisory (`required: false`) rung is still defined, run when it lies in the climb
-  path and reported, but a red advisory rung never blocks review, and a required
-  rung may sit above an advisory one. A pyramid with zero required rungs is
-  rejected at load. **The review gate now folds over the required set** —
-  `draiver review` is admitted only when *every* required rung is logged green at
-  the exact HEAD (`pyramid.RequiredStatus`), and a refusal names the outstanding
-  rung(s); `HighestAtHEAD` now only drives the web badge. **`draiver test`** halts
-  only at the first non-green *required* rung (advisory reds are recorded and the
-  climb continues), and bare `draiver test` climbs to the **highest required rung**
-  rather than the file's top; an explicit `RUNG` still climbs into advisory rungs.
-  This supersedes drv-011's floor semantics: the repo `default_test_rung` /
-  `TestRung` setting no longer touches the gate (`FloorTarget` is gone) and is now
-  purely the iteration ceiling that lowers bare `draiver test`'s climb. The repo's
-  own `integration` rung becomes `required: false`, so its gate is `unit` +
-  `acceptance`; `docs/test-pyramid.md` and
-  `features/test-pyramid/required-gate.feature` cover the new semantics.
-- **`draiver park` — suspend an attempt to Pending without escalating
-  (drvctl-052).** A third legitimate way for an agent to end its turn, alongside
-  `review` and `escalate`: **`draiver park TICKET [REASON]`** appends a durable
-  `park` turn-end and exits 0, leaving the attempt **Pending** (enabled, no live
-  agent, self-resolving) with nothing on the human's inbox. `park` is a
-  non-lifecycle event, so the log still derives `Running` and the existing
-  `Control` fold projects it to Pending once the session is reaped; the log and
-  attempt persist and a later wake resumes from `brief`. It **refuses** (nonzero,
-  nothing appended) when the attempt has no pending wake source, since it would
-  otherwise sleep forever. Wake sources sit behind a new abstract seam,
-  `internal/wake` (`wake.Pending`); the only source today is the coordinator one —
-  a `wants:` ticket with at least one non-Done child — with async jobs left for
-  drvctl-055. The completion gate (`internal/completion`) now folds the wake check
-  in: a `park` counts as a hand-off only when the attempt is parkable, and an
-  unmet success turn on a parkable attempt gets a new **`Parked`** outcome instead
-  of an escalation — fixing the case where a `wants:` coordinator that delegated
-  via `resolve --by` (which writes to the child's log) and stopped was escalated
-  onto its own ticket. Non-parkable leaf behaviour (nudge, then escalate) is
-  unchanged; the existing coordinator gate and reverse-`wants:` withdrawal retire
-  the parked attempt to Pending, and `internal/watch` promotes `draiver park` into
-  the supervised log like `review`/`escalate`. Design:
-  `docs/manager-as-worker.md`.
-- **Generalised manager activation — child lifecycle doorbells, the `woken-by`
-  event, and serial queue/replay (drvctl-051).** Reverse-`wants:` activation in
-  `internal/reconcile/reverse_wants.go` (drvctl-041's escalation-only, level-
-  triggered wake) is rewritten into the manager-as-worker wake from
-  `docs/manager-as-worker.md`. A wanted child's **escalation, review, or done**
-  event (the `doorbellTypes` trigger set) rings an **edge-triggered doorbell** — a
-  transition, so a child merely *sitting* in Review never re-wakes its manager. When
-  the spine wakes a pre-digest, enabled manager it first appends a durable
-  **`woken-by` event** to the *manager's own* log (body `woken by <child> #<seq>`,
-  plus new omitempty `woken_child`/`woken_seq` fields on `event.Event` that enter
-  the hash only when set, so existing events hash as before). That one entry serves
-  as dedup record, replay ordering, and the newest line of the manager's cold-start
-  `brief`. The **queue** is derived — doorbells with no matching `woken-by` — and is
-  drained **oldest-first, one doorbell per wake**: a manager with an activation and
-  no later `park` stays desired while it handles it; once it `park`s it is reaped
-  to Pending and re-admitted for the next doorbell. A manager with its **own open
-  escalation is never woken**; its doorbells accumulate and replay resumes once the
-  human resolves it. Behaviour change: a woken coordinator now reconverges to
-  Pending on its own `park`, not when the child's escalation resolves (drvctl-044's
-  test migrated). The staleness watchdog and StartLimit loop-safety were deferred
-  to follow-on tickets.
-- **`draiver log --by <parent>` — edge-authorised cross-ticket log (drvctl-054).**
-  The `log` sibling of `resolve --by` (drvctl-050): a coordinator can push durable
-  direction or context into a child it `wants:` — enabled children + `log --by`
-  (direct) + `resolve --by` (unblock) is how a manager assigns work. The write is
-  authorised by the edge itself: `Repo.LogBy` in `internal/repo` checks the parent's
-  `spec.md` `wants:` names the child and otherwise refuses with "does not want … not
-  authorized", writing nothing. Accepted facts land in the child's log stamped with
-  a `parent:<P>` actor. The bright line is enforced in the gateway, not the caller:
-  `log --by` may only write a fact (`gotcha`/`decision`/`note`/…), never `review`,
-  `done` or another verb-owned lifecycle event — direct is not ratify, so a parent
-  can never move a child Review→Done. The type check runs before the edge load, so a
-  forbidden type is refused without touching the data root.
-- **Manager brief — a `wants:` ticket is told it is a coordinator
-  (drvctl-053).** `brief.Build` (`internal/brief`) used to produce the same brief
-  for every ticket and stripped spec frontmatter, so a `wants:` coordinator could
-  not see its own children and fell back to implementing its spec itself — the one
-  thing a manager must not do. The brief now branches on whether the ticket has
-  `wants:` edges. A manager's brief gains a **`## Your team`** roster (each child's
-  control state, from the `project.Control` fold over its latest attempt, plus that
-  child's open escalations); the **coordinator protocol** (your spec is a charter,
-  not a work item; assess; `resolve --by` / `log --by` what you can; escalate
-  **once**, consolidated, only when a human is really needed; then `park`); and the
-  **wake reason** — the `woken-by` activation event from drvctl-051, rendered as the
-  freshest tail of the brief. A ticket with no `wants:` edges gets the worker brief
-  unchanged. This reverses the "no special brief" line in
-  `docs/capabilities-and-supervision.md` (design in `docs/manager-as-worker.md`).
-  Covered by `features/progressive-brief/manager-brief.feature` and unit tests.
-- **Manager signal on the board — coordinator cards show their wake reason and
-  queue depth (drvweb-023).** A running manager used to look like any running
-  ticket, and its Pending→Running→Pending oscillation was invisible. Now a ticket
-  carrying `wants:` edges renders as a distinct **coordinator card**
-  (`card-coordinator`, a green border) whose line surfaces the control plane's own
-  recorded reason: "manager — on it, re: `C1`" from its latest `woken-by`
-  activation event (drvctl-051), plus "· N queued" for child doorbells that have
-  no activation yet, or "manager — idle" when there is no active wake. The signal
-  is derived in the `project` package (`DeriveCoordinatorSignal`,
-  `internal/project/coordinator.go`) rather than by importing the reconciler. The
-  Capability panel on the detail page (drvweb-017) gains the same line for the
-  manager's **own** current action, not just its children's states. Also fixes a
-  board bug where a Pending card's `WaitingReason` such as "escalated to `P`"
-  showed literal backticks: it (and the Capability panel's gate reasons) now
-  renders through the `inlineMD` markdown pipeline. Acceptance coverage in
-  `features/manager-signal/board.feature`; a follow-up commit points its
-  screenshots at the full board page `/` rather than the unstyled `/board`
-  partial.
-- **Park pending your own async work — detached `draiver test --detach` plus
-  worker park/wake (drvctl-055).** A worker running a long test used to hold a live
-  agent idling (context and token burn) or stop with no handoff, which the
-  completion gate turned into a **false escalation** a human had to discern and
-  resolve. The pattern is now `draiver test --detach && draiver park`:
-  **`--detach`** requires a clean tree, writes a new **`async-job`** launch marker
-  on the attempt's own log, spawns a `setsid`-detached runner (the hidden
-  `__detached-test` verb, logging to `detached/test-NNNN.log`) and returns at once;
-  when the climb finishes it lands a durable **`test-result`** carrying a new
-  `Outcome` (`pass`/`fail`) and an artefact pointer. `wake.Pending` gains an
-  **`AsyncJob`** source, so the parked worker shows as **Pending**, not Needs-me.
-  A new reconciler pass (`internal/reconcile/async_jobs.go`,
-  `reconcileAsyncJobs`) holds it Pending while the job is in flight and, when the
-  result lands, authors a `woken-by` (reusing drvctl-051's path activation, with
-  the worker's own ticket as the woken child) to cold-start it with the result as
-  the brief tail — to claim review on green or iterate on red. `launch && park` is
-  safe: a failed launch short-circuits `&&` (and answers its own marker), and
-  park's no-wake-source refusal (drvctl-052) backs it up. As a safety net, the
-  completion gate **auto-parks** a handoff-less turn-end when a live async job
-  exists instead of escalating. Retire now keeps the worktree warm while an
-  `AsyncJob` is in flight (the detached climb runs there), and `draiver review`'s
-  green gate ignores `Outcome: fail` results. The handbook and onboarding skill
-  gain a new §8 documenting the `launch-async && park` pattern; BDD coverage lives
-  in `features/manager-as-worker/park-async.feature`.
 - **`draiver park --clear` — the operator inverse of park, force-resolving an
   attempt's pending wake source (drv-031).** When the thing meant to wake a parked
   attempt never fires (e.g. a detached `draiver test` runner dies), the only escape
@@ -501,6 +415,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via `resolveCtlTarget`, renamed to the neutral `resolveTarget`. Covered by
   `cmd/park_test.go` and a BDD scenario in
   `features/manager-as-worker/park-async.feature`.
+- **`recall` gains `--tags`, the `ticket@attempt` address form, and a header naming
+  the resolved attempt (drv-032).** `draiver recall <ticket> --tags` lists the
+  distinct tags of the in-scope facts, sorted alphabetically with a per-tag fact
+  count; it honours `--type`/`--tag`/`--grep`/`--all`, refuses (writing nothing)
+  alongside positional seqs or `--chain`, and prints `(no tags)` when empty. The
+  positional ticket now goes through the shared `ticket[@attempt]` parser, so
+  `recall drv-030@0001` (and `… 3 4`, `--chain`, `--tags`) targets that attempt;
+  an explicit `@attempt` wins over `--attempt`/`$DRAIVER_ATTEMPT`, and a missing
+  ticket or attempt errors. Recall no longer hides sibling attempts: a
+  `# <ticket>@<attempt>` header goes to **stderr** (stdout stays clean for pipes),
+  extended with `— latest of N attempts (draiver attempt ls <ticket>)` when the
+  attempt was picked implicitly and others exist. Usage now reads
+  `recall <ticket[@attempt]> [SEQ...]`, matching the `ctl` verbs; `brief` keeps
+  `TICKET` as it does not accept `@attempt` yet. For review, a sandboxed docker
+  **ttyd** web terminal (`review-env/ttyd/`, declared as the `review-cli`
+  environment in `.test-pyramid.yaml`) serves a seeded multi-attempt `DEMO-033`
+  ticket in the browser. Covered by `cmd/recall_test.go` and
+  `recall-attempt-aware.feature`.
 - **Multiple review environments per attempt, each launched and torn down
   independently (drv-034).** The attempt page used to offer only the one environment
   named by the per-repo `reviewEnvironment` setting, so a pyramid declaring both
@@ -520,24 +452,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   note when it names a missing or non-review-ready env. BDD scenarios in
   `features/attempt-page/review-env.feature` (`@drv-034`) capture both the
   offered-to-launch and two-running-at-once states with screenshots.
-- **`recall` gains `--tags`, the `ticket@attempt` address form, and a header naming
-  the resolved attempt (drv-032).** `draiver recall <ticket> --tags` lists the
-  distinct tags of the in-scope facts, sorted alphabetically with a per-tag fact
-  count; it honours `--type`/`--tag`/`--grep`/`--all`, refuses (writing nothing)
-  alongside positional seqs or `--chain`, and prints `(no tags)` when empty. The
-  positional ticket now goes through the shared `ticket[@attempt]` parser, so
-  `recall drv-030@0001` (and `… 3 4`, `--chain`, `--tags`) targets that attempt;
-  an explicit `@attempt` wins over `--attempt`/`$DRAIVER_ATTEMPT`, and a missing
-  ticket or attempt errors. Recall no longer hides sibling attempts: a
-  `# <ticket>@<attempt>` header goes to **stderr** (stdout stays clean for pipes),
-  extended with `— latest of N attempts (draiver attempt ls <ticket>)` when the
-  attempt was picked implicitly and others exist. Usage now reads
-  `recall <ticket[@attempt]> [SEQ...]`, matching the `ctl` verbs; `brief` keeps
-  `TICKET` as it does not accept `@attempt` yet. For review, a sandboxed docker
-  **ttyd** web terminal (`review-env/ttyd/`, declared as the `review-cli`
-  environment in `.test-pyramid.yaml`) serves a seeded multi-attempt `DEMO-033`
-  ticket in the browser. Covered by `cmd/recall_test.go` and
-  `recall-attempt-aware.feature`.
 - **`recall` instrumentation and `draiver recall-stats` — measure belief
   utilisation (drv-036).** `draiver recall` now records one JSON line per
   invocation (ticket, attempt, read mode, and the seq(s) surfaced) to a root-level
@@ -615,6 +529,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--from`/`--repo`/`--base`/`--model`/`--tool`. Known quirk: a bare `recall
   <TICKET>` on a ticket mixing numbered and named attempts resolves to the
   lexically last id, which is the name.
+- **Generalised manager activation — child lifecycle doorbells, the `woken-by`
+  event, and serial queue/replay (drvctl-051).** Reverse-`wants:` activation in
+  `internal/reconcile/reverse_wants.go` (drvctl-041's escalation-only, level-
+  triggered wake) is rewritten into the manager-as-worker wake from
+  `docs/manager-as-worker.md`. A wanted child's **escalation, review, or done**
+  event (the `doorbellTypes` trigger set) rings an **edge-triggered doorbell** — a
+  transition, so a child merely *sitting* in Review never re-wakes its manager. When
+  the spine wakes a pre-digest, enabled manager it first appends a durable
+  **`woken-by` event** to the *manager's own* log (body `woken by <child> #<seq>`,
+  plus new omitempty `woken_child`/`woken_seq` fields on `event.Event` that enter
+  the hash only when set, so existing events hash as before). That one entry serves
+  as dedup record, replay ordering, and the newest line of the manager's cold-start
+  `brief`. The **queue** is derived — doorbells with no matching `woken-by` — and is
+  drained **oldest-first, one doorbell per wake**: a manager with an activation and
+  no later `park` stays desired while it handles it; once it `park`s it is reaped
+  to Pending and re-admitted for the next doorbell. A manager with its **own open
+  escalation is never woken**; its doorbells accumulate and replay resumes once the
+  human resolves it. Behaviour change: a woken coordinator now reconverges to
+  Pending on its own `park`, not when the child's escalation resolves (drvctl-044's
+  test migrated). The staleness watchdog and StartLimit loop-safety were deferred
+  to follow-on tickets.
+- **`draiver park` — suspend an attempt to Pending without escalating
+  (drvctl-052).** A third legitimate way for an agent to end its turn, alongside
+  `review` and `escalate`: **`draiver park TICKET [REASON]`** appends a durable
+  `park` turn-end and exits 0, leaving the attempt **Pending** (enabled, no live
+  agent, self-resolving) with nothing on the human's inbox. `park` is a
+  non-lifecycle event, so the log still derives `Running` and the existing
+  `Control` fold projects it to Pending once the session is reaped; the log and
+  attempt persist and a later wake resumes from `brief`. It **refuses** (nonzero,
+  nothing appended) when the attempt has no pending wake source, since it would
+  otherwise sleep forever. Wake sources sit behind a new abstract seam,
+  `internal/wake` (`wake.Pending`); the only source today is the coordinator one —
+  a `wants:` ticket with at least one non-Done child — with async jobs left for
+  drvctl-055. The completion gate (`internal/completion`) now folds the wake check
+  in: a `park` counts as a hand-off only when the attempt is parkable, and an
+  unmet success turn on a parkable attempt gets a new **`Parked`** outcome instead
+  of an escalation — fixing the case where a `wants:` coordinator that delegated
+  via `resolve --by` (which writes to the child's log) and stopped was escalated
+  onto its own ticket. Non-parkable leaf behaviour (nudge, then escalate) is
+  unchanged; the existing coordinator gate and reverse-`wants:` withdrawal retire
+  the parked attempt to Pending, and `internal/watch` promotes `draiver park` into
+  the supervised log like `review`/`escalate`. Design:
+  `docs/manager-as-worker.md`.
+- **Manager brief — a `wants:` ticket is told it is a coordinator
+  (drvctl-053).** `brief.Build` (`internal/brief`) used to produce the same brief
+  for every ticket and stripped spec frontmatter, so a `wants:` coordinator could
+  not see its own children and fell back to implementing its spec itself — the one
+  thing a manager must not do. The brief now branches on whether the ticket has
+  `wants:` edges. A manager's brief gains a **`## Your team`** roster (each child's
+  control state, from the `project.Control` fold over its latest attempt, plus that
+  child's open escalations); the **coordinator protocol** (your spec is a charter,
+  not a work item; assess; `resolve --by` / `log --by` what you can; escalate
+  **once**, consolidated, only when a human is really needed; then `park`); and the
+  **wake reason** — the `woken-by` activation event from drvctl-051, rendered as the
+  freshest tail of the brief. A ticket with no `wants:` edges gets the worker brief
+  unchanged. This reverses the "no special brief" line in
+  `docs/capabilities-and-supervision.md` (design in `docs/manager-as-worker.md`).
+  Covered by `features/progressive-brief/manager-brief.feature` and unit tests.
+- **`draiver log --by <parent>` — edge-authorised cross-ticket log (drvctl-054).**
+  The `log` sibling of `resolve --by` (drvctl-050): a coordinator can push durable
+  direction or context into a child it `wants:` — enabled children + `log --by`
+  (direct) + `resolve --by` (unblock) is how a manager assigns work. The write is
+  authorised by the edge itself: `Repo.LogBy` in `internal/repo` checks the parent's
+  `spec.md` `wants:` names the child and otherwise refuses with "does not want … not
+  authorized", writing nothing. Accepted facts land in the child's log stamped with
+  a `parent:<P>` actor. The bright line is enforced in the gateway, not the caller:
+  `log --by` may only write a fact (`gotcha`/`decision`/`note`/…), never `review`,
+  `done` or another verb-owned lifecycle event — direct is not ratify, so a parent
+  can never move a child Review→Done. The type check runs before the edge load, so a
+  forbidden type is refused without touching the data root.
+- **Park pending your own async work — detached `draiver test --detach` plus
+  worker park/wake (drvctl-055).** A worker running a long test used to hold a live
+  agent idling (context and token burn) or stop with no handoff, which the
+  completion gate turned into a **false escalation** a human had to discern and
+  resolve. The pattern is now `draiver test --detach && draiver park`:
+  **`--detach`** requires a clean tree, writes a new **`async-job`** launch marker
+  on the attempt's own log, spawns a `setsid`-detached runner (the hidden
+  `__detached-test` verb, logging to `detached/test-NNNN.log`) and returns at once;
+  when the climb finishes it lands a durable **`test-result`** carrying a new
+  `Outcome` (`pass`/`fail`) and an artefact pointer. `wake.Pending` gains an
+  **`AsyncJob`** source, so the parked worker shows as **Pending**, not Needs-me.
+  A new reconciler pass (`internal/reconcile/async_jobs.go`,
+  `reconcileAsyncJobs`) holds it Pending while the job is in flight and, when the
+  result lands, authors a `woken-by` (reusing drvctl-051's path activation, with
+  the worker's own ticket as the woken child) to cold-start it with the result as
+  the brief tail — to claim review on green or iterate on red. `launch && park` is
+  safe: a failed launch short-circuits `&&` (and answers its own marker), and
+  park's no-wake-source refusal (drvctl-052) backs it up. As a safety net, the
+  completion gate **auto-parks** a handoff-less turn-end when a live async job
+  exists instead of escalating. Retire now keeps the worktree warm while an
+  `AsyncJob` is in flight (the detached climb runs there), and `draiver review`'s
+  green gate ignores `Outcome: fail` results. The handbook and onboarding skill
+  gain a new §8 documenting the `launch-async && park` pattern; BDD coverage lives
+  in `features/manager-as-worker/park-async.feature`.
+- **Manager signal on the board — coordinator cards show their wake reason and
+  queue depth (drvweb-023).** A running manager used to look like any running
+  ticket, and its Pending→Running→Pending oscillation was invisible. Now a ticket
+  carrying `wants:` edges renders as a distinct **coordinator card**
+  (`card-coordinator`, a green border) whose line surfaces the control plane's own
+  recorded reason: "manager — on it, re: `C1`" from its latest `woken-by`
+  activation event (drvctl-051), plus "· N queued" for child doorbells that have
+  no activation yet, or "manager — idle" when there is no active wake. The signal
+  is derived in the `project` package (`DeriveCoordinatorSignal`,
+  `internal/project/coordinator.go`) rather than by importing the reconciler. The
+  Capability panel on the detail page (drvweb-017) gains the same line for the
+  manager's **own** current action, not just its children's states. Also fixes a
+  board bug where a Pending card's `WaitingReason` such as "escalated to `P`"
+  showed literal backticks: it (and the Capability panel's gate reasons) now
+  renders through the `inlineMD` markdown pipeline. Acceptance coverage in
+  `features/manager-signal/board.feature`; a follow-up commit points its
+  screenshots at the full board page `/` rather than the unstyled `/board`
+  partial.
 
 ### Changed
 
@@ -705,26 +731,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Git controls on the attempt page — Push and Sync from the web UI
-  (drv-013).** The attempt page gains a **Git** section with two buttons, shown
-  for a non-Done attempt that records a base and repo. Each is a same-origin htmx
-  POST (`/ticket/{id}/{attempt}/git/push`, `.../git/sync`) that returns the live
-  log fragment plus an out-of-band result banner. **Push** goes through the new
-  `worktree.Manager.Push`, draiver's first write to a remote: a plain `git push` of
-  the attempt branch that never uses `--force`, so a non-fast-forward is rejected.
-  **Sync** now brings trunk down in two steps: it fetches the default remote and
-  fast-forwards the local base toward the remote tip (best-effort: with no remote it
-  just back-merges offline, and a fetch or fast-forward fault is only a warning),
-  then back-merges that base into the attempt branch. The two operations live in
-  `land.Push` / `land.Sync`, each records a durable `note`, and `ctl sync` was moved
-  onto `land.Sync` so the CLI and web share one write path. The remote comes from
-  the existing `resolveRemote` (sole remote or config `primary_remote`) and the
-  default branch from the attempt's recorded base, in place of drv-011's per-repo
-  defaults. The old web **"Merged elsewhere — close & pull base"** button and its
-  `POST .../merge-remote` route were **removed**; the CLI `ctl merge --remote` is
-  kept. The spec's **Create PR / Merge PR** buttons were **not built**: they need a
-  forge-API adapter and auth, which draiver has so far avoided, so they are left to
-  a follow-up ticket.
 - **Per-repo settings — default remote, branch and target test rung, stored in the
   global config and edited from the attempt page (drv-011).** Some knobs belong to
   a repo, not an attempt. `config.Config` (`~/.draiver/config.json`) gains a
@@ -767,6 +773,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it isn't shown. The repo dogfoods a `local` environment on its integration rung,
   and `docs/test-pyramid.md` folds the design in. Secret handling for environments
   is a follow-up.
+- **Git controls on the attempt page — Push and Sync from the web UI
+  (drv-013).** The attempt page gains a **Git** section with two buttons, shown
+  for a non-Done attempt that records a base and repo. Each is a same-origin htmx
+  POST (`/ticket/{id}/{attempt}/git/push`, `.../git/sync`) that returns the live
+  log fragment plus an out-of-band result banner. **Push** goes through the new
+  `worktree.Manager.Push`, draiver's first write to a remote: a plain `git push` of
+  the attempt branch that never uses `--force`, so a non-fast-forward is rejected.
+  **Sync** now brings trunk down in two steps: it fetches the default remote and
+  fast-forwards the local base toward the remote tip (best-effort: with no remote it
+  just back-merges offline, and a fetch or fast-forward fault is only a warning),
+  then back-merges that base into the attempt branch. The two operations live in
+  `land.Push` / `land.Sync`, each records a durable `note`, and `ctl sync` was moved
+  onto `land.Sync` so the CLI and web share one write path. The remote comes from
+  the existing `resolveRemote` (sole remote or config `primary_remote`) and the
+  default branch from the attempt's recorded base, in place of drv-011's per-repo
+  defaults. The old web **"Merged elsewhere — close & pull base"** button and its
+  `POST .../merge-remote` route were **removed**; the CLI `ctl merge --remote` is
+  kept. The spec's **Create PR / Merge PR** buttons were **not built**: they need a
+  forge-API adapter and auth, which draiver has so far avoided, so they are left to
+  a follow-up ticket.
 - **BDD execution rung — `draiver test` captures cucumber-JSON from the repo's
   configured runner (drv-016).** A rung in `.test-pyramid.yaml` that sets the new
   optional **`cucumber_json:`** field (the report path, relative to the worktree
@@ -948,6 +974,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **draiver dogfoods its own test pyramid with a Testcontainers integration rung
+  (drv-010).** The repo now has a checked-in `.test-pyramid.yaml` with a `unit`
+  rung (`go test ./...`) and an `integration` rung
+  (`go test -tags=integration ./internal/e2e/integration/...`). drv-009's Review
+  gate therefore runs against draiver's own tickets. The integration tests sit
+  behind the `integration` build tag, so the unit rung stays fast and needs no
+  containers. When it shipped, integration was the target (top) rung; drv-025
+  later made it advisory. A new harness package, `internal/e2e/integration`, lets
+  each test declare the real dependencies it needs:
+  - a Gitea forge container (`forge.go`)
+  - reproducible data-root fixture volumes `empty-board`, `mid-escalation` and
+    `review-ready-to-merge` (`dataroot.go`)
+  - seeded git repos-under-test (`gitrepo.go`)
+  - the served webui binary (`webui.go`)
+
+  The runner builds once and skips cleanly when no container runtime is present
+  (`runtime.go`). Teardown is deterministic through `t.Cleanup` plus the
+  Testcontainers Reaper. The first suite covers a forge round-trip, checking
+  `ctl merge --remote` containment against a live forge: a contained branch goes
+  to `done`, while an uncontained one is refused, records nothing and honours
+  `--escalate`/`--no-escalate`. It also runs webui scenarios against seeded
+  volumes: board columns, one card per attempt and tallies, the review column, an
+  empty board, and Markdown sanitization (an XSS guard). `docs/integration-testing.md`
+  explains how to run the rung locally and notes that it needs Docker.
 - **`internal/pyramid` — load and validate `.test-pyramid.yaml` (drvctl-047).**
   First rung of the test-pyramid epic (drv-009), data model only — nothing executes
   yet. `pyramid.Load(worktreePath)` reads a repo's `.test-pyramid.yaml`: an ordered,
@@ -988,50 +1038,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and fails open: no recorded repo, a non-git base, no live checkout, or no
   `.test-pyramid.yaml` all skip it and review proceeds unchanged; only a genuine git
   fault on a real base surfaces as an error.
-- **draiver dogfoods its own test pyramid with a Testcontainers integration rung
-  (drv-010).** The repo now has a checked-in `.test-pyramid.yaml` with a `unit`
-  rung (`go test ./...`) and an `integration` rung
-  (`go test -tags=integration ./internal/e2e/integration/...`). drv-009's Review
-  gate therefore runs against draiver's own tickets. The integration tests sit
-  behind the `integration` build tag, so the unit rung stays fast and needs no
-  containers. When it shipped, integration was the target (top) rung; drv-025
-  later made it advisory. A new harness package, `internal/e2e/integration`, lets
-  each test declare the real dependencies it needs:
-  - a Gitea forge container (`forge.go`)
-  - reproducible data-root fixture volumes `empty-board`, `mid-escalation` and
-    `review-ready-to-merge` (`dataroot.go`)
-  - seeded git repos-under-test (`gitrepo.go`)
-  - the served webui binary (`webui.go`)
-
-  The runner builds once and skips cleanly when no container runtime is present
-  (`runtime.go`). Teardown is deterministic through `t.Cleanup` plus the
-  Testcontainers Reaper. The first suite covers a forge round-trip, checking
-  `ctl merge --remote` containment against a live forge: a contained branch goes
-  to `done`, while an uncontained one is refused, records nothing and honours
-  `--escalate`/`--no-escalate`. It also runs webui scenarios against seeded
-  volumes: board columns, one card per attempt and tallies, the review column, an
-  empty board, and Markdown sanitization (an XSS guard). `docs/integration-testing.md`
-  explains how to run the rung locally and notes that it needs Docker.
-- **Test-pyramid badge on the board card and attempt header — the cleared rung at
-  HEAD (drvweb-021).** The UI half of the test-pyramid epic (drv-009): a logged
-  `test-result` was otherwise invisible on the board. Board cards (beside the
-  session dot) and the attempt-detail `<h1>` now render a compact pill such as
-  `unit ✓ · integration ✓` — every rung up to the highest one logged at the
-  attempt's current HEAD, folded with drvctl-049's `pyramid.HighestAtHEAD`.
-  Distinct states: **green** (result at HEAD, clean tree); **stale** (results
-  exist but at an older commit — dimmed, dashed, showing the recorded short SHA,
-  `data-stale`); **dirty** (a result names HEAD but the worktree has uncommitted
-  changes — dimmed, flagged `uncommitted`, `data-dirty`, so green means re-running
-  `draiver test` would still pass); and **none** (no `.test-pyramid.yaml` or no
-  result — nothing rendered). It is a read-only projection with no write path and
-  no stored SHA: HEAD and cleanliness are read live from the attempt's worktree
-  (`worktree.HeadSHA`, `worktree.DirtyAt`), falling back — when the daemon has
-  reclaimed the checkout on retire into Review — to the branch tip and committed
-  pyramid file via new `worktree.BranchSHA`/`FileAtBranch` and `pyramid.Parse`, so
-  the badge shows in exactly the column a reviewer looks at. Like `sessionDot`, any
-  git/parse error degrades to no badge. The git reads sit behind an injectable
-  `Server.pyramidGit` seam, exercised by mocked (`pyramid_mock_test.go`) and
-  real-git (`pyramid_render_test.go`) render tests.
 - **Downward resolution over `wants:` with `resolve --by`, and move-up escalation
   under pre-digest (drvctl-050).** Before this change, a coordinator added to the
   human's workload instead of absorbing it. A child escalation landed in Needs-me
@@ -1054,6 +1060,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one wins. Under passthrough the child stays Needs-me. This is purely read-time:
   `draiver status`, the web board and `inbox` change, but the child's log, its
   derived state and the reconciler's admission/wake behaviour do not.
+- **Test-pyramid badge on the board card and attempt header — the cleared rung at
+  HEAD (drvweb-021).** The UI half of the test-pyramid epic (drv-009): a logged
+  `test-result` was otherwise invisible on the board. Board cards (beside the
+  session dot) and the attempt-detail `<h1>` now render a compact pill such as
+  `unit ✓ · integration ✓` — every rung up to the highest one logged at the
+  attempt's current HEAD, folded with drvctl-049's `pyramid.HighestAtHEAD`.
+  Distinct states: **green** (result at HEAD, clean tree); **stale** (results
+  exist but at an older commit — dimmed, dashed, showing the recorded short SHA,
+  `data-stale`); **dirty** (a result names HEAD but the worktree has uncommitted
+  changes — dimmed, flagged `uncommitted`, `data-dirty`, so green means re-running
+  `draiver test` would still pass); and **none** (no `.test-pyramid.yaml` or no
+  result — nothing rendered). It is a read-only projection with no write path and
+  no stored SHA: HEAD and cleanliness are read live from the attempt's worktree
+  (`worktree.HeadSHA`, `worktree.DirtyAt`), falling back — when the daemon has
+  reclaimed the checkout on retire into Review — to the branch tip and committed
+  pyramid file via new `worktree.BranchSHA`/`FileAtBranch` and `pyramid.Parse`, so
+  the badge shows in exactly the column a reviewer looks at. Like `sessionDot`, any
+  git/parse error degrades to no badge. The git reads sit behind an injectable
+  `Server.pyramidGit` seam, exercised by mocked (`pyramid_mock_test.go`) and
+  real-git (`pyramid_render_test.go`) render tests.
 
 ### Changed
 
@@ -1148,26 +1174,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **The board renders the Pending control state with a "waiting on X" reason
-  (drvweb-015).** The zero-attention Pending tier from drvctl-039 now appears on
-  the web board (`GET /`, `/board`). It is a quiet count nested *under* Running in
-  the same vertical rather than a fifth column, with one card per Pending attempt.
-  `board()` now fills the runtime `Desired`/`Live` bits and switches on
-  `a.Control()`, the same overlay `draiver status` applies. A desired, log-Running
-  attempt with no live agent therefore lands in the Pending bucket. Liveness is
-  checked through the injectable `s.alive`, so it agrees with the session dot.
-  Each card shows a quiet reason line from the new
-  `project.WaitingReason(ticket, all, edges)` (stored on a runtime
-  `Attempt.WaitingReason` field). The function works like a read-side copy of
-  the forward gate: it names the predecessors still holding the gate shut
-  (`after:` short of Review, `requires:` short of Done) as *"waiting on SRC-1"*.
-  If no edge is holding the attempt and it is only waiting for admission, it
-  reads *"waiting to start"*. Stable testids are `col-pending`, `count-pending`
-  and `waiting-<ticket>-<attempt>`. The usual 3s board poll recomputes
-  `Control()` on every render, so a card moves from Pending to Running when its
-  gate opens and an agent is admitted. The e2e seed gains a Pending fixture with a
-  Playwright assertion. This change also repairs `e2e/global-setup.ts`, which had
-  been broken since `--repo` became required at creation.
 - **Reverse-`wants:` activation — a child's escalation wakes its Pending
   coordinator (drvctl-041).** The systemd `OnFailure=` analog: enable flows
   *down* a `wants:` edge (drvctl-038), and now escalation flows *up* the same
@@ -1216,6 +1222,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ticket/attempt errors and writes nothing. Target parsing reuses
   `resolveCtlTarget`; `cmd/root.go`'s `appendEvent` is split into a resolver plus a
   new `appendEventAt` core the verbs share. The webui repoint is drvweb-020.
+- **The board renders the Pending control state with a "waiting on X" reason
+  (drvweb-015).** The zero-attention Pending tier from drvctl-039 now appears on
+  the web board (`GET /`, `/board`). It is a quiet count nested *under* Running in
+  the same vertical rather than a fifth column, with one card per Pending attempt.
+  `board()` now fills the runtime `Desired`/`Live` bits and switches on
+  `a.Control()`, the same overlay `draiver status` applies. A desired, log-Running
+  attempt with no live agent therefore lands in the Pending bucket. Liveness is
+  checked through the injectable `s.alive`, so it agrees with the session dot.
+  Each card shows a quiet reason line from the new
+  `project.WaitingReason(ticket, all, edges)` (stored on a runtime
+  `Attempt.WaitingReason` field). The function works like a read-side copy of
+  the forward gate: it names the predecessors still holding the gate shut
+  (`after:` short of Review, `requires:` short of Done) as *"waiting on SRC-1"*.
+  If no edge is holding the attempt and it is only waiting for admission, it
+  reads *"waiting to start"*. Stable testids are `col-pending`, `count-pending`
+  and `waiting-<ticket>-<attempt>`. The usual 3s board poll recomputes
+  `Control()` on every render, so a card moves from Pending to Running when its
+  gate opens and an agent is admitted. The e2e seed gains a Pending fixture with a
+  Playwright assertion. This change also repairs `e2e/global-setup.ts`, which had
+  been broken since `--repo` became required at creation.
 - **Capability view — a ticket's `wants:` sub-fleet and its supervision dial on the
   detail page (drvweb-017).** When a ticket carries `wants:` edges (a Capability),
   its attempt detail page (`ticket.html`) gains a **Capability** panel listing each
@@ -1283,58 +1309,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it does not accept the flag (pairs with the drvctl-033 version pin). With both
   keys unset the launch is byte-identical to before. Attempt-level A/B cohorts are
   left to drvctl-036/drvweb-013.
-- **Prompt-cache panel on the attempt detail page (drvweb-012).** The attempt
-  view (`/ticket/{id}/{attempt}`) gains a cache panel above the spec that shows the
-  drvctl-031 telemetry, so checking whether caching worked no longer means reading
-  `meter.json` by hand. `caching_active` is the headline yes/no, followed by cache
-  read vs written tokens, hit ratio, normalised work, and billed vs uncached
-  input-rate token equivalents with the fraction saved. These are token
-  equivalents, not dollars, because the metrics carry no price. A
-  `caching_active: false` attempt is visually distinct: the panel turns amber
-  (`.cache-inactive`) and the flag shows ✕ "the prefix never cached", so the
-  signal does not rely on colour alone. The metrics are only folded in when an
-  attempt retires with a metered session, so an in-flight attempt shows a quiet
-  "recorded when this attempt retires" placeholder instead of a grid of zeros.
-  `project.Attempt` now exposes the folded `agent.Metrics`. The cross-attempt
-  amortisation view is left to drvweb-013.
-- **Cross-attempt, per-repo prompt-cache rollup with A/B cohorts (drvweb-013).**
-  The caching win is cross-ticket amortisation — every attempt after the first on
-  a repo reads the shared prefix at ~10% — which the per-attempt cache panel
-  (drvweb-012) cannot show. A new **`/cache`** page, linked from the board topbar
-  ("Cache rollup →"), aggregates every metered attempt per repo: hit ratio, cache
-  read/written, normalised work, billed-vs-uncached input-equivalents, and saved
-  fraction. Aggregation (`repoRollups` in `internal/web/rollup.go`) is pure and
-  deterministic and sums raw token counts before deriving ratios — never averaging
-  per-attempt ratios. **A/B cohorts** split attempts by whether caching actually
-  engaged (`agent.Metrics.CachingActive`) and compare the on/off cohorts side by
-  side on normalised cost and outcome (terminal-state distribution). A per-repo
-  **caching-health line** reads `ok` when reads dominate, `warn` when cache
-  creation dominates (the silent-invalidator smell of a busted shared prefix), and
-  `off` when caching never engaged. Because no per-attempt cache-config tag exists
-  yet (drvctl-032 deferred it), a flag-on run whose prefix busted lands in the off
-  cohort; the page caption says so. The "saved" projection (`cacheCost`) is now
-  shared with the per-attempt panel so the figure means the same on both. The page
-  is a static report, not a polled region.
-- **Cache-win metrics on the attempt prompt-cache panel — cost avoided, billed vs
-  uncached, and the reuse factor (drvweb-018).** The drvweb-012 panel led with
-  `cache_hit_ratio`, a whole-session average bounded at 1 that understates reuse and
-  carries no cost figure. `agent.Metrics` gains three derivations from the existing
-  `Totals` (no new capture): **`ReadCreationRatio`** (`cache_read/cache_creation`,
-  the unbounded ">100%" reuse factor; a `*float64` that is `null`/"—" when nothing
-  was written), **`CostAvoidedInputTokens`** (uncached baseline minus
-  `BilledInputTokens()`, i.e. `0.9·read − 0.25·creation`, deliberately unclamped so
-  a write-never-read session shows negative) and **`PctCostAvoided`** (that as a
-  share of baseline). The panel now leads with **equivalent API cost avoided** ($
-  and % of prompt spend — a modelled figure, since the daemon runs on subscription
-  OAuth), a **billed-vs-uncached** dollar bar, and the **reuse factor** (`×N` /
-  `N%`); the old ratio is relabelled "share served from cache", and every metric
-  carries a provenance-style `(i)` hover explaining it and what a good result looks
-  like. A minimal input-price lookup in `internal/web/pricing.go` prices
-  opus-4.8 at $5/1M; an unknown model falls back to input-equivalent tokens with no
-  `$`. `attempt.parseMeta` recomputes the derived fields from the raw token counts,
-  so attempts metered before this change no longer read as `0`. Because attempts
-  don't yet persist a resolved model id, live panels currently show the
-  token-equivalent figures rather than dollars.
+- **Pin the Claude Code adapter version for a session's life and gate auto-update
+  (drvctl-033).** A background Claude Code upgrade shifts the preset system prompt
+  and tool definitions, busting the shared prompt-cache prefix fleet-wide and
+  silently eroding the drvctl-032/034 caching win on every release. The control
+  plane now holds that invariant. **Record:** a new `claudecode.Version` probes
+  `claude --version` (`2.1.216 (Claude Code)` → `2.1.216`) once at daemon start;
+  the reconciler pins it into every session's provenance as `AdapterVersion` in
+  `session.json`, folded into `attempt.md` as `adapter_version:` on retire beside
+  `protocol_version`. **Pin:** supervised sessions now launch with
+  `DISABLE_AUTOUPDATER=1` alongside `ENABLE_PROMPT_CACHING_1H=1`, so no
+  mid-session upgrade can occur — upgrades are operator-driven, between sessions.
+  **Attribute:** the drvctl-036 canary's `adapterVersion` loader (previously a
+  stub returning `""`) now reads the recorded version, so a busted turn-1 prefix
+  is attributed to a version bump rather than reported as "version unavailable".
+  A failed version probe is non-fatal — `draiverctld` logs it, records an empty
+  version, and the canary degrades to "unattributable" rather than refusing to
+  boot.
 - **`draiver canary` — a silent-invalidator canary for the shared prompt-cache
   prefix, plus the flag-on/flag-off validation run (drvctl-036).** The capstone of
   the prompt-cache change set (drvctl-032/033/034). A new read-only verb, **`draiver
@@ -1358,23 +1349,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   228% to 335%, and cwd/git/path behaviour showed 6/6 parity — so the flag was made
   the operator default in `~/.draiver/config.json` (the code default in
   `internal/config` is unchanged).
-- **Pin the Claude Code adapter version for a session's life and gate auto-update
-  (drvctl-033).** A background Claude Code upgrade shifts the preset system prompt
-  and tool definitions, busting the shared prompt-cache prefix fleet-wide and
-  silently eroding the drvctl-032/034 caching win on every release. The control
-  plane now holds that invariant. **Record:** a new `claudecode.Version` probes
-  `claude --version` (`2.1.216 (Claude Code)` → `2.1.216`) once at daemon start;
-  the reconciler pins it into every session's provenance as `AdapterVersion` in
-  `session.json`, folded into `attempt.md` as `adapter_version:` on retire beside
-  `protocol_version`. **Pin:** supervised sessions now launch with
-  `DISABLE_AUTOUPDATER=1` alongside `ENABLE_PROMPT_CACHING_1H=1`, so no
-  mid-session upgrade can occur — upgrades are operator-driven, between sessions.
-  **Attribute:** the drvctl-036 canary's `adapterVersion` loader (previously a
-  stub returning `""`) now reads the recorded version, so a busted turn-1 prefix
-  is attributed to a version bump rather than reported as "version unavailable".
-  A failed version probe is non-fatal — `draiverctld` logs it, records an empty
-  version, and the canary degrades to "unattributable" rather than refusing to
-  boot.
 - **Dependency edges in `spec.md` — `wants:`/`after:`/`requires:` (drvctl-037).**
   The unit file gains its first *relational* fields: three optional frontmatter
   lists of ticket ids — `wants:` (enable-propagation), `after:` (gate on a
@@ -1393,24 +1367,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **self-edge or any edge that would close a cycle is refused** with the offending
   path (`A → B → A`), across the union of all three relation kinds, and a refused
   edit rewrites nothing.
-- **Archive an attempt from its board card — green tick to accept, grey cross
-  to close (drvweb-019).** Until now nothing could take a card off the board, so it
-  only grew. Each card now has a hover-revealed control: a **green ✓** on Done
-  cards (accept and file away) and a **grey ✕** on Running / Stuck / Review cards
-  (close an attempt that will not finish). Both ask for an `hx-confirm`, then
-  `POST /ticket/{id}/{attempt}/archive`, and the board region re-renders so the
-  card disappears and the column counts update in one swap. Archive is a
-  **reversible flag derived from the log**, mirroring `enable`/`disable`: new
-  `archive` / `unarchive` event types and `project.DeriveArchived` (last event
-  wins, default off), exposed as `project.Attempt.Archived`. It is about board
-  membership only and is independent of the attempt's state; the existing `done`
-  event is not reused. The sentiment travels in a new `outcome` frontmatter field
-  (`accepted` | `abandoned`), which the server works out from the attempt's
-  state. The field is omitempty, so hashes of existing events are unchanged. The
-  route writes through `ticketlog.Append` directly (there is no CLI verb), is
-  idempotent and same-origin guarded, and `board()` skips archived attempts. The
-  cross records board membership only and does not stop a session. There is no
-  un-archive button yet; an `unarchive` event restores a card.
 - **Transitive enable/disable down `wants:` — desired-ness flows to children
   (drvctl-038).** The reconciler's `desired()` gains a third path,
   **enabled-via-parent**: an attempt is desired if it is directly enabled *or* a
@@ -1470,6 +1426,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down from a gate-held (Pending) parent; the gate trims *admission*, not
   desired-ness. No new log event and no on-disk scheduler state — the gate is a
   derived computation re-run every tick.
+- **Prompt-cache panel on the attempt detail page (drvweb-012).** The attempt
+  view (`/ticket/{id}/{attempt}`) gains a cache panel above the spec that shows the
+  drvctl-031 telemetry, so checking whether caching worked no longer means reading
+  `meter.json` by hand. `caching_active` is the headline yes/no, followed by cache
+  read vs written tokens, hit ratio, normalised work, and billed vs uncached
+  input-rate token equivalents with the fraction saved. These are token
+  equivalents, not dollars, because the metrics carry no price. A
+  `caching_active: false` attempt is visually distinct: the panel turns amber
+  (`.cache-inactive`) and the flag shows ✕ "the prefix never cached", so the
+  signal does not rely on colour alone. The metrics are only folded in when an
+  attempt retires with a metered session, so an in-flight attempt shows a quiet
+  "recorded when this attempt retires" placeholder instead of a grid of zeros.
+  `project.Attempt` now exposes the folded `agent.Metrics`. The cross-attempt
+  amortisation view is left to drvweb-013.
+- **Cross-attempt, per-repo prompt-cache rollup with A/B cohorts (drvweb-013).**
+  The caching win is cross-ticket amortisation — every attempt after the first on
+  a repo reads the shared prefix at ~10% — which the per-attempt cache panel
+  (drvweb-012) cannot show. A new **`/cache`** page, linked from the board topbar
+  ("Cache rollup →"), aggregates every metered attempt per repo: hit ratio, cache
+  read/written, normalised work, billed-vs-uncached input-equivalents, and saved
+  fraction. Aggregation (`repoRollups` in `internal/web/rollup.go`) is pure and
+  deterministic and sums raw token counts before deriving ratios — never averaging
+  per-attempt ratios. **A/B cohorts** split attempts by whether caching actually
+  engaged (`agent.Metrics.CachingActive`) and compare the on/off cohorts side by
+  side on normalised cost and outcome (terminal-state distribution). A per-repo
+  **caching-health line** reads `ok` when reads dominate, `warn` when cache
+  creation dominates (the silent-invalidator smell of a busted shared prefix), and
+  `off` when caching never engaged. Because no per-attempt cache-config tag exists
+  yet (drvctl-032 deferred it), a flag-on run whose prefix busted lands in the off
+  cohort; the page caption says so. The "saved" projection (`cacheCost`) is now
+  shared with the per-attempt panel so the figure means the same on both. The page
+  is a static report, not a polled region.
 - **Edit dependency edges from the web UI (drvweb-016).** The attempts-index page
   (`/ticket/{id}`) gains a quiet **Dependencies** editor — the drvweb-009
   provenance inline-edit style reused, but scoped to `spec.md` (ticket-level,
@@ -1483,6 +1471,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   editor, the verb gains a **`--set` flag**: each relation you pass *replaces* its
   set instead of adding to it (a blank value clears that relation; omitted
   relations are untouched), so deleting an id in the UI actually removes the edge.
+- **Cache-win metrics on the attempt prompt-cache panel — cost avoided, billed vs
+  uncached, and the reuse factor (drvweb-018).** The drvweb-012 panel led with
+  `cache_hit_ratio`, a whole-session average bounded at 1 that understates reuse and
+  carries no cost figure. `agent.Metrics` gains three derivations from the existing
+  `Totals` (no new capture): **`ReadCreationRatio`** (`cache_read/cache_creation`,
+  the unbounded ">100%" reuse factor; a `*float64` that is `null`/"—" when nothing
+  was written), **`CostAvoidedInputTokens`** (uncached baseline minus
+  `BilledInputTokens()`, i.e. `0.9·read − 0.25·creation`, deliberately unclamped so
+  a write-never-read session shows negative) and **`PctCostAvoided`** (that as a
+  share of baseline). The panel now leads with **equivalent API cost avoided** ($
+  and % of prompt spend — a modelled figure, since the daemon runs on subscription
+  OAuth), a **billed-vs-uncached** dollar bar, and the **reuse factor** (`×N` /
+  `N%`); the old ratio is relabelled "share served from cache", and every metric
+  carries a provenance-style `(i)` hover explaining it and what a good result looks
+  like. A minimal input-price lookup in `internal/web/pricing.go` prices
+  opus-4.8 at $5/1M; an unknown model falls back to input-equivalent tokens with no
+  `$`. `attempt.parseMeta` recomputes the derived fields from the raw token counts,
+  so attempts metered before this change no longer read as `0`. Because attempts
+  don't yet persist a resolved model id, live panels currently show the
+  token-equivalent figures rather than dollars.
+- **Archive an attempt from its board card — green tick to accept, grey cross
+  to close (drvweb-019).** Until now nothing could take a card off the board, so it
+  only grew. Each card now has a hover-revealed control: a **green ✓** on Done
+  cards (accept and file away) and a **grey ✕** on Running / Stuck / Review cards
+  (close an attempt that will not finish). Both ask for an `hx-confirm`, then
+  `POST /ticket/{id}/{attempt}/archive`, and the board region re-renders so the
+  card disappears and the column counts update in one swap. Archive is a
+  **reversible flag derived from the log**, mirroring `enable`/`disable`: new
+  `archive` / `unarchive` event types and `project.DeriveArchived` (last event
+  wins, default off), exposed as `project.Attempt.Archived`. It is about board
+  membership only and is independent of the attempt's state; the existing `done`
+  event is not reused. The sentiment travels in a new `outcome` frontmatter field
+  (`accepted` | `abandoned`), which the server works out from the attempt's
+  state. The field is omitempty, so hashes of existing events are unchanged. The
+  route writes through `ticketlog.Append` directly (there is no CLI verb), is
+  idempotent and same-origin guarded, and `board()` skips archived attempts. The
+  cross records board membership only and does not stop a session. There is no
+  un-archive button yet; an `unarchive` event restores a card.
 
 ### Changed
 
@@ -1503,18 +1529,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the start of the last N complete records and `lineReader` applies it once at
   open. The panel hang is cured without any web change, since `handleAgentLogs`
   passes no `--tail` and so inherits the default.
-- **Pin the 1-hour prompt-cache TTL for every spawned session; record the adapter's
-  auth mode (drvctl-035).** The daemon-level `BaseSpec.Env` built in `newReconciler`
-  (`cmd/ctl.go`) now carries `ENABLE_PROMPT_CACHING_1H=1`, which flows unchanged
-  through `reconcile` → `manage` → the Claude Code adapter onto both spawn and
-  resume, so the shared per-repo prefix stays warm across gaps longer than the
-  default TTL (between tickets on a repo, a session parked on Needs-me). The adapter
-  was confirmed to authenticate via a Claude.ai subscription (OAuth, no
-  `ANTHROPIC_API_KEY`), where the 1h TTL is automatic but silently drops to 5m in
-  usage-credit overage — so the drop-in is a real opt-in, not a no-op. The adapter
-  itself stays auth-agnostic. `docs/prompt-caching.md` gains a "Rung B in practice"
-  section with the per-auth-mode TTL table and where the pin is wired, and its open
-  "adapter auth mode" question is marked resolved.
 - **The invariant draiver protocol moves above the cache wall into the
   system-prompt append; the brief slims to spec + log (drvctl-034).** The protocol
   text is identical for every ticket, but it used to travel in the conversation
@@ -1534,6 +1548,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproducibility, the protocol version is recorded as
   `session.Identity.ProtocolVersion` at spawn and folded into
   `attempt.Meta.ProtocolVersion` (`attempt.md`) when the attempt retires.
+- **Pin the 1-hour prompt-cache TTL for every spawned session; record the adapter's
+  auth mode (drvctl-035).** The daemon-level `BaseSpec.Env` built in `newReconciler`
+  (`cmd/ctl.go`) now carries `ENABLE_PROMPT_CACHING_1H=1`, which flows unchanged
+  through `reconcile` → `manage` → the Claude Code adapter onto both spawn and
+  resume, so the shared per-repo prefix stays warm across gaps longer than the
+  default TTL (between tickets on a repo, a session parked on Needs-me). The adapter
+  was confirmed to authenticate via a Claude.ai subscription (OAuth, no
+  `ANTHROPIC_API_KEY`), where the 1h TTL is automatic but silently drops to 5m in
+  usage-credit overage — so the drop-in is a real opt-in, not a no-op. The adapter
+  itself stays auth-agnostic. `docs/prompt-caching.md` gains a "Rung B in practice"
+  section with the per-auth-mode TTL table and where the pin is wired, and its open
+  "adapter auth mode" question is marked resolved.
 
 ### Fixed
 
@@ -1557,44 +1583,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Set an attempt's repo/base from the board — the provenance table
-  (drvweb-009).** A Review attempt wedged for want of a `base:`/`repo:` (the two
-  fields `ctl merge`/`sync` gate on) could only be unblocked by hand-editing
-  `attempt.md` or recreating the attempt — losing its log and branch. A quiet
-  key/value **provenance table** now sits above the Spec on the attempt detail
-  page, showing the attempt's `repo`/`base`; a Review attempt that records no
-  base gets a merge-blocking callout. Each value reads as plain text until
-  clicked, when it becomes an inline input — the enclosing form posts on any
-  child's `change` (a blur that altered the value) or on Enter, so clicking out
-  saves and there is **no Save button**; an (i) bubble per key carries a
-  hover/focus tooltip explaining what that field gates. The write is not
-  reimplemented in the web layer: `POST /ticket/{id}/{attempt}/provenance` shells
-  **`draiver attempt set`** (drvctl-028), which owns the `attempt.md` write and
-  the field validation, keeping the package's write invariant that the web layer
-  never touches `attempt.md`. Only `repo`/`base` are read from the form (the
-  `tool`/`model` fields the verb also accepts are deliberately out of the UI's
-  scope, the same allow-list discipline the compose box uses); the panel prefills
-  current values, so a blank field means *leave unchanged* — it is omitted from
-  the shell-out, and an all-blank submit is a 400 rather than a 500 from the
-  verb's "nothing to set". No `--actor`: `attempt set` appends no hash-chained
-  event. On success the panel re-renders in place (htmx swap) with the saved
-  values and a confirmation, behind the same-origin and 404 guards as the other
-  writes.
-- **"Merged elsewhere — close & pull" review action (drvweb-010).** A third
-  review action joins Decision and Done on the attempt page —
-  **"Merged elsewhere — close & pull `<base>`"** — the board affordance for a PR
-  landed on the forge. It is shown only for a Review attempt that records **both**
-  a base and a repo, and `POST /ticket/{id}/{attempt}/merge-remote` shells
-  **`draiver ctl merge --remote`** (drvctl-029): the CLI owns the `git fetch` +
-  containment proof + `done` and the best-effort local fast-forward, so the web
-  layer never touches git, per the package write invariant. Unlike the other web
-  writes, the handler returns the verb's **combined stdout** on success — the
-  best-effort pull's result or warning is printed there, not recorded in the
-  `done` event — and pairs the attempt-live fragment (the log region flips to
-  Done, OOB badge/count) with an OOB result banner carrying that message. A
-  zero-exit-with-warning (e.g. a dirty or diverged local base that skipped the
-  pull) is treated as success and displayed; a nonzero exit (a failed containment
-  or fetch) surfaces as a 500 like the other writes.
+- **Per-attempt daemon health log at `session/ctl.jsonl`, surfaced in `ctl logs`
+  (drvctl-027).** When the supervisor cannot run an enabled attempt the failure
+  used to be invisible — `admit` failed every tick with the operational `Logf`
+  defaulting to a no-op and `ctl logs` showing only the agent stream, so a wedged
+  attempt (its branch checked out in another worktree, or a corrupt/empty object
+  at the branch tip) looked idle. Each attempt now gets an append-only,
+  rebuildable `session/ctl.jsonl` (new `Root.SessionCtlLogPath`) recording
+  **edge-triggered** daemon health transitions — an `error-start` when an error
+  class begins affecting the attempt and an `error-end` when it clears, not one
+  line per failed tick. Edges are diffed against an in-memory per-attempt
+  active-class set beside the run table (rebuildable — a restart re-observes and
+  re-emits), and an end-of-tick sweep closes classes for attempts that leave the
+  desired set so the board's red dot resolves instead of stranding on a lone
+  start. The worktree-clash class is recognized by cause — a new
+  `worktree.ErrCreate` sentinel wrapping every `git worktree add` failure — rather
+  than by string-matching git stderr, so it spans *any* cut failure (branch
+  checked out elsewhere, corrupt object at the tip, missing base ref, occupied
+  path); everything else falls to an `admit-failed` catch-all. Class strings are a
+  stable contract with the board's red error dot (drvweb-008); `no-network` /
+  `model-unreachable` stay reserved for a future stream-health seam. `ctl logs`
+  interleaves the health lines with the agent stream in the human render (error
+  role for `start`, system role for `end`, each with its own recorded timestamp)
+  and `-f` follows both files; the daemon's free-text `Logf` now routes to stderr
+  (was a no-op) and `--json` passthrough of `stream.jsonl` is unchanged.
 - **Self-documenting attempt.md/spec.md frontmatter and `draiver attempt set`
   to edit provenance after creation (drvctl-028).** The provenance fields that
   gate the whole land flow (`repo:`/`base:`, which `ctl merge`/`sync` demand)
@@ -1620,29 +1632,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults to the repo's current branch via `resolveBase` when passed empty).
   This verb is the write path a future webui provenance form shells out to
   (drvweb-009).
-- **Live "Agent Logs" stream on the attempt page, plus a capped "more" Spec
-  (drvweb-011).** The attempt detail page showed only the Spec and the ticketlog
-  Log; to watch what the agent was actually doing — tool by tool — a supervisor
-  had to drop to a shell and run `ctl logs -f`. A new collapsible **Agent Logs**
-  section sits between Spec and Log: collapsed by default (`<details>`), on expand
-  it opens a Server-Sent-Events stream (`GET /ticket/{id}/{attempt}/agent-logs`,
-  the web layer's first stream — everything else is htmx polling) that relays the
-  same content `ctl logs -f` prints, the agent stream interleaved with the
-  drvctl-027 `session/ctl.jsonl` health transitions. The handler **shells out to
-  `draiver ctl logs -f`** (the same write-path-reuse discipline as the log/resolve/
-  enable POSTs) and relays each stdout line as one SSE `data:` event, bound to the
-  request context via `exec.CommandContext` so collapsing the panel or leaving the
-  page kills the follow — one connection per expanded panel, none for a collapsed
-  one. Over a pipe the CLI renders **plain, uncoloured** text (`newStreamRenderer`
-  gates styling on `term.IsTerminal`), which is exactly what this ticket wants;
-  ANSI/role colouring is deferred. Lines are rendered into a monospace `<pre>` via
-  `textContent`, never the markdown→HTML path, so the untrusted session content
-  (arbitrary tool output + model prose) cannot inject markup. A hand-run attempt
-  with no session yet shows a quiet placeholder, not an error. Separately, a long
-  Spec no longer pushes the Log off-screen: the Spec is capped to a max-height with
-  a fade and a **more/less** toggle (pure CSS + a small JS toggle, no server change
-  — `SpecHTML` is already rendered and sanitised), and the cap is dropped entirely
-  when the spec is short enough not to need one.
 - **`ctl merge --remote[=NAME]` — close a ticket landed by an external PR
   (drvctl-029).** The increasingly common land path is not `ctl merge` but a PR
   merged on the forge; afterwards the code is in the *remote* base and draiver had
@@ -1683,30 +1672,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server stays strictly read-only and out-of-process — it `os.ReadFile`s
   `ctl.jsonl` itself, exactly as it already reads `session.json` and probes pids,
   never talking to the daemon.
-- **Per-attempt daemon health log at `session/ctl.jsonl`, surfaced in `ctl logs`
-  (drvctl-027).** When the supervisor cannot run an enabled attempt the failure
-  used to be invisible — `admit` failed every tick with the operational `Logf`
-  defaulting to a no-op and `ctl logs` showing only the agent stream, so a wedged
-  attempt (its branch checked out in another worktree, or a corrupt/empty object
-  at the branch tip) looked idle. Each attempt now gets an append-only,
-  rebuildable `session/ctl.jsonl` (new `Root.SessionCtlLogPath`) recording
-  **edge-triggered** daemon health transitions — an `error-start` when an error
-  class begins affecting the attempt and an `error-end` when it clears, not one
-  line per failed tick. Edges are diffed against an in-memory per-attempt
-  active-class set beside the run table (rebuildable — a restart re-observes and
-  re-emits), and an end-of-tick sweep closes classes for attempts that leave the
-  desired set so the board's red dot resolves instead of stranding on a lone
-  start. The worktree-clash class is recognized by cause — a new
-  `worktree.ErrCreate` sentinel wrapping every `git worktree add` failure — rather
-  than by string-matching git stderr, so it spans *any* cut failure (branch
-  checked out elsewhere, corrupt object at the tip, missing base ref, occupied
-  path); everything else falls to an `admit-failed` catch-all. Class strings are a
-  stable contract with the board's red error dot (drvweb-008); `no-network` /
-  `model-unreachable` stay reserved for a future stream-health seam. `ctl logs`
-  interleaves the health lines with the agent stream in the human render (error
-  role for `start`, system role for `end`, each with its own recorded timestamp)
-  and `-f` follows both files; the daemon's free-text `Logf` now routes to stderr
-  (was a no-op) and `--json` passthrough of `stream.jsonl` is unchanged.
+- **Set an attempt's repo/base from the board — the provenance table
+  (drvweb-009).** A Review attempt wedged for want of a `base:`/`repo:` (the two
+  fields `ctl merge`/`sync` gate on) could only be unblocked by hand-editing
+  `attempt.md` or recreating the attempt — losing its log and branch. A quiet
+  key/value **provenance table** now sits above the Spec on the attempt detail
+  page, showing the attempt's `repo`/`base`; a Review attempt that records no
+  base gets a merge-blocking callout. Each value reads as plain text until
+  clicked, when it becomes an inline input — the enclosing form posts on any
+  child's `change` (a blur that altered the value) or on Enter, so clicking out
+  saves and there is **no Save button**; an (i) bubble per key carries a
+  hover/focus tooltip explaining what that field gates. The write is not
+  reimplemented in the web layer: `POST /ticket/{id}/{attempt}/provenance` shells
+  **`draiver attempt set`** (drvctl-028), which owns the `attempt.md` write and
+  the field validation, keeping the package's write invariant that the web layer
+  never touches `attempt.md`. Only `repo`/`base` are read from the form (the
+  `tool`/`model` fields the verb also accepts are deliberately out of the UI's
+  scope, the same allow-list discipline the compose box uses); the panel prefills
+  current values, so a blank field means *leave unchanged* — it is omitted from
+  the shell-out, and an all-blank submit is a 400 rather than a 500 from the
+  verb's "nothing to set". No `--actor`: `attempt set` appends no hash-chained
+  event. On success the panel re-renders in place (htmx swap) with the saved
+  values and a confirmation, behind the same-origin and 404 guards as the other
+  writes.
+- **"Merged elsewhere — close & pull" review action (drvweb-010).** A third
+  review action joins Decision and Done on the attempt page —
+  **"Merged elsewhere — close & pull `<base>`"** — the board affordance for a PR
+  landed on the forge. It is shown only for a Review attempt that records **both**
+  a base and a repo, and `POST /ticket/{id}/{attempt}/merge-remote` shells
+  **`draiver ctl merge --remote`** (drvctl-029): the CLI owns the `git fetch` +
+  containment proof + `done` and the best-effort local fast-forward, so the web
+  layer never touches git, per the package write invariant. Unlike the other web
+  writes, the handler returns the verb's **combined stdout** on success — the
+  best-effort pull's result or warning is printed there, not recorded in the
+  `done` event — and pairs the attempt-live fragment (the log region flips to
+  Done, OOB badge/count) with an OOB result banner carrying that message. A
+  zero-exit-with-warning (e.g. a dirty or diverged local base that skipped the
+  pull) is treated as success and displayed; a nonzero exit (a failed containment
+  or fetch) surfaces as a 500 like the other writes.
+- **Live "Agent Logs" stream on the attempt page, plus a capped "more" Spec
+  (drvweb-011).** The attempt detail page showed only the Spec and the ticketlog
+  Log; to watch what the agent was actually doing — tool by tool — a supervisor
+  had to drop to a shell and run `ctl logs -f`. A new collapsible **Agent Logs**
+  section sits between Spec and Log: collapsed by default (`<details>`), on expand
+  it opens a Server-Sent-Events stream (`GET /ticket/{id}/{attempt}/agent-logs`,
+  the web layer's first stream — everything else is htmx polling) that relays the
+  same content `ctl logs -f` prints, the agent stream interleaved with the
+  drvctl-027 `session/ctl.jsonl` health transitions. The handler **shells out to
+  `draiver ctl logs -f`** (the same write-path-reuse discipline as the log/resolve/
+  enable POSTs) and relays each stdout line as one SSE `data:` event, bound to the
+  request context via `exec.CommandContext` so collapsing the panel or leaving the
+  page kills the follow — one connection per expanded panel, none for a collapsed
+  one. Over a pipe the CLI renders **plain, uncoloured** text (`newStreamRenderer`
+  gates styling on `term.IsTerminal`), which is exactly what this ticket wants;
+  ANSI/role colouring is deferred. Lines are rendered into a monospace `<pre>` via
+  `textContent`, never the markdown→HTML path, so the untrusted session content
+  (arbitrary tool output + model prose) cannot inject markup. A hand-run attempt
+  with no session yet shows a quiet placeholder, not an error. Separately, a long
+  Spec no longer pushes the Log off-screen: the Spec is capped to a max-height with
+  a fade and a **more/less** toggle (pure CSS + a small JS toggle, no server change
+  — `SpecHTML` is already rendered and sanitised), and the cap is dropped entirely
+  when the spec is short enough not to need one.
 
 ### Changed
 
@@ -1735,6 +1761,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Forge-neutral review links on the event log (`review --url`, drv-007).** An
+  event can now carry one or more opaque review links — a draft PR, merge request,
+  or diff URL — set by the agent at the moment it claims review, on the append-only,
+  hash-chained log with full provenance. The schema gains `Links []Link`
+  (`{Rel, Href}`, `yaml:"links,omitempty"`), included in the hashable projection so
+  links are tamper-evident under `draiver audit`; `omitempty` keeps existing
+  link-less events hashing identically, so there is no migration. `draiver review`
+  and `draiver log` gain a repeatable `--url <uri>` (rel defaults to `pr`) and an
+  explicit `--link <rel>=<uri>` for other rels (`mr`, `diff`, `ci`, …). `Rel` is an
+  uninterpreted free label — draiver never parses the host or path and carries no
+  forge-specific code. At append time `Href` must parse as an absolute URL whose
+  scheme is in a **hardcoded `{http, https}` allowlist** (a safety floor,
+  deliberately not operator-configurable — an editable scheme list reopens
+  `javascript:`/`file:`/`data:`); a rejected link fails the command and writes
+  nothing. `config.Config` gains an optional `review_link_hosts` allowlist
+  alongside `Permissions` — empty (the default) admits any http/https host, so the
+  host policy is opt-in and off by default. draiver never fetches the URL.
 - **Landing is now a `ctl` primitive — `ctl merge` / `ctl sync` on a per-attempt
   base branch (drvctl-021).** Every attempt records a `base:` branch (default: the
   bound repo's current branch at create, overridable with `--base` on `draiver
@@ -1752,21 +1795,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disposition, defaulting by actor kind: an `agent:*` land raises a durable
   escalation (→ Needs me, halt), a `human:*` land exits nonzero with a message.
   Conflict / divergence / dirty always abort cleanly and never force.
-- **Inline escalation resolution from the board (drvweb-007).** Each *open*
-  escalation on the attempt timeline now renders a resolution textarea + Resolve
-  button; submitting appends a `resolution` event refing that escalation's seq,
-  clears the block, and leaves Stuck — the board affordance for `draiver resolve`.
-  A resolved escalation shows only "→ resolved by #N". Like the other webui
-  writes, it is not reimplemented in the web layer: `POST
-  /ticket/{id}/{attempt}/resolve` shells `draiver resolve` (runDraiverResolve, via
-  a shared `draiverExe()` helper), so the board and a terminal share one append
-  path. Guards mirror the CLI and close the gap it leaves: same-origin CSRF (403),
-  empty answer (400), and `classifyResolveTarget` rejects an unknown or
-  non-escalation seq (400) and an already-resolved seq (409), all read from
-  derived state rather than the posted form. The textarea carries a stable id +
-  `hx-preserve` so the 3s poll swap never clobbers a half-typed answer and
-  correctly vanishes once resolved. The webui is now a three-write surface (log,
-  resolve, enable).
 - **Agents are prompted to push and attach a review URL when raising review
   (drvctl-026).** The onboarding skill's "Claim review" step (SKILL.md §5) and the
   Loop line now teach the agent to push its attempt branch to a git remote and
@@ -1780,6 +1808,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is unchanged behaviourally — it still only appends and validates the link, never
   pushing or opening a PR — but its `--help` now says so. `config.Config` gains an
   optional `primary_remote` field (omitted → empty).
+- **Review links surfaced as one-click actions on the board (drvweb-004).** A
+  Review-column card whose latest `review` event carries a link now shows a
+  distinct **"Review changes ↗"** action — the primary link (`rel` `pr`/`mr`, else
+  the first) — opening the PR/diff in a new tab (`target="_blank"
+  rel="noopener noreferrer"`), *additional to* and visually separate from the
+  existing internal deep-link. No link → no button (a direct-merge flow degrades to
+  nothing). The action is scoped to the Review column, so a reopened or blocked
+  attempt never shows a stale PR button. On the attempt detail timeline, every
+  event renders its links as chips labelled by `rel`, below the body. Links are
+  rendered **safely**: the http/https scheme allowlist is **re-checked at render**
+  (defense in depth, independent of the append-time check), and the board never
+  fetches or previews the URL.
+- **Sanitizer hardening for rendered markdown bodies (drvweb-004).** Audited the
+  bare `goldmark.New()` renderer: its default already blanks `javascript:`,
+  `vbscript:`, `file:`, and non-image `data:` link hrefs and omits raw HTML, but it
+  admits `data:image/{png,gif,jpeg,webp}` links and autolinks. Added a goldmark AST
+  transformer (`linkPolicy`) that enforces an http/https-or-relative scheme floor on
+  every body link/image/autolink, closing that carve-out so a `data:`/`javascript:`
+  link in an event body can never produce a live href.
 - **Green play button on the board's Running column, the webui's first write
   (drvweb-005).** A Running attempt that is not yet enabled (the supervision axis
   the grey session-dot reads) shows a green play button on its card; clicking it
@@ -1811,54 +1858,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log region and OOB-swaps the state badge and log count, so a Decision/Done
   visibly flips the badge, and a Done then self-cancels the log poll on its next
   `/live` tick (286). The `web` package is now read-mostly rather than read-only.
-- **Forge-neutral review links on the event log (`review --url`, drv-007).** An
-  event can now carry one or more opaque review links — a draft PR, merge request,
-  or diff URL — set by the agent at the moment it claims review, on the append-only,
-  hash-chained log with full provenance. The schema gains `Links []Link`
-  (`{Rel, Href}`, `yaml:"links,omitempty"`), included in the hashable projection so
-  links are tamper-evident under `draiver audit`; `omitempty` keeps existing
-  link-less events hashing identically, so there is no migration. `draiver review`
-  and `draiver log` gain a repeatable `--url <uri>` (rel defaults to `pr`) and an
-  explicit `--link <rel>=<uri>` for other rels (`mr`, `diff`, `ci`, …). `Rel` is an
-  uninterpreted free label — draiver never parses the host or path and carries no
-  forge-specific code. At append time `Href` must parse as an absolute URL whose
-  scheme is in a **hardcoded `{http, https}` allowlist** (a safety floor,
-  deliberately not operator-configurable — an editable scheme list reopens
-  `javascript:`/`file:`/`data:`); a rejected link fails the command and writes
-  nothing. `config.Config` gains an optional `review_link_hosts` allowlist
-  alongside `Permissions` — empty (the default) admits any http/https host, so the
-  host policy is opt-in and off by default. draiver never fetches the URL.
-- **Review links surfaced as one-click actions on the board (drvweb-004).** A
-  Review-column card whose latest `review` event carries a link now shows a
-  distinct **"Review changes ↗"** action — the primary link (`rel` `pr`/`mr`, else
-  the first) — opening the PR/diff in a new tab (`target="_blank"
-  rel="noopener noreferrer"`), *additional to* and visually separate from the
-  existing internal deep-link. No link → no button (a direct-merge flow degrades to
-  nothing). The action is scoped to the Review column, so a reopened or blocked
-  attempt never shows a stale PR button. On the attempt detail timeline, every
-  event renders its links as chips labelled by `rel`, below the body. Links are
-  rendered **safely**: the http/https scheme allowlist is **re-checked at render**
-  (defense in depth, independent of the append-time check), and the board never
-  fetches or previews the URL.
-- **Sanitizer hardening for rendered markdown bodies (drvweb-004).** Audited the
-  bare `goldmark.New()` renderer: its default already blanks `javascript:`,
-  `vbscript:`, `file:`, and non-image `data:` link hrefs and omits raw HTML, but it
-  admits `data:image/{png,gif,jpeg,webp}` links and autolinks. Added a goldmark AST
-  transformer (`linkPolicy`) that enforces an http/https-or-relative scheme floor on
-  every body link/image/autolink, closing that carve-out so a `data:`/`javascript:`
-  link in an event body can never produce a live href.
+- **Inline escalation resolution from the board (drvweb-007).** Each *open*
+  escalation on the attempt timeline now renders a resolution textarea + Resolve
+  button; submitting appends a `resolution` event refing that escalation's seq,
+  clears the block, and leaves Stuck — the board affordance for `draiver resolve`.
+  A resolved escalation shows only "→ resolved by #N". Like the other webui
+  writes, it is not reimplemented in the web layer: `POST
+  /ticket/{id}/{attempt}/resolve` shells `draiver resolve` (runDraiverResolve, via
+  a shared `draiverExe()` helper), so the board and a terminal share one append
+  path. Guards mirror the CLI and close the gap it leaves: same-origin CSRF (403),
+  empty answer (400), and `classifyResolveTarget` rejects an unknown or
+  non-escalation seq (400) and an already-resolved seq (409), all read from
+  derived state rather than the posted form. The textarea carries a stable id +
+  `hx-preserve` so the 3s poll swap never clobbers a half-typed answer and
+  correctly vanishes once resolved. The webui is now a three-write surface (log,
+  resolve, enable).
 
 ### Changed
 
-- **The injected brief now carries the Markdown-when-logging nudge (`draiverctl`,
-  drvctl-020).** The board renders event bodies as Markdown, but that how-to-log
-  guidance only reached agents that loaded the onboarding skill (§3.5) — sessions
-  the supervisor drives get their instructions from the cold-start brief, which
-  carried none, so a supervised agent without the skill logged unstructured blobs.
-  `brief.Build` now prepends a one-line working-instructions preamble,
-  single-sourced from a `workingInstructions` const kept in sync with SKILL §3.5.
-  It rides every cold-start and resume (`protocol.InjectBrief` re-injects the
-  brief after Spawn/Resume) and sits with the spec/log the agent already reads.
 - **Session lifecycle verbs recast around a state-stack "degree axis", and the
   imperative verbs now hand off to the daemon (`draiverctl`, drvctl-016).**
   `start`/`stop`/`restart` were an ad-hoc foreground driver: the resume path blindly
@@ -1896,6 +1913,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spent-but-still-desired run is re-admitted by the daemon. `start --new-attempt`
   forks a parallel branch and leaves the parent running; `restart --new-attempt`
   parks the parent so only the fork runs.
+- **The injected brief now carries the Markdown-when-logging nudge (`draiverctl`,
+  drvctl-020).** The board renders event bodies as Markdown, but that how-to-log
+  guidance only reached agents that loaded the onboarding skill (§3.5) — sessions
+  the supervisor drives get their instructions from the cold-start brief, which
+  carried none, so a supervised agent without the skill logged unstructured blobs.
+  `brief.Build` now prepends a one-line working-instructions preamble,
+  single-sourced from a `workingInstructions` const kept in sync with SKILL §3.5.
+  It rides every cold-start and resume (`protocol.InjectBrief` re-injects the
+  brief after Spawn/Resume) and sits with the spec/log the agent already reads.
 
 ### Fixed
 
@@ -1936,7 +1962,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now report `draiverctld 0.2.2 up — …` / `draiver 0.2.2 webui …` from the same
   source. The reported version *is* the changelog's latest released section; the
   two cannot drift by construction.
-
 - **Session-liveness dot on dashboard cards (`draiver webui`, drvweb-001).** Each
   attempt card gains a coloured runtime-liveness dot: eucalypt green (agent
   running — live pid), wattle gold (stopped — session exists, dead pid, still
@@ -1952,29 +1977,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Attempt-log timestamps render as relative age, full stamp on hover
-  (`draiver webui`, drvweb-002).** The attempt timeline showed each event's
-  timestamp as a raw minute-precision UTC string (`2006-01-02 15:04Z`), forcing
-  readers to mentally diff wall-clock strings and discarding sub-minute ordering.
-  Each entry now renders a relative age instead — "just now", "3 minutes ago",
-  "yesterday", … — inside a `<time>` element whose native `title` tooltip carries
-  the precise second-precision UTC stamp alongside the operator's local time.
-  `static/reltime.js` recomputes the age from the `datetime` attribute on load,
-  after every htmx log-swap, and on a 30s tick, so the age stays live even on a
-  Done attempt whose log region never polls. The Go `relativeAge` and the JS
-  share one set of bucket boundaries, each pinned by a test
-  (`TestRelativeAgeBuckets`, `TestTimelineShowsRelativeTimestamps`).
-
-- **`ctl status` hides Done attempts by default; `--all`/`-a` includes them
-  (`draiverctl`, drvctl-018).** The live view printed one row per attempt,
-  terminal Done ones included, so as closed tickets pile up they drown the
-  Running/Stuck/Review attempts an operator actually cares about. The default
-  list now shows only non-Done attempts; `--all`/`-a` restores the full list, and
-  an explicitly named target (`status <ticket[@attempt]>`) still prints its match
-  regardless of state. When the default filters everything away, a one-line hint
-  reports the hidden Done count and the `--all` opt-in instead of blank output.
-  Scope is `ctl status` only; the web board (`draiver status`) is untouched.
-
 - **`--repo` is required at attempt creation; a repo-less admit escalates instead
   of silently stalling (`draiverctl`, drvctl-017).** Two gaps around a missing
   repo, closed at both ends. **At creation:** `attempt.Create` trims and rejects
@@ -1987,6 +1989,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actionable ask, rather than staying Running+enabled and stalling silently in the
   operational log. The tick never fails as a whole — siblings keep admitting — and
   every other admit failure stays log-only.
+- **`ctl status` hides Done attempts by default; `--all`/`-a` includes them
+  (`draiverctl`, drvctl-018).** The live view printed one row per attempt,
+  terminal Done ones included, so as closed tickets pile up they drown the
+  Running/Stuck/Review attempts an operator actually cares about. The default
+  list now shows only non-Done attempts; `--all`/`-a` restores the full list, and
+  an explicitly named target (`status <ticket[@attempt]>`) still prints its match
+  regardless of state. When the default filters everything away, a one-line hint
+  reports the hidden Done count and the `--all` opt-in instead of blank output.
+  Scope is `ctl status` only; the web board (`draiver status`) is untouched.
+- **Attempt-log timestamps render as relative age, full stamp on hover
+  (`draiver webui`, drvweb-002).** The attempt timeline showed each event's
+  timestamp as a raw minute-precision UTC string (`2006-01-02 15:04Z`), forcing
+  readers to mentally diff wall-clock strings and discarding sub-minute ordering.
+  Each entry now renders a relative age instead — "just now", "3 minutes ago",
+  "yesterday", … — inside a `<time>` element whose native `title` tooltip carries
+  the precise second-precision UTC stamp alongside the operator's local time.
+  `static/reltime.js` recomputes the age from the `datetime` attribute on load,
+  after every htmx log-swap, and on a 30s tick, so the age stays live even on a
+  Done attempt whose log region never polls. The Go `relativeAge` and the JS
+  share one set of bucket boundaries, each pinned by a test
+  (`TestRelativeAgeBuckets`, `TestTimelineShowsRelativeTimestamps`).
 
 ## [0.2.1] - 2026-08-05
 
@@ -2021,7 +2044,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to nudge the state) — the reopen is now a named action, recorded with a reason a
   fresh `brief` can read, and the board and per-attempt state projection show
   Running afterward.
-
 - **Context-window auto-stop — a backstop that halts a runaway session
   (`draiverctl`, drvctl-012).** A session that grows its context window without
   bound keeps burning tokens (and money) until a human notices; `internal/limit`
@@ -2185,7 +2207,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the gate and escalate. Covered by a new live gated-tool case in
   `manual_smoke_test.go` (in-workdir write flows; out-of-workdir write hits the
   gate seam and, denied, does not land).
-
 - **Worktree checkouts no longer live under `.git` — they stalled the agent's
   auto-mode classifier (`draiverctl` Tier 0).** The managed base defaulted to
   `<git-common-dir>/draiver/worktrees/...`, putting every attempt's checkout —

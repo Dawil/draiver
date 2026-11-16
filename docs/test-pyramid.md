@@ -319,7 +319,7 @@ split, and only one survives:
 
 **This repo dogfoods it.** `.test-pyramid.yaml` marks `integration` `required:
 false` (it needs a container runtime and already skips cleanly without one), so
-draiver's own gate requires `unit` + `acceptance` and treats `integration` as
+draiver's own gate requires `changelog` + `unit` + `acceptance` and treats `integration` as
 advisory — altitude keeps it on top of the V, enforcement makes it non-blocking,
 without corrupting the ordering.
 
@@ -332,6 +332,25 @@ must **not** overload the `TestRung` scalar (now the iteration ceiling). Renamin
 `required` to `blocking:`/`gates_review:` was considered and declined: the subtlety
 that an advisory rung is still *run* (to climb past it) is documented here rather than
 encoded in the name.
+
+## Rung environment: `DRAIVER_TICKET` (drv-052)
+
+Every command draiver runs for a rung — `up`, each healthcheck, `run`, `down`, and a
+promotion's `qa` — inherits the caller's environment plus what draiver injects:
+
+| Variable | When | Value |
+|---|---|---|
+| **`DRAIVER_TICKET`** | run from a `draiver/<ticket>/<attempt>` branch (`draiver test`, `test --detach`, `promote`, the board's BDD rerun) | the attempt's ticket id, from the branch; overrides any inherited value |
+| `DRAIVER_ATTEMPT` | inherited, not injected — an agent exports it for its own CLI calls | the attempt id |
+| `DRAIVER_CODEBASE_DIR` / `DRAIVER_OVERLAY_DIR` | an overlay is active (drv-041, below) | the codebase / overlay worktree |
+| `DRAIVER_REVIEW_PORT` / `DRAIVER_REVIEW_INSTANCE` | review environments (drv-020) | the allocated port / instance id |
+| `DRAIVER_PROMOTE_ENV` / `DRAIVER_PROMOTE_BASE` | promotion `qa` (drv-043) | the promotion's env / base |
+
+`DRAIVER_TICKET` exists so a repo can write ticket-keyed checks — this repo's
+`changelog` rung requires `changelog.d/$DRAIVER_TICKET.md` — without draiver knowing
+anything about them. draiver attaches no meaning to the value. Off an attempt branch
+(e.g. a human on `main`) nothing is injected; a rung that needs a ticket should then
+fail loudly (or fall back to its own source) rather than pass silently.
 
 ## Overlays (drv-041): the pyramid from a separate, developer-owned repo
 

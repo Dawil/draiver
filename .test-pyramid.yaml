@@ -11,10 +11,12 @@
 # halts the climb. A required rung may legitimately sit above an advisory one.
 #
 # drv-009's Review gate therefore folds the whole *required set*: every required rung
-# must be green-at-HEAD before a claim is accepted. For this repo that is unit +
-# acceptance; integration is advisory (see below).
+# must be green-at-HEAD before a claim is accepted. For this repo that is changelog +
+# unit + acceptance; integration is advisory (see below).
 #
-#   unit        — today's fast, container-free suite; the near-universal base rung. REQUIRED.
+#   changelog   — drv-052: the ticket's changelog.d/<ticket-id>.md fragment exists and every
+#                 fragment is valid. The cheapest check, so it is the base rung. REQUIRED.
+#   unit        — today's fast, container-free suite. REQUIRED.
 #   acceptance  — drv-019's BDD rung (Gherkin under features/). REQUIRED.
 #   integration — Testcontainers suite (a real Forgejo forge + a real served webui)
 #                 behind the `integration` build tag. ADVISORY (required: false): it
@@ -136,6 +138,15 @@ environments:
         script: git ls-remote --heads forgejo >/dev/null 2>&1
 
 levels:
+  # changelog (drv-052) is the base rung — the cheapest check, so it fails fast before
+  # the Go suite. It requires changelog.d/<ticket-id>.md for the attempt's ticket (draiver
+  # exports $DRAIVER_TICKET to every rung; a hand run falls back to the
+  # draiver/<ticket>/<attempt> branch) and validates EVERY fragment parses, so a
+  # malformed one cannot break the generator later. REQUIRED: the review gate refuses an
+  # attempt with no changelog entry. Format: changelog.d/README.md. The check is this
+  # repo's policy — draiver itself knows nothing about changelogs.
+  - name: changelog
+    run: go run ./cmd/changelog check
   - name: unit
     run: go test ./...
   # acceptance is drv-019's BDD rung: it runs the Gherkin under features/ via the
