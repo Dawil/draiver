@@ -121,7 +121,7 @@ func TestLaunchRevealsURLOnGreen(t *testing.T) {
 	markers := t.TempDir()
 
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	rec, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
+	rec, err := m.Launch(context.Background(), a, markerEnv(markers), nil, nil)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestLaunchFailsOnRedHealthcheck(t *testing.T) {
 		URL:          "http://localhost:${" + reviewenv.EnvPort + "}/",
 	}
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	rec, err := m.Launch(context.Background(), a, env, nil)
+	rec, err := m.Launch(context.Background(), a, env, nil, nil)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -191,11 +191,11 @@ func TestConcurrentEnvsGetDistinctPorts(t *testing.T) {
 	markers := t.TempDir()
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
 
-	r1, err := m.Launch(context.Background(), a1, markerEnv(markers), nil)
+	r1, err := m.Launch(context.Background(), a1, markerEnv(markers), nil, nil)
 	if err != nil || r1.State != reviewenv.Up {
 		t.Fatalf("launch a1: state=%q err=%v msg=%q", r1.State, err, r1.Message)
 	}
-	r2, err := m.Launch(context.Background(), a2, markerEnv(markers), nil)
+	r2, err := m.Launch(context.Background(), a2, markerEnv(markers), nil, nil)
 	if err != nil || r2.State != reviewenv.Up {
 		t.Fatalf("launch a2: state=%q err=%v msg=%q", r2.State, err, r2.Message)
 	}
@@ -240,11 +240,11 @@ func TestConcurrentEnvsSameAttemptIndependent(t *testing.T) {
 	webEnv := namedMarkerEnv(markers, "review")
 	cliEnv := namedMarkerEnv(markers, "review-cli")
 
-	r1, err := m.Launch(context.Background(), a, webEnv, nil)
+	r1, err := m.Launch(context.Background(), a, webEnv, nil, nil)
 	if err != nil || r1.State != reviewenv.Up {
 		t.Fatalf("launch review: state=%q err=%v msg=%q", r1.State, err, r1.Message)
 	}
-	r2, err := m.Launch(context.Background(), a, cliEnv, nil)
+	r2, err := m.Launch(context.Background(), a, cliEnv, nil, nil)
 	if err != nil || r2.State != reviewenv.Up {
 		t.Fatalf("launch review-cli: state=%q err=%v msg=%q", r2.State, err, r2.Message)
 	}
@@ -314,7 +314,7 @@ func TestTeardownConfirmedDown(t *testing.T) {
 	markers := t.TempDir()
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
 
-	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
+	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil, nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -342,7 +342,7 @@ func TestTeardownLeakDetection(t *testing.T) {
 	env.Down = "true" // a down that does NOT actually tear the service down
 
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	up, err := m.Launch(context.Background(), a, env, nil)
+	up, err := m.Launch(context.Background(), a, env, nil, nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -376,7 +376,7 @@ func TestReaperTripsOnIdle(t *testing.T) {
 		MaxAge: 30 * time.Minute,
 		Now:    clk.now,
 	})
-	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
+	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil, nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -411,7 +411,7 @@ func TestProbeFlipsToUnhealthy(t *testing.T) {
 	markers := t.TempDir()
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
 
-	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil)
+	up, err := m.Launch(context.Background(), a, markerEnv(markers), nil, nil)
 	if err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
@@ -457,7 +457,7 @@ func TestLaunchParamOverride(t *testing.T) {
 		"ENV_NAME":            "staging",
 		reviewenv.EnvInstance: "HACK", // override of an injected var: must be ignored
 		"UNDECLARED":          "x",    // not a declared param: must be ignored
-	})
+	}, nil)
 	if err != nil || rec.State != reviewenv.Up {
 		t.Fatalf("launch: state=%q err=%v msg=%q", rec.State, err, rec.Message)
 	}
@@ -500,7 +500,7 @@ func TestLaunchRejectsNonReviewReadyEnv(t *testing.T) {
 	// Missing down + healthcheck: a generic drv-012 env, not review-ready.
 	env := &pyramid.Environment{Name: "weak", Up: "true"}
 	m := reviewenv.New(reviewenv.Options{Root: root, Base: t.TempDir()})
-	if _, err := m.Launch(context.Background(), a, env, nil); err == nil {
+	if _, err := m.Launch(context.Background(), a, env, nil, nil); err == nil {
 		t.Fatal("expected Launch to refuse a non-review-ready env")
 	}
 }
@@ -537,7 +537,7 @@ func TestLaunchRelaysBringUpOutput(t *testing.T) {
 			calls = append(calls, relayCall{up: up, output: output, failed: failed})
 		},
 	})
-	rec, err := m.Launch(context.Background(), a, env, nil)
+	rec, err := m.Launch(context.Background(), a, env, nil, nil)
 	if err != nil || rec.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", rec.State, err)
 	}
@@ -587,7 +587,7 @@ func TestLaunchRelaysFailedBringUpAsError(t *testing.T) {
 			calls = append(calls, relayCall{up: up, output: output, failed: failed})
 		},
 	})
-	rec, err := m.Launch(context.Background(), a, env, nil)
+	rec, err := m.Launch(context.Background(), a, env, nil, nil)
 	if err != nil {
 		t.Fatalf("Launch returned error: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestTeardownRelaysDownOutput(t *testing.T) {
 			calls = append(calls, relayCall{up: up, output: output, failed: failed})
 		},
 	})
-	if up, err := m.Launch(context.Background(), a, env, nil); err != nil || up.State != reviewenv.Up {
+	if up, err := m.Launch(context.Background(), a, env, nil, nil); err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
 	calls = nil // keep only the teardown relays
@@ -667,7 +667,7 @@ func TestProbeNeverRelays(t *testing.T) {
 			calls = append(calls, relayCall{up: up, output: output, failed: failed})
 		},
 	})
-	if up, err := m.Launch(context.Background(), a, markerEnv(markers), nil); err != nil || up.State != reviewenv.Up {
+	if up, err := m.Launch(context.Background(), a, markerEnv(markers), nil, nil); err != nil || up.State != reviewenv.Up {
 		t.Fatalf("launch: %q %v", up.State, err)
 	}
 	calls = nil // only count Probe's relays

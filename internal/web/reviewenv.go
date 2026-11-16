@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/config"
+	"github.com/Dawil/draiver/internal/overlay"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/reviewenv"
@@ -331,17 +332,24 @@ func (s *Server) reviewEnvManager() *reviewenv.Manager {
 // the loaded pyramid. A config read error or no repo yields a blank default; a pyramid
 // that cannot be read yields p=nil — the same best-effort degradation the pyramid badge
 // has.
-func (s *Server) reviewEnvGate(ctx context.Context, a project.Attempt) (defaultName string, p *pyramid.Pyramid) {
+//
+// ov is the pinned overlay revision the pyramid was read from (drv-053), nil for an
+// in-repo pyramid. The panel and the Launch handler both resolve through here, so they
+// agree on which pyramid — and which overlay commit — an env is defined by.
+func (s *Server) reviewEnvGate(ctx context.Context, a project.Attempt) (defaultName string, p *pyramid.Pyramid, ov *overlay.Revision) {
 	if a.Repo == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	if cfg, err := config.Load(""); err == nil {
 		defaultName = cfg.RepoSettings(a.Repo).ReviewEnvironment
 	}
 	if st, ok := s.pyramidGit(ctx, a); ok {
 		p = st.Pyramid
+		if p != nil {
+			ov = st.Overlay
+		}
 	}
-	return defaultName, p
+	return defaultName, p, ov
 }
 
 // reviewEnvSurface projects an attempt into the whole review-env surface VM (drv-034):
@@ -352,7 +360,7 @@ func (s *Server) reviewEnvSurface(ctx context.Context, a project.Attempt) *revie
 	if a.State != project.Review {
 		return nil
 	}
-	defaultName, p := s.reviewEnvGate(ctx, a)
+	defaultName, p, _ := s.reviewEnvGate(ctx, a)
 	mgr := s.reviewEnvManager()
 	load := func(env string) (reviewenv.Record, bool) {
 		rec, ok, err := mgr.Load(a.Ticket, a.ID, env)
@@ -367,20 +375,21 @@ func (s *Server) reviewEnvSurface(ctx context.Context, a project.Attempt) *revie
 // resolveReviewEnvReady resolves one named environment for a handler and confirms it is
 // a declared, review-ready env on the attempt's pyramid. ok is false (the loud-
 // misconfiguration refusal, now per-env) when there is no repo, the pyramid cannot be
-// read, the name is not declared, or the env is not review-ready.
-func (s *Server) resolveReviewEnvReady(ctx context.Context, a project.Attempt, name string) (*pyramid.Environment, bool) {
+// read, the name is not declared, or the env is not review-ready. ov is the pinned
+// overlay revision the env was declared in (drv-053), nil for an in-repo pyramid.
+func (s *Server) resolveReviewEnvReady(ctx context.Context, a project.Attempt, name string) (*pyramid.Environment, *overlay.Revision, bool) {
 	if a.Repo == "" || strings.TrimSpace(name) == "" {
-		return nil, false
+		return nil, nil, false
 	}
-	_, p := s.reviewEnvGate(ctx, a)
+	_, p, ov := s.reviewEnvGate(ctx, a)
 	if p == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	env, found := p.EnvironmentByName(name)
 	if !found || env.ReviewReady() != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	return env, true
+	return env, ov, true
 }
 
 // renderReviewEnvPanel re-renders ONE env's panel fragment — the one-element outerHTML
@@ -400,7 +409,7 @@ func (s *Server) reviewEnvPanelFor(ctx context.Context, a project.Attempt, envNa
 	if a.State != project.Review {
 		return &reviewEnvVM{Attempt: a, EnvSlug: reviewEnvSlug(envName), Missing: true}
 	}
-	env, ok := s.resolveReviewEnvReady(ctx, a, envName)
+	env, _, ok := s.resolveReviewEnvReady(ctx, a, envName)
 	if !ok {
 		return &reviewEnvVM{Attempt: a, EnvName: envName, EnvSlug: reviewEnvSlug(envName), Missing: true}
 	}
@@ -439,7 +448,7 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	// Re-check the gate server-side, now per-env: the affordance only renders behind it,
 	// so a POST naming an env that is not a declared, review-ready env on this attempt's
 	// pyramid is a bad request (writing nothing), not a 500 from Launch.
-	env, ok := s.resolveReviewEnvReady(r.Context(), a, envName)
+	env, ov, ok := s.resolveReviewEnvReady(r.Context(), a, envName)
 	if !ok || a.State != project.Review {
 		http.Error(w, "draiver: not a declared, review-ready environment for this attempt in Review", http.StatusBadRequest)
 		return
@@ -471,7 +480,9 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	// Launch on a background context so tearing down the request does not cancel the
 	// bring-up mid-`up`. The goroutine persists the outcome (up+url / failed); the
 	// panel's status poll surfaces it.
-	go mgr.Launch(context.Background(), a, env, overrides)
+	// ov (drv-053) pins the overlay revision the env was resolved from, so the launch
+	// cuts its overlay checkout at the very commit the panel showed.
+	go mgr.Launch(context.Background(), a, env, overrides, ov)
 	s.renderReviewEnvPanel(w, r.Context(), a, envName)
 }
 
@@ -526,7 +537,7 @@ func (s *Server) handleReviewEnvDown(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if _, ok := s.resolveReviewEnvReady(r.Context(), a, envName); !ok {
+	if _, _, ok := s.resolveReviewEnvReady(r.Context(), a, envName); !ok {
 		http.Error(w, "draiver: not a declared, review-ready environment for this attempt", http.StatusBadRequest)
 		return
 	}

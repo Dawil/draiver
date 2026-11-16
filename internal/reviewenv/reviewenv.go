@@ -28,6 +28,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -38,6 +39,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/overlay"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/pyramid"
 	"github.com/Dawil/draiver/internal/store"
@@ -121,6 +123,17 @@ type Record struct {
 	// Worktree is the absolute path of the dedicated review checkout (removed on a
 	// confirmed teardown; kept on a leak or a failed launch's debugging window).
 	Worktree string `json:"worktree,omitempty"`
+	// OverlayRepo / OverlayCommit / OverlayWorktree record the test-pyramid overlay
+	// (drv-041) a review env was launched from, when the codebase carries no in-repo
+	// pyramid (drv-053): the overlay repo, the exact overlay commit (the attempt's overlay
+	// branch tip, else the overlay HEAD), and the dedicated DETACHED overlay checkout cut
+	// at it — the directory exported as DRAIVER_OVERLAY_DIR, where the env definition was
+	// resolved and its scripts live. All three are empty for an in-repo pyramid. The
+	// overlay worktree shares the codebase worktree's lifecycle: removed on a confirmed
+	// teardown or a failed launch, kept on a leak.
+	OverlayRepo     string `json:"overlay_repo,omitempty"`
+	OverlayCommit   string `json:"overlay_commit,omitempty"`
+	OverlayWorktree string `json:"overlay_worktree,omitempty"`
 	// URL is the expanded, host-floor-validated review link — populated only while Up.
 	URL string `json:"url,omitempty"`
 	// Down is the resolved teardown command captured at launch.
@@ -129,8 +142,9 @@ type Record struct {
 	// confirm-up and red-expected on confirm-down.
 	Healthchecks []pyramid.Healthcheck `json:"healthchecks,omitempty"`
 	// ScriptEnv is the exact KEY=VALUE parameterisation injected at launch (the
-	// DRAIVER_REVIEW_* vars plus any declared params), replayed verbatim into down and
-	// the healthchecks so teardown parameterisation matches bring-up.
+	// DRAIVER_REVIEW_* vars, on the overlay path DRAIVER_CODEBASE_DIR /
+	// DRAIVER_OVERLAY_DIR (drv-053), plus any declared params), replayed verbatim into
+	// down and the healthchecks so teardown parameterisation matches bring-up.
 	ScriptEnv []string `json:"script_env,omitempty"`
 	// Message carries the last probe output or failure detail, surfaced on the panel.
 	Message string `json:"message,omitempty"`
@@ -345,8 +359,18 @@ func (m *Manager) save(id, attempt, env string, rec Record) (Record, error) {
 // params (the web UI's per-param inputs, e.g. ENV_NAME). An override is applied only to
 // a DECLARED param — an entry for an undeclared name is ignored, so a caller can never
 // inject an arbitrary env var into the scripts — and still never shadows an injected
-// DRAIVER_REVIEW_* var. A nil map falls back to every param's declared default.
-func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.Environment, overrides map[string]string) (Record, error) {
+// DRAIVER_* var. A nil map falls back to every param's declared default.
+//
+// ov, when non-nil, is the pinned test-pyramid overlay revision the env was declared in
+// (drv-053) — the caller passes it exactly when the attempt has no in-repo pyramid and
+// an overlay resolved. Launch then cuts a second dedicated DETACHED worktree of the
+// overlay repo at ov.Commit, re-resolves env (by name) from THAT checkout so the
+// definition and the scripts come from one revision, and honours the drv-041 overlay
+// execution contract: cwd stays the codebase review worktree, DRAIVER_CODEBASE_DIR names
+// it and DRAIVER_OVERLAY_DIR names the overlay checkout — persisted in ScriptEnv so down
+// and every healthcheck replay them. ov == nil (an in-repo pyramid) is byte-for-byte the
+// pre-overlay behaviour: no extra env vars, no overlay checkout.
+func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.Environment, overrides map[string]string, ov *overlay.Revision) (Record, error) {
 	if a.Repo == "" {
 		return Record{}, fmt.Errorf("reviewenv: attempt %s/%s records no repo", a.Ticket, a.ID)
 	}
@@ -380,14 +404,61 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	if err != nil {
 		return m.fail(a, rec, fmt.Sprintf("could not allocate a port: %v", err))
 	}
+	wtPath := m.worktreePath(a, env.Name)
+
+	rec.Instance = instance
+	rec.Port = port
+	rec.Commit = commit
+	rec.Worktree = wtPath
+	if ov != nil {
+		rec.OverlayRepo = ov.Repo
+		rec.OverlayCommit = ov.Commit
+		rec.OverlayWorktree = overlayWorktreePath(wtPath)
+	}
+	// Persist the checkout paths BEFORE cutting them, so a crash mid-cut still leaves
+	// a record pointing at whatever was created.
+	if rec, err = m.save(a.Ticket, a.ID, env.Name, rec); err != nil {
+		return rec, err
+	}
+
+	// Clean slate: drop any worktree a prior (failed/leaked) launch left at these paths.
+	m.removeWorktree(ctx, a.Repo, wtPath)
+	if ov != nil {
+		m.removeWorktree(ctx, rec.OverlayRepo, rec.OverlayWorktree)
+	}
+	if err := m.addWorktree(ctx, a.Repo, wtPath, commit); err != nil {
+		return m.fail(a, rec, fmt.Sprintf("could not cut review worktree: %v", err))
+	}
+	if ov != nil {
+		if err := m.addWorktree(ctx, rec.OverlayRepo, rec.OverlayWorktree, ov.Commit); err != nil {
+			m.removeWorktrees(ctx, a, rec)
+			return m.fail(a, rec, fmt.Sprintf("could not cut overlay review worktree of %s at %s: %v", ov.Repo, ov.Commit, err))
+		}
+		// The env definition is resolved from the overlay checkout itself, so what runs
+		// is exactly what that revision declares (the caller's copy was read from the same
+		// pinned commit; re-reading closes any gap rather than trusting it).
+		oenv, err := envFromOverlay(rec.OverlayWorktree, env.Name)
+		if err != nil {
+			m.removeWorktrees(ctx, a, rec)
+			return m.fail(a, rec, err.Error())
+		}
+		env = oenv
+	}
+
 	vars := map[string]string{
 		EnvInstance: instance,
 		EnvPort:     fmt.Sprintf("%d", port),
 	}
-	// Repo-declared params fill in UNDER the injected DRAIVER_REVIEW_* vars: a param
-	// may not shadow an injected one (the injected values always win). Each resolves to
-	// the operator's launch-time override when one was supplied for that declared name,
-	// else the repo-declared default.
+	if ov != nil {
+		// The drv-041 overlay execution contract, now honoured by review envs (drv-053):
+		// injected (so a param can never shadow them) and persisted in ScriptEnv.
+		vars[overlay.EnvCodebaseDir] = wtPath
+		vars[overlay.EnvOverlayDir] = rec.OverlayWorktree
+	}
+	// Repo-declared params fill in UNDER the injected DRAIVER_* vars: a param may not
+	// shadow an injected one (the injected values always win). Each resolves to the
+	// operator's launch-time override when one was supplied for that declared name, else
+	// the repo-declared default.
 	for _, p := range env.Params {
 		name := strings.TrimSpace(p.Name)
 		if name == "" {
@@ -403,12 +474,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		vars[name] = val
 	}
 	scriptEnv := envSlice(vars)
-	wtPath := m.worktreePath(a, env.Name)
 
-	rec.Instance = instance
-	rec.Port = port
-	rec.Commit = commit
-	rec.Worktree = wtPath
 	rec.Down = env.Down
 	rec.Healthchecks = env.Healthchecks
 	rec.ScriptEnv = scriptEnv
@@ -416,21 +482,29 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		return rec, err
 	}
 
-	// Clean slate: drop any worktree a prior (failed/leaked) launch left at this path.
-	m.removeWorktree(ctx, a.Repo, wtPath)
-	if err := m.addWorktree(ctx, a.Repo, wtPath, commit); err != nil {
-		return m.fail(a, rec, fmt.Sprintf("could not cut review worktree: %v", err))
+	// abort is the shared failed-launch cleanup: run `down` best-effort with the SAME
+	// env (a half-started env — a network or container created before `up` errored —
+	// must not leak), relay its output into System Logs (drv-048), then remove both
+	// review worktrees and record the failure.
+	abort := func(msg string) (Record, error) {
+		if strings.TrimSpace(env.Down) != "" {
+			out, derr := m.runScript(ctx, wtPath, env.Down, scriptEnv)
+			m.relay(a, true, out, derr != nil)
+			if derr != nil {
+				m.logf("reviewenv: %s/%s best-effort down after failed launch failed: %v\n%s", a.Ticket, a.ID, derr, out)
+			}
+		}
+		m.removeWorktrees(ctx, a, rec)
+		return m.fail(a, rec, msg)
 	}
 
-	// up — a non-zero exit is an infrastructure fault; tear the worktree back down so
-	// a failed launch leaks nothing. The bring-up output is relayed into the System
-	// Logs stream either way (drv-048), so an operator sees WHY `up` failed.
-	if out, err := m.runScript(ctx, wtPath, env.Up, scriptEnv); err != nil {
-		m.relay(a, true, out, true)
-		m.removeWorktree(ctx, a.Repo, wtPath)
-		return m.fail(a, rec, fmt.Sprintf("up failed: %v\n%s", err, out))
-	} else {
-		m.relay(a, true, out, false)
+	// up — a non-zero exit is an infrastructure fault. The bring-up output is relayed
+	// into the System Logs stream either way (drv-048), so an operator sees WHY `up`
+	// failed; a failed `up` still runs `down` (drv-053) before the worktrees go.
+	out, err := m.runScript(ctx, wtPath, env.Up, scriptEnv)
+	m.relay(a, true, out, err != nil)
+	if err != nil {
+		return abort(fmt.Sprintf("up failed: %v\n%s", err, out))
 	}
 
 	// confirm up — every healthcheck must be green before the URL is revealed.
@@ -438,9 +512,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 		out, err := m.runScript(ctx, wtPath, hc.Script, scriptEnv)
 		m.relay(a, true, out, err != nil)
 		if err != nil {
-			m.runScript(ctx, wtPath, env.Down, scriptEnv) // best-effort down
-			m.removeWorktree(ctx, a.Repo, wtPath)
-			return m.fail(a, rec, fmt.Sprintf("healthcheck %q red after up — environment never came ready:\n%s", hc.Name, strings.TrimSpace(out)))
+			return abort(fmt.Sprintf("healthcheck %q red after up — environment never came ready:\n%s", hc.Name, strings.TrimSpace(out)))
 		}
 	}
 
@@ -449,9 +521,7 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	url := expandURL(env.URL, vars)
 	if strings.TrimSpace(url) != "" {
 		if err := event.ValidateLink(event.Link{Rel: "review", Href: url}, m.opt.ReviewLinkHosts); err != nil {
-			m.runScript(ctx, wtPath, env.Down, scriptEnv)
-			m.removeWorktree(ctx, a.Repo, wtPath)
-			return m.fail(a, rec, fmt.Sprintf("review url %q rejected: %v", url, err))
+			return abort(fmt.Sprintf("review url %q rejected: %v", url, err))
 		}
 	}
 
@@ -460,6 +530,43 @@ func (m *Manager) Launch(ctx context.Context, a project.Attempt, env *pyramid.En
 	rec.Message = ""
 	rec.LastActive = m.now()
 	return m.save(a.Ticket, a.ID, env.Name, rec)
+}
+
+// envFromOverlay resolves the named environment from the overlay checkout's own
+// .test-pyramid.yaml and confirms it is review-ready — the drv-053 guarantee that a
+// review env's definition and its scripts come from the same overlay revision.
+func envFromOverlay(dir, name string) (*pyramid.Environment, error) {
+	p, err := pyramid.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("overlay review checkout %s: %v", dir, err)
+	}
+	if p == nil {
+		return nil, fmt.Errorf("overlay review checkout %s carries no %s", dir, pyramid.FileName)
+	}
+	env, ok := p.EnvironmentByName(name)
+	if !ok {
+		return nil, fmt.Errorf("overlay review checkout %s declares no environment %q", dir, name)
+	}
+	if err := env.ReviewReady(); err != nil {
+		return nil, fmt.Errorf("overlay environment %q is not review-ready: %v", name, err)
+	}
+	return env, nil
+}
+
+// removeWorktrees removes a record's review checkouts: the codebase one and, on the
+// overlay path, the overlay one (drv-053). Best-effort, like removeWorktree.
+func (m *Manager) removeWorktrees(ctx context.Context, a project.Attempt, rec Record) {
+	m.removeWorktree(ctx, a.Repo, rec.Worktree)
+	if rec.OverlayRepo != "" {
+		m.removeWorktree(ctx, rec.OverlayRepo, rec.OverlayWorktree)
+	}
+}
+
+// overlayWorktreePath is the overlay review checkout's path for a codebase review
+// worktree path: a sibling with an ".overlay" suffix (envSlug never yields a '.', so it
+// can never collide with another env's codebase checkout).
+func overlayWorktreePath(codebaseWT string) string {
+	return codebaseWT + ".overlay"
 }
 
 // MarkStarting persists a Starting record synchronously — the race-closer for an
@@ -489,6 +596,7 @@ func (m *Manager) fail(a project.Attempt, rec Record, msg string) (Record, error
 	rec.State = Failed
 	rec.URL = ""
 	rec.Worktree = ""
+	rec.OverlayWorktree = ""
 	rec.Message = msg
 	return m.save(a.Ticket, a.ID, rec.Environment, rec)
 }
@@ -524,27 +632,47 @@ func (m *Manager) Teardown(ctx context.Context, a project.Attempt, env, reason s
 	// confirm down — the same probes, red-expected. Any that stays green means the
 	// service is still answering: a leak. A still-green probe's output is relayed as an
 	// error line (the service should have been gone), a red (expected) one as neutral.
-	var stillGreen []string
+	//
+	// drv-053: a probe that could not genuinely RUN is not evidence the service is gone.
+	// A probe that failed to start (its cwd vanished) or exited 126/127 (the shell could
+	// not find or execute the command — a missing script or tool) is INCONCLUSIVE, and an
+	// inconclusive probe never confirms down: the record is flagged like a leak, so a
+	// broken healthcheck can no longer silently hide a still-running environment.
+	var stillGreen, inconclusive []string
 	for _, hc := range rec.Healthchecks {
 		out, err := m.runScript(ctx, rec.Worktree, hc.Script, rec.ScriptEnv)
-		m.relay(a, false, out, err == nil)
-		if err == nil {
+		switch {
+		case err == nil:
 			stillGreen = append(stillGreen, hc.Name)
+			m.relay(a, false, out, true)
+		case probeInconclusive(err):
+			inconclusive = append(inconclusive, hc.Name)
+			m.relay(a, false, strings.TrimSpace(out+"\n"+err.Error()), true)
+		default:
+			m.relay(a, false, out, false)
 		}
 	}
-	if len(stillGreen) > 0 {
+	if len(stillGreen) > 0 || len(inconclusive) > 0 {
 		rec.State = TeardownFailed
 		rec.URL = ""
-		rec.Message = fmt.Sprintf("teardown (%s): down ran but healthcheck(s) %s still green — environment did not go away (leak)", reason, strings.Join(stillGreen, ", "))
+		var why []string
+		if len(stillGreen) > 0 {
+			why = append(why, fmt.Sprintf("healthcheck(s) %s still green — environment did not go away (leak)", strings.Join(stillGreen, ", ")))
+		}
+		if len(inconclusive) > 0 {
+			why = append(why, fmt.Sprintf("healthcheck(s) %s could not run (missing command/script or checkout) — cannot confirm the environment went away (possible leak)", strings.Join(inconclusive, ", ")))
+		}
+		rec.Message = fmt.Sprintf("teardown (%s): down ran but %s", reason, strings.Join(why, "; "))
 		m.logf("reviewenv: %s/%s LEAK — %s", a.Ticket, a.ID, rec.Message)
 		return m.save(a.Ticket, a.ID, env, rec)
 	}
 
-	// Confirmed down — remove the review worktree and return to rest.
-	m.removeWorktree(ctx, a.Repo, rec.Worktree)
+	// Confirmed down — remove the review worktree(s) and return to rest.
+	m.removeWorktrees(ctx, a, rec)
 	rec.State = Down
 	rec.URL = ""
 	rec.Worktree = ""
+	rec.OverlayWorktree = ""
 	rec.Message = fmt.Sprintf("torn down (%s); confirm-down healthchecks red", reason)
 	return m.save(a.Ticket, a.ID, env, rec)
 }
@@ -747,6 +875,19 @@ func (m *Manager) runScript(ctx context.Context, dir, script string, env []strin
 	cmd.Env = append(os.Environ(), env...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// probeInconclusive reports whether a healthcheck error means the probe never really
+// ran (drv-053): the process could not be started at all (e.g. its working directory is
+// gone), or `sh` exited 126/127 — "found but not executable" / "command not found". A
+// plain non-zero exit from a probe that did run is a genuine red.
+func probeInconclusive(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return true
+	}
+	code := ee.ExitCode()
+	return code == 126 || code == 127
 }
 
 // gitRun runs `git -C repo args...`, folding stderr into the error for legibility.
