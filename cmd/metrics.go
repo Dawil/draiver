@@ -166,9 +166,11 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	if metricsBy != "" {
 		return runHotspots(out, cb, mode, rep)
 	}
-	rep.Aggregate.Groups = metrics.Aggregate(rep.Rows)
-	rep.Aggregate.Inventions = metrics.Inventions(rep.Rows)
-	if docs, err := metrics.UnreadDocs(cb, rep.Rows); err == nil {
+	current, stale := metrics.CurrentRows(rep.Rows)
+	rep.Aggregate.ExcludedStale = stale
+	rep.Aggregate.Groups = metrics.Aggregate(current)
+	rep.Aggregate.Inventions = metrics.Inventions(current)
+	if docs, err := metrics.UnreadDocs(cb, current); err == nil {
 		rep.Aggregate.UnreadDocs = docs
 	}
 	rep.Total = len(rep.Rows)
@@ -249,9 +251,12 @@ type codebaseReport struct {
 	Total           int              `json:"total"`
 	ExcludedRunning int              `json:"excluded_running"`
 	Aggregate       struct {
-		Groups     []metrics.Group     `json:"groups"`
-		UnreadDocs []string            `json:"unread_docs"`
-		Inventions []metrics.Invention `json:"inventions"`
+		Groups     []metrics.Group `json:"groups"`
+		UnreadDocs []string        `json:"unread_docs"`
+		// ExcludedStale counts rows whose stored values are under an older
+		// metrics_version: they are listed, but left out of every aggregate.
+		ExcludedStale int                 `json:"excluded_stale"`
+		Inventions    []metrics.Invention `json:"inventions"`
 	} `json:"aggregate"`
 	Rows []metrics.Row `json:"rows"`
 }
@@ -263,8 +268,9 @@ type hotspotReport struct {
 	MetricsVersion int                      `json:"metrics_version"`
 	By             string                   `json:"by"`
 	Filters        codebaseFilters          `json:"filters"`
-	Attempts       int                      `json:"attempts"` // selected attempts
-	WithMetrics    int                      `json:"with_metrics"`
+	Attempts       int                      `json:"attempts"`       // selected attempts
+	WithMetrics    int                      `json:"with_metrics"`   // rows with current-version metrics
+	ExcludedStale  int                      `json:"excluded_stale"` // rows with older-version metrics, left out
 	Files          []metrics.FileHotspot    `json:"files,omitempty"`
 	Commands       []metrics.CommandHotspot `json:"commands,omitempty"`
 }
@@ -275,7 +281,9 @@ func runHotspots(out io.Writer, cb metrics.Codebase, mode metrics.Mode, rep code
 		Filters:  codebaseFilters{Since: metricsSince, Limit: metricsLimit, IncludeRunning: metricsIncludeRunning},
 		Attempts: len(rep.Rows),
 	}
-	for _, r := range rep.Rows {
+	current, stale := metrics.CurrentRows(rep.Rows)
+	h.ExcludedStale = stale
+	for _, r := range current {
 		if r.Metrics != nil {
 			h.WithMetrics++
 		}
@@ -283,7 +291,7 @@ func runHotspots(out io.Writer, cb metrics.Codebase, mode metrics.Mode, rep code
 	switch metricsBy {
 	case "file":
 		lines, _ := metrics.LinesAtHead(cb.Toplevel)
-		h.Files = metrics.FileHotspots(rep.Rows, lines)
+		h.Files = metrics.FileHotspots(current, lines)
 		if metricsLimit > 0 && len(h.Files) > metricsLimit {
 			h.Files = h.Files[:metricsLimit]
 		}
@@ -291,7 +299,7 @@ func runHotspots(out io.Writer, cb metrics.Codebase, mode metrics.Mode, rep code
 			h.Files = []metrics.FileHotspot{}
 		}
 	case "command":
-		h.Commands = metrics.CommandHotspots(rep.Rows)
+		h.Commands = metrics.CommandHotspots(current)
 		if metricsLimit > 0 && len(h.Commands) > metricsLimit {
 			h.Commands = h.Commands[:metricsLimit]
 		}
@@ -306,8 +314,11 @@ func runHotspots(out io.Writer, cb metrics.Codebase, mode metrics.Mode, rep code
 func renderHotspots(w io.Writer, h hotspotReport) {
 	fmt.Fprintf(w, "codebase %s\nrepo_id  %s\n", h.Target.Toplevel, h.Target.RepoID)
 	fmt.Fprintf(w, "%d attempt(s), %d with metrics, mode %s, metrics_version %d\n", h.Attempts, h.WithMetrics, h.Mode, h.MetricsVersion)
+	if h.ExcludedStale > 0 {
+		fmt.Fprintf(w, "%d attempt(s) left out: stored under an older metrics_version (use --compute)\n", h.ExcludedStale)
+	}
 	if h.WithMetrics == 0 {
-		fmt.Fprintln(w, "\nno stored metrics to rank. Run with --compute to compute and persist them.")
+		fmt.Fprintln(w, "\nno current metrics to rank. Run with --compute to compute and persist them.")
 		return
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -473,6 +484,9 @@ func renderCodebase(w io.Writer, rep codebaseReport, sortBy *metrics.Numeric) {
 		tw.Flush()
 	}
 
+	if rep.Aggregate.ExcludedStale > 0 {
+		fmt.Fprintf(w, "\n%d attempt(s) left out of the aggregates: stored under an older metrics_version (use --compute)\n", rep.Aggregate.ExcludedStale)
+	}
 	fmt.Fprintf(w, "\nunread docs (in the repo at HEAD, read by no selected attempt): %s\n", listOr(rep.Aggregate.UnreadDocs))
 	if len(rep.Aggregate.Inventions) > 0 {
 		fmt.Fprintln(w, "\ninvented files (by name pattern):")

@@ -126,6 +126,21 @@ type Group struct {
 	Metrics     map[string]Stat `json:"metrics"`
 }
 
+// CurrentRows splits off the rows an aggregate may use: those whose metrics are under
+// the current Version. A stale row (stored under older definitions) keeps its values
+// for display but would mix definitions in a median, so it is counted, not folded.
+// Rows without metrics pass through: aggregates count them but they carry no values.
+func CurrentRows(rows []Row) (current []Row, stale int) {
+	for _, r := range rows {
+		if r.Metrics != nil && r.MetricsVersion != Version {
+			stale++
+			continue
+		}
+		current = append(current, r)
+	}
+	return current, stale
+}
+
 // Aggregate groups rows by model and summarizes every numeric metric.
 func Aggregate(rows []Row) []Group {
 	byModel := map[string][]Row{}

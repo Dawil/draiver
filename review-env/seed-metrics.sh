@@ -11,20 +11,33 @@
 #   WIDGET-2  widget-b, branch with a one-file diff, ratified,   model claude-fixture-2
 #             (a lighter transcript: three exploration calls dropped)
 #   WIDGET-3  widget-a, no branch (diff unavailable), escalated, model claude-fixture-1
-# None records cut provenance, so base_commit shows as `inferred` / `unknown`.
+#   WIDGET-40, WIDGET-41  widget-a, the metrics-v2 sessions fixture (two sessions, three
+#             segments, a compaction, ranged and cross-session rereads, a read of
+#             src/steps_widget12.go, a stale-binary `unknown command`, a transient
+#             tmp/notes.txt, and a shipped zz_widgetNN_focus_test.go), with a
+#             context-auto-stop escalation and a review on the log
+# None records cut provenance, so base_commit shows as `inferred` / `unknown`. The seeded
+# log is written at seed time, after the fixture's whole clock, so every log ending
+# lands in the LAST session's (open-ended) window: session 1 reads `ended_by none` and
+# session 2 reads `context-auto-stop`. The @drv-054 BDD world logs on the fixture's
+# clock and gets the real split (context-auto-stop, then review).
 #
 # Then try:
 #   draiver metrics --codebase WORKDIR/widget-a                # stored: all missing
 #   draiver metrics --codebase WORKDIR/widget-b --compute      # same codebase, computed
 #   draiver metrics --codebase WORKDIR/widget-a --sort exploration_prefix_calls --limit 2
 #   draiver metrics WIDGET-1 --json
+#   draiver metrics WIDGET-40 --compute                        # sessions, invention
+#   draiver metrics --codebase WORKDIR/widget-a --compute --by file
+#   draiver metrics --codebase WORKDIR/widget-a --compute --by command
 set -eu
 
 : "${DRAIVER_DATA:?DRAIVER_DATA must be set}"
 BIN="${DRAIVER_BIN:-draiver}"
 WORK="${1:?usage: seed-metrics.sh WORKDIR}"
 export DRAIVER_ACTOR="${DRAIVER_ACTOR:-agent:seed}"
-FIXTURE="$(cd "$(dirname "$0")/.." && pwd)/features/metrics/fixtures/widget.stream.jsonl"
+FIXTURES="$(cd "$(dirname "$0")/.." && pwd)/features/metrics/fixtures"
+FIXTURE="$FIXTURES/widget.stream.jsonl"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -41,6 +54,8 @@ printf '# widget\n' >"$A/README.md"
 printf '# Guide\n' >"$A/docs/guide.md"
 printf 'package widget\n\nfunc widget() int {\n\treturn 1\n}\n' >"$A/src/widget.go"
 printf 'package widget // unused\n' >"$A/src/unused.go"
+i=1; while [ $i -le 200 ]; do printf 'line %03d of big.go\n' $i; i=$((i+1)); done >"$A/src/big.go"
+printf 'package widget // WIDGET-12 steps\n' >"$A/src/steps_widget12.go"
 g -C "$A" add -A
 g -C "$A" commit -qm widget
 g -C "$A" push -q origin main
@@ -77,3 +92,20 @@ DRAIVER_ACTOR=human:review "$BIN" done WIDGET-2 >/dev/null
 "$BIN" new WIDGET-3 --title "metrics: widget fix, escalated" --repo "$A" --base main >/dev/null
 transcript WIDGET-3 "$FIXTURE"
 "$BIN" escalate WIDGET-3 "Which widget registry should this use?" >/dev/null 2>&1 || true
+
+# WIDGET-40/41: the metrics-v2 sessions fixture, renamed to the widget tickets.
+for n in 40 41; do
+  "$BIN" new WIDGET-$n --title "metrics v2: restart-spanning attempt $n" --repo "$A" --base main >/dev/null
+  sed -e "s/drv905/widget$n/g" -e "s/drv-905/WIDGET-$n/g" -e "s/drv901/widget12/g" \
+    "$FIXTURES/sessions.stream.jsonl" >"$WORK/sessions-$n.stream.jsonl"
+  transcript WIDGET-$n "$WORK/sessions-$n.stream.jsonl"
+  g -C "$A" checkout -q -b draiver/WIDGET-$n/0001
+  printf 'line one of big.go\n' >"$A/src/big.go"
+  printf 'package widget\n' >"$A/src/zz_widget${n}_focus_test.go"
+  g -C "$A" add -A
+  g -C "$A" commit -qm "WIDGET-$n work"
+  g -C "$A" checkout -q main
+  seq=$("$BIN" log WIDGET-$n --type escalation --tag context-auto-stop "Context window exhausted." | sed -n 's/.*escalation #\([0-9]*\).*/\1/p')
+  DRAIVER_ACTOR=human:review "$BIN" resolve WIDGET-$n "$seq" "Restart context window." --attempt 0001 >/dev/null
+  "$BIN" review WIDGET-$n "big.go fixed" --url "http://example.test/compare/main...draiver/WIDGET-$n/0001" >/dev/null
+done

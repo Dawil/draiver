@@ -27,7 +27,8 @@ draiver metrics --codebase PATH             # every attempt on PATH's repository
 | `--include-running` | Include running attempts. Their rows are `partial: true` and are **never persisted**. |
 | `--since DATE` | Codebase only: attempts started on or after `YYYY-MM-DD` / RFC3339. |
 | `--sort METRIC` | Codebase only: rows worst-first (descending) by a numeric metric; rows without a value sort last. |
-| `--limit N` | Codebase only: at most N rows, after `--sort`. |
+| `--limit N` | Codebase only: at most N rows, after `--sort` (or N hotspots with `--by`). |
+| `--by file\|command` | Codebase only: a hotspot view instead of attempt rows (see [Hotspot views](#hotspot-views)). Not combinable with `--sort`. |
 
 "The worst 5 attempts by exploration prefix":
 
@@ -52,9 +53,22 @@ ledger tickets, which are never selected.
 Computed metrics are persisted per attempt in `attempts/<id>/metrics.json`: derived,
 outside the hash-chained log, safe to delete (the next `--compute` rebuilds it from the
 transcript). Each record carries `metrics_version` (bumped whenever a definition changes —
-older records then read as `stale`) and `computed_at`. Token and cost figures are **not**
+older records then read as `stale`) and `computed_at`. Token figures are **not**
 recomputed: they are reused from the attempt.md `metrics:` block (or the live session
-meter) and shown under `usage`.
+meter) and shown under `usage`. There is no dollar cost: the meter's figure was
+unreliable, and no verified per-model price table exists to derive one deterministically.
+Cost can be derived from `usage` outside draiver.
+
+### Determinism
+
+Every value is a pure fold of the recorded transcript, the hash-chained log and git. There
+is no LLM, no model judgement, and no clock read at compute time (`computed_at` aside).
+The same inputs at the same `metrics_version` give byte-identical JSON. A unit test
+(`TestComputeIsDeterministic`) and a `@drv-054` scenario both enforce this.
+
+A `stale` row under `--stored` still shows its old values, labelled `stale`. Codebase
+aggregates, inventions, unread docs and `--by` views use **current-version rows only**,
+so definitions never mix in one median. The skipped rows are counted in `excluded_stale`.
 
 ## Provenance
 
@@ -63,14 +77,19 @@ reports, each as `{value, source}`:
 
 | Field | Recorded when | Fallback |
 |---|---|---|
-| `base_commit` | The supervisor freshly cuts the attempt's worktree (attempt.md `base_commit`). | `inferred`: merge-base of `draiver/<ticket>/<attempt>` and its base (merged branches handled), when the branch still exists; else `unknown`. |
+| `base_commit` | The supervisor freshly cuts the attempt's worktree (attempt.md `base_commit`). | `inferred`: merge-base of `draiver/<ticket>/<attempt>` and its base, when the branch still exists; else `unknown`. Merged branches are handled. A tip that is a landing merge (`tip^1` on the base branch's first-parent history) uses `tip^2` as the head. A tip that merged main **into** the branch is not a landing merge, so the ancestry path is used instead. |
 | `repo_id` | Same moment (attempt.md `repo_id`). | `inferred` from the attempt's `repo` path; else `unknown`. |
 | `model` | The model seen in the stream, folded into attempt.md `model_used` on retire. | `observed` from the transcript; else the requested `model`, labelled `requested`; else `unknown`. |
 | `draiver_version` | At cut (attempt.md `draiver_version`). | `unknown`. |
 
 `base_commit` is the key that lets you say "after this AGENTS.md change, the metric moved."
 
-## v1 metric definitions (`metrics_version: 1`)
+## Metric definitions (`metrics_version: 2`)
+
+v1 was the first release. v2 (drv-054 review #19) added sessions, active time, context
+figures, compactions, the reread split, invention detection, structural round-trip
+signals and the `--by` views. It also fixed base inference for main-merged-into-branch,
+counted cobra `unknown command` output as env discovery, and dropped `cost_usd`.
 
 Every transcript metric is an incremental fold over normalized `agent.Event`s
 (`internal/metrics`: `State`, `Step`, `Finalize`). Claude's wire format is never parsed
@@ -102,8 +121,28 @@ back as described.
 | `review_round_trips` | Review claims made. | >1: the first claim wasn't what the human wanted — spec or verification gaps. |
 | `escalations` (+ `escalation_texts` in JSON) | Escalations raised. | What the agent couldn't decide from the codebase. |
 | `human_interrupts` | Interrupts and messages to the session. | Humans steering mid-flight. |
-| `wall_time_s`, `tool_calls`, `calls_by_class` | First to last transcript event; calls in total and per class. | Size of the effort. |
+| `round_trips` | Per review claim: `review_seq`, `next_review_seq`, `human_events` (human-authored `decision`/`note` events after the claim, up to the next one), `human_superseded` (those later superseded, i.e. retracted), `spec_changed` (always null: spec edits are not on the log). Structural only. Prose is never classified. | Where reviews bounce, and whether the feedback was stable. |
+| `wall_time_s`, `tool_calls`, `calls_by_class` | First to last transcript event (includes parked and idle time); calls in total and per class. | Size of the effort. |
+| `active_time_s` | Sum of segment spans (first to last event of each segment). | Time actually worked, without parks. |
 | `diff_files`, `diff_lines` | Final diff size. | Difficulty proxy, to normalize the rest. |
+
+### Sessions and context
+
+`stream.jsonl` is append-only across an attempt's sessions, and every (re)start emits a
+system frame carrying a `SessionID`. A **session** is a distinct `SessionID`: a fresh
+conversation, cold-started from the brief. A **segment** is each system frame within a
+session: a resume after a park or a resolved escalation. Context is the main
+conversation's prompt tokens per request. Usage is deduped by message id, and subagent
+requests (`ParentToolID` set) are excluded.
+
+| Metric | Definition | Signals |
+|---|---|---|
+| `session_count`, `segments` | Distinct SessionIDs; system frames. | Restarts. Many sessions means context ran out or was flushed. |
+| `sessions[]` | Per session: `id`, `started`, `ended`, `segments`, `calls`, `start_context`, `peak_context`, `context_at_first_productive_edit`, `ended_by`. | Where each conversation spent its window. |
+| `sessions[].ended_by` | **From the log, never the transcript.** It is `context-auto-stop` when an escalation tagged `context-auto-stop` falls at the session's end. Otherwise it is the latest of `review` / `escalation` / `park` / `done` there, or `none`. "At the end" means timestamped in `[last event − 10 min, next session start)` (`SessionEndSlack`). | Why the conversation stopped. |
+| `context_auto_stops` | Log escalations tagged `context-auto-stop`. | Sessions that ran out of context. The strongest "too much to read" signal. |
+| `context_floor` | `start_context` of the first session. | Fixed cost of the brief, the system prompt and AGENTS.md before any work. |
+| `compactions` | Within a session, a request whose prompt is ≥ 10,000 tokens smaller than the previous one **and** under half of it (`CompactionMinDrop`, `CompactionRatio`). | The harness compacted the history. |
 
 ### Exploration and context
 
@@ -111,13 +150,17 @@ back as described.
 |---|---|---|
 | `exploration_prefix_calls` | Read-class and subagent calls before the **first productive edit** (first edit to a file in the final diff). `prefix_basis` says which anchor was used: `first-productive-edit`, `first-edit` (fallback when the diff is unavailable or never edited), or `no-edit`. | How much reading it took before the agent could act. The headline accessibility metric. |
 | `exploration_prefix_tokens` | Context size (prompt tokens of the request) at that same point. | Context spent getting oriented. |
+| `exploration_prefix_tokens_net` | `exploration_prefix_tokens` minus the `start_context` of the session the anchor edit is in. | Orientation cost net of the fixed floor. |
 | `search_prefix_calls` | Search-class calls before the same anchor. | How hard the right code was to find. |
 | `empty_searches` | Searches that returned nothing (incl. `grep` exit 1). | Guessing at names that don't exist. |
 | `repeated_searches` | Searches repeating an earlier query, after collapsing whitespace, quotes and case. | Searching in circles. |
 | `files_read_distinct` | Distinct files read. | — |
 | `files_read_unused` | Files read but neither edited nor in the final diff. | Reading that didn't pay off. |
 | `wasted_context_ratio` | `files_read_unused / files_read_distinct`. | Poor locality or poor signposting. |
-| `rereads` | Reads of a file already read. | Context lost or not trusted. |
+| `rereads` | Reads of a file already read. Split into the three below, which sum to it. | — |
+| `rereads_cross_session` | The first read in a session of a file read in an earlier one. | Forced by restarts, not by the agent. |
+| `rereads_same_range` | A read of a slice (or the whole file) already read in this session. A ranged read is Read `offset`/`limit`, `sed -n`, `head`, `tail` or `awk`. | True rereads: context lost or not trusted. |
+| `ranged_reads` | A new slice of a file already read in this session. | Normal for big files, but many of them point at an oversized file. |
 | `docs_read` | Paths read that are `AGENTS.md`, `CLAUDE.md`, `README*`, or under `docs/`. | Whether the docs are found at all. |
 | `first_doc_read_index` | Tool-call index of the first doc read (null if none). | Whether docs are the first stop or a last resort. |
 | `unread_docs` (codebase only) | Doc files tracked at the repo's HEAD that no selected attempt read. | Candidates for undiscoverable or dead docs. |
@@ -139,6 +182,39 @@ Failed tool calls are split by kind — never one blended rate.
 | `time_to_first_green_test_s` | Seconds from the first event to the first green test. | — |
 | `reverted_edits` | Files edited during the attempt that are absent from the final diff (null when the diff is unavailable). | False starts. |
 
+### Invention
+
+| Metric | Definition | Signals |
+|---|---|---|
+| `transient_files` | Files written during the attempt (Write, redirect, heredoc, `tee`, …) that were **not tracked at `base_commit`** and are **absent from the final diff**: created, then thrown away. Null when the diff is unavailable. | Scratch the agent needed and the codebase didn't provide. |
+| `ticket_scoped_test_files` | Test files in the final diff whose base name carries the attempt's own ticket id **and** a throwaway prefix (`zz_`, `tmp_`, `adhoc`), e.g. `zz_drv044_focus_test.go`. | A focus harness built because the suite can't run a subset. |
+| `inventions` (codebase only) | Both of the above, grouped by name pattern (ticket ids and the text between the throwaway prefix and the test suffix collapse to `*`, e.g. `features/acceptance/zz_*_test.go`), most attempts first. | The same workaround reinvented across tickets. Build it once, in the codebase. |
+
+## Hotspot views
+
+`draiver metrics --codebase PATH --by file|command` ranks across the selected attempts
+instead of listing rows. It aggregates current-version rows only.
+
+**`--by file`** is ranked by **context tokens, not calls**. A whole-file Read of a large
+file is one call, but it can cost 15k tokens. Per file:
+
+| Field | Definition |
+|---|---|
+| `context_tokens` | Main-context growth attributed to the file's read results. Each request's prompt-token delta over the previous request is split across the read results that arrived in between, in proportion to their characters. |
+| `result_chars` | Total characters of the file's read results. |
+| `attempts`, `reads`, `whole_reads` | Attempts that read it; reads; reads without a range. |
+| `unused_in` | Attempts that read it but neither edited it nor shipped it. |
+| `cross_ticket_readers` | Attempts that read it while its name carries another ticket's id (`drv-046`, `drv046`, `drv_046`; same prefix family, so `drv` ~ `drvweb` ~ `drvctl`). For example, `steps_boardcontrols_drv046.go` read by drv-048. |
+| `lines_at_head` | Line count at the codebase's HEAD (null when untracked or binary). |
+
+Signals: files to split, and code borrowed from another ticket that belongs in a shared place.
+
+**`--by command`** lists normalized Bash commands and searches that recur in at least
+two attempts. Normalization drops a leading `cd DIR &&`, `2>&1`-style duplications
+and a trailing `| head`/`| tail -N`. It collapses whitespace, quotes and case, and maps
+`drv-044`-style ticket ids to `<ticket>` and digit runs to `N`. Signals: a ritual every
+agent rediscovers, which a script or an AGENTS.md line could replace.
+
 ## JSON schema
 
 `--json` on one attempt:
@@ -147,7 +223,7 @@ Failed tool calls are split by kind — never one blended rate.
 {
   "target": {"ticket": "drv-901", "attempt": "0001"},
   "mode": "compute",
-  "metrics_version": 1,
+  "metrics_version": 2,
   "row": { ...Row }
 }
 ```
@@ -157,14 +233,17 @@ Failed tool calls are split by kind — never one blended rate.
 ```json
 {
   "target": {"toplevel": "/src/widget", "repo_id": "github.com/acme/widget"},
-  "mode": "stored", "metrics_version": 1,
+  "mode": "stored", "metrics_version": 2,
   "filters": {"since": "...", "sort": "...", "limit": 5, "include_running": false},
   "total": 12, "excluded_running": 1,
   "aggregate": {
     "groups": [{"model": "...", "count": 8, "with_metrics": 8,
                 "outcomes": {"ratified": 6, "in-review": 2},
                 "metrics": {"exploration_prefix_calls": {"n": 8, "median": 4, "p90": 11}, ...}}],
-    "unread_docs": ["docs/guide.md"]
+    "unread_docs": ["docs/guide.md"],
+    "excluded_stale": 0,
+    "inventions": [{"kind": "ticket-scoped-test", "pattern": "features/acceptance/zz_*_test.go",
+                    "attempts": ["drv-044@0001", "drv-047@0001"], "files": ["..."]}]
   },
   "rows": [ ...Row ]
 }
@@ -172,11 +251,30 @@ Failed tool calls are split by kind — never one blended rate.
 
 A `Row` is `{ticket, attempt, source, partial, metrics_version, computed_at,
 transcript_cmd, provenance, usage, metrics}`, where `metrics` holds every field named in
-the tables above (with `prefix_basis`, `final_diff` and `transcript`), and is `null` when
-`source` is `missing` or `stale` under `--stored`. `total` counts rows before `--limit`.
+the tables above (with `prefix_basis`, `final_diff` and `transcript`, plus `files[]` and
+`commands[]`, the per-attempt inputs to the `--by` views). It is `null` when `source` is
+`missing`. A `stale` row keeps its older values. `total` counts rows before `--limit`.
 Aggregates are grouped by model because model changes swamp codebase changes.
 
-## Out of scope (v1)
+`--by file|command --json`:
+
+```json
+{
+  "target": {...}, "mode": "stored", "metrics_version": 2, "by": "file",
+  "filters": {...}, "attempts": 12, "with_metrics": 11, "excluded_stale": 1,
+  "files": [{"path": "internal/web/web.go", "attempts": 5, "reads": 44, "whole_reads": 1,
+             "result_chars": 181402, "context_tokens": 93547, "unused_in": 0,
+             "cross_ticket_readers": [], "lines_at_head": 2970}],
+  "commands": [{"command": "go test ./internal/web/...", "attempts": 3, "count": 7, "in": ["drv-044@0001", "..."]}]
+}
+```
+
+Only one of `files` and `commands` is present, matching `by`.
+
+## Out of scope
 
 A/B or before/after comparison (do it from the JSON), `--follow`/streaming, exporters or
-dashboards, the web UI, and recommending evals.
+dashboards, the web UI, and recommending evals. Also a replay-eval harness, which would
+re-run a historical ticket at its `base_commit` with a candidate change. Its agent runs
+are non-deterministic, so it is its own ticket, with `draiver metrics` as its
+deterministic scorer.
