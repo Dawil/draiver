@@ -22,7 +22,12 @@ import (
 //
 // It is a var, not a const, so a test can bump it to exercise staleness. Production
 // code never assigns it.
-var Version = 1
+//
+// v2 (drv-054 #19): sessions and segments, active time, context figures, compactions,
+// the reread split, per-file and per-command stats, invention detection, structural
+// round-trip signals, cobra unknown-command classification, the landing-merge guard in
+// base inference, and no cost_usd.
+var Version = 2
 
 // Source says where a row's metric values came from.
 type Source string
@@ -40,24 +45,35 @@ type Transcript struct {
 	ToolCalls    int            `json:"tool_calls"`
 	CallsByClass map[string]int `json:"calls_by_class"`
 
-	WallTimeSeconds *float64 `json:"wall_time_s"`
+	WallTimeSeconds   *float64 `json:"wall_time_s"`
+	ActiveTimeSeconds *float64 `json:"active_time_s"`
+
+	Sessions     []Session `json:"sessions"`
+	SessionCount int       `json:"session_count"`
+	Segments     int       `json:"segments"`
+	ContextFloor *int      `json:"context_floor"`
+	Compactions  int       `json:"compactions"`
 
 	FinalDiff string `json:"final_diff"` // available | unavailable
 	DiffFiles *int   `json:"diff_files"`
 	DiffLines *int   `json:"diff_lines"`
 
-	PrefixBasis             string `json:"prefix_basis"` // first-productive-edit | first-edit | no-edit
-	ExplorationPrefixCalls  int    `json:"exploration_prefix_calls"`
-	ExplorationPrefixTokens int    `json:"exploration_prefix_tokens"`
-	SearchPrefixCalls       int    `json:"search_prefix_calls"`
+	PrefixBasis                string `json:"prefix_basis"` // first-productive-edit | first-edit | no-edit
+	ExplorationPrefixCalls     int    `json:"exploration_prefix_calls"`
+	ExplorationPrefixTokens    int    `json:"exploration_prefix_tokens"`
+	ExplorationPrefixTokensNet *int   `json:"exploration_prefix_tokens_net"`
+	SearchPrefixCalls          int    `json:"search_prefix_calls"`
 
 	EmptySearches    int `json:"empty_searches"`
 	RepeatedSearches int `json:"repeated_searches"`
 
-	FilesReadDistinct  int      `json:"files_read_distinct"`
-	FilesReadUnused    int      `json:"files_read_unused"`
-	WastedContextRatio *float64 `json:"wasted_context_ratio"`
-	Rereads            int      `json:"rereads"`
+	FilesReadDistinct   int      `json:"files_read_distinct"`
+	FilesReadUnused     int      `json:"files_read_unused"`
+	WastedContextRatio  *float64 `json:"wasted_context_ratio"`
+	Rereads             int      `json:"rereads"`
+	RereadsCrossSession int      `json:"rereads_cross_session"`
+	RereadsSameRange    int      `json:"rereads_same_range"`
+	RangedReads         int      `json:"ranged_reads"`
 
 	DocsRead          []string `json:"docs_read"`
 	FirstDocReadIndex *int     `json:"first_doc_read_index"`
@@ -76,6 +92,18 @@ type Transcript struct {
 
 	RevertedEdits *int `json:"reverted_edits"`
 
+	// Invention detection (filled by computeRecord, which knows the ticket and base).
+	TransientFiles        []string `json:"transient_files"`
+	TicketScopedTestFiles []string `json:"ticket_scoped_test_files"`
+
+	// Files and Commands feed the codebase --by views.
+	Files    []FileStat    `json:"files"`
+	Commands []CommandStat `json:"commands"`
+
+	// EditedFiles is every repo-relative file the attempt edited, for the joins in
+	// computeRecord. Not part of the schema.
+	EditedFiles []string `json:"-"`
+
 	// TranscriptInterrupts counts interrupted turns seen in the transcript. It is
 	// folded into Values.HumanInterrupts. ModelObserved is the model that produced
 	// most assistant messages.
@@ -83,15 +111,68 @@ type Transcript struct {
 	ModelObserved        string `json:"-"`
 }
 
+// Session is one conversation in the attempt's transcript: a distinct SessionID, i.e.
+// a fresh start from the brief. Each (re)start of the stream within it, a resume after
+// a park or a resolved escalation, is a segment.
+type Session struct {
+	ID       string    `json:"id"`
+	Started  time.Time `json:"started"`
+	Ended    time.Time `json:"ended"`
+	Segments int       `json:"segments"`
+	Calls    int       `json:"calls"`
+	// Context figures are main-context prompt tokens per request (subagent requests
+	// excluded), null when the session made no request.
+	StartContext                 *int `json:"start_context"`
+	PeakContext                  *int `json:"peak_context"`
+	ContextAtFirstProductiveEdit *int `json:"context_at_first_productive_edit"`
+	// EndedBy is from the log: context-auto-stop | review | escalation | park | done | none.
+	EndedBy string `json:"ended_by"`
+}
+
+// FileStat is one file's read footprint in an attempt.
+type FileStat struct {
+	Path        string `json:"path"`
+	Reads       int    `json:"reads"`
+	WholeReads  int    `json:"whole_reads"`
+	ResultChars int    `json:"result_chars"`
+	// ContextTokens is the main-context prompt growth attributed to this file's read
+	// results: the next request's prompt-token delta, split across the results that fed
+	// it in proportion to their characters.
+	ContextTokens int  `json:"context_tokens"`
+	Unused        bool `json:"unused"`
+	// CrossTicket is set when the file's name carries a ticket id other than the
+	// attempt's own (e.g. steps_boardcontrols_drv046.go read by drv-048).
+	CrossTicket bool `json:"cross_ticket"`
+}
+
+// CommandStat is one normalized Bash command or search and how often it ran.
+type CommandStat struct {
+	Command string `json:"command"`
+	Count   int    `json:"count"`
+}
+
+// RoundTrip is the structural record of one review claim and what followed it, up to
+// the next claim (or the end of the log). No prose is interpreted.
+type RoundTrip struct {
+	ReviewSeq       int `json:"review_seq"`
+	NextReviewSeq   int `json:"next_review_seq,omitempty"`
+	HumanEvents     int `json:"human_events"`     // human-authored decision/note events after the claim
+	HumanSuperseded int `json:"human_superseded"` // of those, later superseded (retracted)
+	// SpecChanged is null: spec.md edits are not recorded in the log.
+	SpecChanged *bool `json:"spec_changed"`
+}
+
 // Values is one attempt's full v1 metric set: the log-derived outcome family plus
 // the transcript family.
 type Values struct {
-	Outcome          string   `json:"outcome"`
-	ReviewRoundTrips int      `json:"review_round_trips"`
-	Escalations      int      `json:"escalations"`
-	EscalationTexts  []string `json:"escalation_texts"`
-	HumanInterrupts  int      `json:"human_interrupts"`
-	TranscriptStatus string   `json:"transcript"` // present | absent
+	Outcome          string      `json:"outcome"`
+	ReviewRoundTrips int         `json:"review_round_trips"`
+	Escalations      int         `json:"escalations"`
+	EscalationTexts  []string    `json:"escalation_texts"`
+	HumanInterrupts  int         `json:"human_interrupts"`
+	RoundTrips       []RoundTrip `json:"round_trips"`
+	ContextAutoStops int         `json:"context_auto_stops"`
+	TranscriptStatus string      `json:"transcript"` // present | absent
 	// Transcript is embedded, so its fields flatten into Values' JSON.
 	Transcript
 }

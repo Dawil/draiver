@@ -58,6 +58,21 @@ type State struct {
 	models  map[string]int
 
 	interrupts int
+
+	// v2: sessions, segments, context, files, commands (sessions.go).
+	sessions    []*sessAcc
+	sessIdx     map[string]int
+	cur         int
+	segments    int
+	segStart    time.Time
+	segLast     time.Time
+	active      float64
+	compactions int
+	files       map[string]*fileAcc
+	pendingAttr []attrPending
+	commands    map[string]int
+
+	rereadsCross, rereadsSame, rangedReads int
 }
 
 type pendingCall struct {
@@ -65,6 +80,7 @@ type pendingCall struct {
 	class Class
 	call  Call
 	bash  bool
+	main  bool // issued by the main conversation, not a subagent
 	snap  *editSnap // set when the call edits files
 }
 
@@ -75,6 +91,7 @@ type editSnap struct {
 	searches int
 	ctx      int
 	msgID    string
+	sess     int
 }
 
 type greenSnap struct {
@@ -97,6 +114,10 @@ func NewState() *State {
 		errs:        map[ErrKind]int{},
 		seenMsg:     map[string]bool{},
 		models:      map[string]int{},
+		sessIdx:     map[string]int{},
+		cur:         -1,
+		files:       map[string]*fileAcc{},
+		commands:    map[string]int{},
 	}
 }
 
@@ -109,6 +130,11 @@ func (s *State) Step(ev agent.Event) {
 		if ev.TS.After(s.lastTS) {
 			s.lastTS = ev.TS
 		}
+	}
+	if ev.Kind == agent.EventSystem {
+		s.onSystem(ev)
+	} else {
+		s.touchTime(ev.TS)
 	}
 	switch ev.Kind {
 	case agent.EventSystem:
@@ -161,7 +187,10 @@ func (s *State) onUsage(ev agent.Event) {
 	}
 	s.seenMsg[key] = true
 	s.work += u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens + u.OutputTokens
-	s.ctx = u.ContextTokens
+	if ev.ParentToolID != "" {
+		return // a subagent's request: its tokens are work, not main-context fill
+	}
+	s.onMainContext(u.ContextTokens)
 	// Snapshots taken at an edit call learn the size of the request that produced
 	// that call from its message's usage.
 	keep := s.awaitingCtx[:0]
@@ -180,12 +209,25 @@ func (s *State) onCall(ev agent.Event) {
 	idx := s.toolCalls
 	s.toolCalls++
 	s.byClass[c.Class]++
-	pc := pendingCall{index: idx, class: c.Class, call: c, bash: ev.Tool.Name == "Bash"}
+	s.session().calls++
+	bash := ev.Tool.Name == "Bash"
+	pc := pendingCall{index: idx, class: c.Class, call: c, bash: bash, main: ev.ParentToolID == ""}
+	if bash || c.Class == ClassSearch {
+		key := c.Query
+		if bash {
+			key = NormCommand(bashCommand(ev.Tool.Input))
+		} else {
+			key = NormCommand(key)
+		}
+		if key != "" {
+			s.commands[key]++
+		}
+	}
 	// An edit call snapshots the exploration state now, so its prefix covers the
 	// calls strictly before it. The snapshot is committed only once the result shows
 	// the edit happened.
 	if len(c.Edits) > 0 {
-		pc.snap = &editSnap{index: idx, readish: s.readish, searches: s.searches, ctx: s.ctx, msgID: ev.MessageID}
+		pc.snap = &editSnap{index: idx, readish: s.readish, searches: s.searches, ctx: s.ctx, msgID: ev.MessageID, sess: s.cur}
 		s.awaitingCtx = append(s.awaitingCtx, pc.snap)
 	}
 	s.pending[ev.Tool.ID] = pc
@@ -235,7 +277,7 @@ func (s *State) onResult(ev agent.Event) {
 	// it never ran (permission denial) or could not find its command or file.
 	touched := !failed || (pc.bash && kind != ErrPermission && kind != ErrEnvDiscovery)
 	if touched {
-		s.commitTouches(pc)
+		s.commitTouches(pc, len(ev.Tool.Result))
 	}
 	switch pc.class {
 	case ClassTest:
@@ -252,12 +294,19 @@ func (s *State) onResult(ev agent.Event) {
 }
 
 // commitTouches records the files a completed call read and edited.
-func (s *State) commitTouches(pc pendingCall) {
+func (s *State) commitTouches(pc pendingCall, resultChars int) {
+	reads := 0
+	for _, p := range pc.call.Reads {
+		if _, ok := s.rel(p); ok {
+			reads++
+		}
+	}
 	for _, p := range pc.call.Reads {
 		rel, ok := s.rel(p)
 		if !ok {
 			continue
 		}
+		s.onRead(rel, pc.call.Range, resultChars/reads, pc.main)
 		if s.readFiles[rel] == 0 {
 			s.readOrder = append(s.readOrder, rel)
 		}
@@ -275,6 +324,12 @@ func (s *State) commitTouches(pc pendingCall) {
 			continue
 		}
 		s.editFiles[rel] = true
+		if ss := s.sessions[pc.snap.sess]; ss.firstEditTo[rel] == nil || pc.snap.index < ss.firstEditTo[rel].index {
+			ss.firstEditTo[rel] = pc.snap
+			if ss.firstEditAny == nil || pc.snap.index < ss.firstEditAny.index {
+				ss.firstEditAny = pc.snap
+			}
+		}
 		if s.firstEditAny == nil || pc.snap.index < s.firstEditAny.index {
 			s.firstEditAny = pc.snap
 		}
@@ -326,11 +381,13 @@ func IsDoc(rel string) bool {
 
 // Diff is the attempt's final diff: the files changed on the attempt branch
 // relative to base_commit, and the changed line count. Available is false when it
-// could not be determined (no base, branch gone, repo missing).
+// could not be determined (no base, branch gone, repo missing). BaseFiles is the set
+// of files tracked at base_commit, which tells a created file from an edited one.
 type Diff struct {
 	Available bool
 	Files     map[string]bool
 	Lines     int
+	BaseFiles map[string]bool
 }
 
 // Finalize joins the folded state with the final diff into the transcript metric
@@ -356,6 +413,18 @@ func (s *State) Finalize(diff Diff) Transcript {
 	}
 	for c, n := range s.byClass {
 		t.CallsByClass[string(c)] = n
+	}
+	t.Sessions, t.ContextFloor = s.sessionsOut(diff)
+	t.SessionCount, t.Segments, t.Compactions = len(s.sessions), s.segments, s.compactions
+	t.RereadsCrossSession, t.RereadsSameRange, t.RangedReads = s.rereadsCross, s.rereadsSame, s.rangedReads
+	t.Files, t.Commands = s.filesOut(diff), s.commandsOut()
+	t.EditedFiles = sortedKeys(s.editFiles)
+	active := s.active
+	if !s.segStart.IsZero() && s.segLast.After(s.segStart) {
+		active += s.segLast.Sub(s.segStart).Seconds() // the open last segment
+	}
+	if s.segments > 0 || active > 0 {
+		t.ActiveTimeSeconds = &active
 	}
 	for _, n := range s.readFiles {
 		if n > 1 {
@@ -398,6 +467,10 @@ func (s *State) Finalize(diff Diff) Transcript {
 		t.ExplorationPrefixCalls = snap.readish
 		t.SearchPrefixCalls = snap.searches
 		t.ExplorationPrefixTokens = snap.ctx
+		if st := s.sessions[snap.sess].startCtx; st >= 0 && snap.ctx >= st {
+			net := snap.ctx - st
+			t.ExplorationPrefixTokensNet = &net
+		}
 	} else {
 		t.PrefixBasis = "no-edit"
 		t.ExplorationPrefixCalls = s.byClass[ClassRead] + s.byClass[ClassSubagent]
@@ -417,6 +490,17 @@ func (s *State) Finalize(diff Diff) Transcript {
 	if len(s.readFiles) > 0 {
 		r := float64(unused) / float64(len(s.readFiles))
 		t.WastedContextRatio = &r
+	}
+
+	if diff.Available && diff.BaseFiles != nil {
+		// Transient: written during the attempt, not tracked at base (so created by
+		// the attempt), and absent from the final diff (so thrown away).
+		t.TransientFiles = []string{}
+		for _, f := range t.EditedFiles {
+			if !diff.Files[f] && !diff.BaseFiles[f] {
+				t.TransientFiles = append(t.TransientFiles, f)
+			}
+		}
 	}
 
 	if diff.Available {

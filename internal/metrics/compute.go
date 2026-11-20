@@ -217,12 +217,29 @@ func computeRecord(root store.Root, a project.Attempt, meta attempt.Meta, lf Log
 		prov.Model = Value{tr.ModelObserved, "observed"}
 	}
 
+	for i := range tr.Sessions {
+		var next time.Time
+		if i+1 < len(tr.Sessions) {
+			next = tr.Sessions[i+1].Started
+		}
+		tr.Sessions[i].EndedBy = EndedBy(lf.Endings, tr.Sessions[i].Ended, next)
+	}
+	for i := range tr.Files {
+		tr.Files[i].CrossTicket = IsCrossTicket(tr.Files[i].Path, a.Ticket)
+	}
+	if diff.Available {
+		tr.TicketScopedTestFiles = TicketScopedTestFiles(sortedKeys(diff.Files), a.Ticket)
+	}
+	roundTrips := append([]RoundTrip{}, lf.RoundTrips...)
+
 	v := Values{
 		Outcome:          lf.Outcome,
 		ReviewRoundTrips: lf.ReviewRoundTrips,
 		Escalations:      len(lf.Escalations),
 		EscalationTexts:  append([]string{}, lf.Escalations...),
 		HumanInterrupts:  lf.Messages + tr.TranscriptInterrupts,
+		RoundTrips:       roundTrips,
+		ContextAutoStops: lf.ContextAutoStops,
 		TranscriptStatus: "absent",
 		Transcript:       tr,
 	}

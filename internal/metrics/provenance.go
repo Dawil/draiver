@@ -196,6 +196,14 @@ func FinalDiff(repo, baseCommit, head string) (Diff, error) {
 		r, _ := strconv.Atoi(f[1])
 		d.Lines += a + r
 	}
+	if base, err := git(repo, "ls-tree", "-r", "--name-only", baseCommit); err == nil {
+		d.BaseFiles = map[string]bool{}
+		for _, f := range strings.Split(base, "\n") {
+			if f != "" {
+				d.BaseFiles[f] = true
+			}
+		}
+	}
 	return d, nil
 }
 

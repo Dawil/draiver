@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"fmt"
 	"path"
 	"regexp"
 	"strings"
@@ -36,6 +37,9 @@ type Call struct {
 	Edits []string
 	// Query is the normalized search key for a search-class call, "" otherwise.
 	Query string
+	// Range names the slice of Reads a ranged read took (Read offset/limit, `sed -n`,
+	// `head`, `tail`, `awk`); "" is a whole-file read.
+	Range string
 }
 
 // toolClasses maps non-Bash tool names to their class. Tools not listed are other.
@@ -63,6 +67,15 @@ type toolInput struct {
 	Glob         string `json:"glob"`
 	Type         string `json:"type"`
 	Command      string `json:"command"`
+	Offset       int    `json:"offset"`
+	Limit        int    `json:"limit"`
+}
+
+// bashCommand extracts a Bash tool call's command text from its raw input.
+func bashCommand(input json.RawMessage) string {
+	var in toolInput
+	_ = json.Unmarshal(input, &in)
+	return in.Command
 }
 
 // Classify classifies one tool call by tool name and raw input.
@@ -81,6 +94,9 @@ func Classify(tool string, input json.RawMessage) Call {
 	case ClassRead:
 		if p != "" {
 			c.Reads = []string{p}
+		}
+		if in.Offset > 0 || in.Limit > 0 {
+			c.Range = fmt.Sprintf("lines %d+%d", in.Offset, in.Limit)
 		}
 	case ClassEdit:
 		if p != "" {
@@ -217,6 +233,9 @@ func ClassifyBash(cmd string) Call {
 		c := classifySegment(seg)
 		best.Reads = append(best.Reads, c.Reads...)
 		best.Edits = append(best.Edits, c.Edits...)
+		if c.Range != "" && best.Range == "" {
+			best.Range = c.Range
+		}
 		if classPriority[c.Class] > classPriority[best.Class] {
 			best.Class = c.Class
 			best.Query = c.Query
@@ -376,6 +395,9 @@ func stripWrappers(words []string) []string {
 	return words
 }
 
+// rangedReaders take a slice of a file rather than the whole of it.
+var rangedReaders = map[string]bool{"sed": true, "head": true, "tail": true, "awk": true}
+
 // classifySegment classifies one sequential segment.
 func classifySegment(seg string) Call {
 	head := strings.TrimSpace(pipelineHead(seg))
@@ -439,6 +461,9 @@ func classifySegment(seg string) Call {
 		} else if name == "sed" || name == "awk" || name == "jq" {
 			// sed -n '1,80p' FILE / awk PROG FILE / jq EXPR FILE: the last arg is the file.
 			c.Reads = lastNonFlag(args[min(1, len(args)):])
+		}
+		if rangedReaders[name] && len(c.Reads) > 0 {
+			c.Range = normQuery(head)
 		}
 	case ClassSearch:
 		c.Query = normQuery(head)
