@@ -27,7 +27,11 @@ import (
 // the reread split, per-file and per-command stats, invention detection, structural
 // round-trip signals, cobra unknown-command classification, the landing-merge guard in
 // base inference, and no cost_usd.
-var Version = 2
+//
+// v3 (drv-057): a `cd` earlier in a Bash command moves where its relative paths
+// resolve, and paths that resolve outside the worktree are dropped — no more phantom
+// repo files (transient_files, reverted_edits, reads) from scratch work in /tmp.
+var Version = 3
 
 // Source says where a row's metric values came from.
 type Source string

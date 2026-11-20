@@ -158,3 +158,65 @@ func TestFoldCobraUnknownOnSuccessfulBash(t *testing.T) {
 		t.Fatalf("env_discovery_errors = %d, want 1", got)
 	}
 }
+
+// drv-057: a `cd` earlier in a Bash command moves where its relative paths resolve.
+// drv-051's scratch work (`cd /tmp/drv051/frag && cat > drvctl-053.md <<EOF`) was
+// counted as creating repo files; now paths that land outside the worktree drop out.
+func TestFoldBashCdTracking(t *testing.T) {
+	cases := []struct {
+		name, cmd string
+		edits     []string
+	}{
+		{"cd abs; cat >", "cd /tmp/x; cat > a.md <<'EOF'\nhi\nEOF", nil},
+		{"cd abs && sed -i", "cd /tmp/x && sed -i 's/a/b/' a.md", nil},
+		{"cd sub && cat >", "cd sub && cat > a.md <<'EOF'\nhi\nEOF", []string{"sub/a.md"}},
+		{"cd newline", "cd /tmp/x\ncat > a.md <<'EOF'\nhi\nEOF", nil},
+		{"cd into worktree", "cd /w/internal && cat > b.go <<'EOF'\nx\nEOF", []string{"internal/b.go"}},
+		{"cd .. escapes", "cd .. && touch a.md", nil},
+		{"cd sub then ..", "cd sub && cd .. && touch a.md", []string{"a.md"}},
+		{"cd dynamic", "cd $TMPDIR && touch a.md", nil},
+		{"cd dynamic then abs", "cd ~ && cd /w/pkg && touch a.md", []string{"pkg/a.md"}},
+		{"abs path after cd unaffected", "cd /tmp/x && touch /w/c.md", []string{"c.md"}},
+		{"python heredoc after cd", "cd /tmp/x && python3 - <<'EOF'\nopen('out.md', 'w').write('x')\nEOF", nil},
+		{"no cd", "cat > a.md <<'EOF'\nhi\nEOF", []string{"a.md"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := NewState()
+			st.Step(agent.Event{Kind: agent.EventSystem, Cwd: "/w"})
+			in, _ := json.Marshal(map[string]string{"command": c.cmd})
+			st.Step(agent.Event{Kind: agent.EventToolCall, Tool: &agent.ToolEvent{ID: "t", Name: "Bash", Input: in}})
+			st.Step(agent.Event{Kind: agent.EventToolResult, Tool: &agent.ToolEvent{ID: "t", Result: ""}})
+			got := st.Finalize(Diff{Available: true, Files: map[string]bool{}, BaseFiles: map[string]bool{}})
+			want := c.edits
+			if want == nil {
+				want = []string{}
+			}
+			if !reflect.DeepEqual(got.EditedFiles, want) {
+				t.Fatalf("edited = %#v, want %#v", got.EditedFiles, want)
+			}
+			if !reflect.DeepEqual(got.TransientFiles, want) {
+				t.Fatalf("transient = %#v, want %#v", got.TransientFiles, want)
+			}
+			if *got.RevertedEdits != len(want) {
+				t.Fatalf("reverted_edits = %d, want %d", *got.RevertedEdits, len(want))
+			}
+		})
+	}
+}
+
+// A `cd` moves reads too: `cd /tmp/x && cat notes.md` reads no repo file.
+func TestFoldBashCdReads(t *testing.T) {
+	st := NewState()
+	st.Step(agent.Event{Kind: agent.EventSystem, Cwd: "/w"})
+	for i, cmd := range []string{"cd /tmp/x && cat notes.md", "cd docs && cat guide.md"} {
+		in, _ := json.Marshal(map[string]string{"command": cmd})
+		id := string(rune('a' + i))
+		st.Step(agent.Event{Kind: agent.EventToolCall, Tool: &agent.ToolEvent{ID: id, Name: "Bash", Input: in}})
+		st.Step(agent.Event{Kind: agent.EventToolResult, Tool: &agent.ToolEvent{ID: id, Result: "x"}})
+	}
+	got := st.Finalize(Diff{})
+	if got.FilesReadDistinct != 1 || !reflect.DeepEqual(got.DocsRead, []string{"docs/guide.md"}) {
+		t.Fatalf("reads: %d %v", got.FilesReadDistinct, got.DocsRead)
+	}
+}

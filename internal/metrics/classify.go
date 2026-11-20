@@ -226,13 +226,28 @@ var (
 // make the call a read or a search. The highest-priority segment class wins. Reads
 // and edits are collected from every segment, and from interpreter heredocs
 // (`python3 - <<'EOF'`) that write files.
+//
+// A `cd DIR` segment moves the working directory for the segments after it (drv-057),
+// so `cd /tmp/x && cat > a.md` edits /tmp/x/a.md, not the repo's a.md, and
+// `cd sub && cat > a.md` edits sub/a.md. Relative paths are joined onto that
+// directory; the fold then drops whatever resolves outside the worktree. A `cd` whose
+// target cannot be known statically (`cd`, `cd ~`, `cd -`, `cd $DIR`) leaves the
+// directory unknown, and relative paths after it are dropped rather than guessed.
 func ClassifyBash(cmd string) Call {
 	best := Call{Class: ClassOther}
 	script, bodies := splitHeredocs(cmd)
+	wd := workdir{known: true}
+	var heredocDirs []workdir // the working directory at each heredoc's introducing segment
 	for _, seg := range splitSegments(script) {
+		if wd.cd(seg) {
+			continue
+		}
+		if heredocStart.MatchString(seg) { // splitHeredocs takes one heredoc per line, in order
+			heredocDirs = append(heredocDirs, wd)
+		}
 		c := classifySegment(seg)
-		best.Reads = append(best.Reads, c.Reads...)
-		best.Edits = append(best.Edits, c.Edits...)
+		best.Reads = append(best.Reads, wd.resolve(c.Reads)...)
+		best.Edits = append(best.Edits, wd.resolve(c.Edits)...)
 		if c.Range != "" && best.Range == "" {
 			best.Range = c.Range
 		}
@@ -241,11 +256,15 @@ func ClassifyBash(cmd string) Call {
 			best.Query = c.Query
 		}
 	}
-	for _, h := range bodies {
+	for i, h := range bodies {
 		if !interpreters[commandWord(h.intro)] {
 			continue
 		}
-		if edits := scriptWrites(h.body); len(edits) > 0 {
+		hwd := workdir{known: true}
+		if i < len(heredocDirs) {
+			hwd = heredocDirs[i]
+		}
+		if edits := hwd.resolve(scriptWrites(h.body)); len(edits) > 0 {
 			best.Edits = append(best.Edits, edits...)
 			if classPriority[ClassEdit] > classPriority[best.Class] {
 				best.Class, best.Query = ClassEdit, ""
@@ -253,6 +272,75 @@ func ClassifyBash(cmd string) Call {
 		}
 	}
 	return best
+}
+
+// workdir is the working directory a Bash command has moved to with `cd`, relative
+// to where the command started: "" is the start, a relative dir is under it, an
+// absolute one is anywhere. known is false after a `cd` whose target is dynamic.
+type workdir struct {
+	dir   string
+	known bool
+}
+
+// cd applies seg if it is a `cd`/`pushd` (reporting true), and leaves wd alone
+// otherwise. `popd` cannot be followed without a stack, so it makes wd unknown.
+func (wd *workdir) cd(seg string) bool {
+	words := stripWrappers(shellWords(strings.TrimSpace(pipelineHead(seg))))
+	if len(words) == 0 {
+		return false
+	}
+	switch words[0] {
+	case "cd", "pushd":
+	case "popd":
+		*wd = workdir{}
+		return true
+	default:
+		return false
+	}
+	args := nonFlags(words[1:])
+	if len(args) == 0 {
+		*wd = workdir{} // bare `cd` goes home
+		return true
+	}
+	target := strings.Trim(args[0], `'"`)
+	if target == "-" || strings.HasPrefix(target, "~") || strings.ContainsAny(target, "$`*?[{") {
+		*wd = workdir{}
+		return true
+	}
+	if !wd.known {
+		if path.IsAbs(target) {
+			*wd = workdir{dir: path.Clean(target), known: true}
+		}
+		return true
+	}
+	if path.IsAbs(target) {
+		wd.dir = path.Clean(target)
+	} else {
+		wd.dir = path.Join(wd.dir, target)
+		if wd.dir == "." {
+			wd.dir = ""
+		}
+	}
+	return true
+}
+
+// resolve joins relative paths onto the working directory. Absolute paths pass
+// through. With an unknown directory, relative paths name no knowable file and are
+// dropped.
+func (wd workdir) resolve(paths []string) []string {
+	if wd.known && wd.dir == "" {
+		return paths
+	}
+	var out []string
+	for _, p := range paths {
+		switch {
+		case path.IsAbs(p) || strings.HasPrefix(p, "~"):
+			out = append(out, p)
+		case wd.known:
+			out = append(out, path.Join(wd.dir, p))
+		}
+	}
+	return out
 }
 
 // heredoc is one heredoc: the line that introduced it and its body.
