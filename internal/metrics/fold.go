@@ -341,8 +341,10 @@ func (s *State) commitTouches(pc pendingCall, resultChars int) {
 
 // rel turns a path as the agent wrote it into a repo-relative one. Paths under the
 // session's working directory are made relative. Relative paths are taken as
-// already repo-relative. Absolute paths elsewhere (/tmp, ~/.claude, the data root)
-// are not codebase files and are dropped (ok=false).
+// repo-relative (the classifier has already joined them onto any `cd` earlier in the
+// same Bash command, drv-057). Paths that resolve outside the worktree — absolute
+// ones elsewhere (/tmp, ~/.claude, the data root) or relative ones that climb out
+// with `..` — are not codebase files and are dropped (ok=false).
 func (s *State) rel(p string) (string, bool) {
 	p = strings.TrimSpace(p)
 	if p == "" || strings.ContainsAny(p, "*?[{$`") {
@@ -361,7 +363,11 @@ func (s *State) rel(p string) (string, bool) {
 		}
 		return filepath.ToSlash(r), true
 	}
-	return path.Clean(filepath.ToSlash(p)), true
+	r := path.Clean(filepath.ToSlash(p))
+	if r == "." || r == ".." || strings.HasPrefix(r, "../") {
+		return "", false
+	}
+	return r, true
 }
 
 // IsDoc reports whether a repo-relative path is agent-facing documentation:
