@@ -22,12 +22,14 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agentmsg"
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/manage"
+	"github.com/Dawil/draiver/internal/metrics"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/protocol"
 	"github.com/Dawil/draiver/internal/session"
@@ -139,6 +141,9 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		// (drvctl-021).
 		Ref:  a.Base,
 		Spec: spec,
+		// Record the attempt's metrics provenance (drv-054) the moment its branch is
+		// freshly cut, when HEAD of the checkout is exactly the base commit.
+		OnCut: func(path string) { r.recordCut(a.Ticket, a.ID, path) },
 	})
 	if err != nil {
 		_ = sess.Close()
@@ -430,4 +435,30 @@ func authoritativeWake(eventType string) bool {
 		return true
 	}
 	return false
+}
+
+// recordCut writes an attempt's cut provenance into attempt.md (drv-054): the commit
+// its worktree was freshly cut from, the path-independent repo identity, and the
+// draiver build. Best-effort: a failure is logged and never fails the bring-up.
+func (r *Reconciler) recordCut(ticket, att, path string) {
+	base, repoID, err := metrics.CaptureCut(path)
+	if err != nil && base == "" {
+		r.opt.Logf("reconcile: record cut provenance %s/%s: %v", ticket, att, err)
+		return
+	}
+	meta, err := attempt.LoadMeta(r.opt.Root, ticket, att)
+	if err != nil {
+		r.opt.Logf("reconcile: record cut provenance %s/%s: load attempt.md: %v", ticket, att, err)
+		return
+	}
+	meta.BaseCommit = base
+	if repoID != "" {
+		meta.RepoID = repoID
+	}
+	if r.opt.DraiverVersion != "" {
+		meta.DraiverVersion = r.opt.DraiverVersion
+	}
+	if err := attempt.WriteMeta(r.opt.Root, meta); err != nil {
+		r.opt.Logf("reconcile: record cut provenance %s/%s: write attempt.md: %v", ticket, att, err)
+	}
 }

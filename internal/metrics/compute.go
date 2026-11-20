@@ -186,9 +186,11 @@ func valueOr(v, source string) Value {
 // and provenance (inferring missing provenance where it can, clearly labelled).
 func computeRecord(root store.Root, a project.Attempt, meta attempt.Meta, lf LogFacts, norm Normalizer, now time.Time) (Record, error) {
 	prov := recordedProvenance(meta)
+	head := AttemptBranch(a.Ticket, a.ID)
 	if prov.BaseCommit.Source == "unknown" && meta.Repo != "" {
-		if sha, err := InferBaseCommit(meta.Repo, a.Ticket, a.ID, meta.Base); err == nil && sha != "" {
+		if sha, h, err := InferBaseCommit(meta.Repo, a.Ticket, a.ID, meta.Base); err == nil && sha != "" {
 			prov.BaseCommit = Value{sha, "inferred"}
+			head = h
 		}
 	}
 	if prov.RepoID.Source == "unknown" && meta.Repo != "" {
@@ -205,7 +207,7 @@ func computeRecord(root store.Root, a project.Attempt, meta attempt.Meta, lf Log
 
 	diff := Diff{}
 	if prov.BaseCommit.Value != "" && meta.Repo != "" {
-		if d, err := FinalDiff(meta.Repo, a.Ticket, a.ID, prov.BaseCommit.Value); err == nil {
+		if d, err := FinalDiff(meta.Repo, prov.BaseCommit.Value, head); err == nil {
 			diff = d
 		}
 	}

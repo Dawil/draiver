@@ -95,6 +95,11 @@ type Worktree struct {
 	// resumed and is swept by Reconcile.
 	Prunable bool
 	Locked   bool
+	// Created is set only on the Worktree a Create call returns when that call
+	// freshly cut the attempt's branch (`worktree add -b`), so HEAD of the new
+	// checkout is exactly the commit the attempt was cut from. A re-attach to an
+	// existing branch, or an already-present checkout, leaves it false (drv-054).
+	Created bool
 }
 
 // Manager creates, removes, and reconciles the worktrees under one repo's
@@ -257,6 +262,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (Worktree, error) {
 	if !ok {
 		return Worktree{}, fmt.Errorf("worktree: created %s but it is not listed", path)
 	}
+	wt.Created = !branchExists
 	return wt, nil
 }
 

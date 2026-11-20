@@ -23,12 +23,17 @@ const (
 	ClassOther    Class = "other"
 )
 
-// Call is a classified tool call: its class, the file paths it reads or edits (as
-// written; the fold relativizes them), and a normalized key identifying a search
-// query so repeated searches can be spotted.
+// Call is a classified tool call: its class, the file paths it reads and the ones
+// it edits (as written; the fold relativizes them), and a normalized key
+// identifying a search query so repeated searches can be spotted.
+//
+// Reads and Edits are collected independently of Class. A compound Bash call
+// (`cat >> f <<EOF ... EOF; go build`) has one class (build) but still edits f, and
+// `cat a; grep x` is a search that still reads a.
 type Call struct {
 	Class Class
-	Paths []string
+	Reads []string
+	Edits []string
 	// Query is the normalized search key for a search-class call, "" otherwise.
 	Query string
 }
@@ -71,10 +76,15 @@ func Classify(tool string, input json.RawMessage) Call {
 	if c.Class == "" {
 		c.Class = ClassOther
 	}
+	p := firstNonEmpty(in.FilePath, in.NotebookPath)
 	switch c.Class {
-	case ClassRead, ClassEdit:
-		if p := firstNonEmpty(in.FilePath, in.NotebookPath); p != "" {
-			c.Paths = []string{p}
+	case ClassRead:
+		if p != "" {
+			c.Reads = []string{p}
+		}
+	case ClassEdit:
+		if p != "" {
+			c.Edits = []string{p}
 		}
 	case ClassSearch:
 		c.Query = normQuery(tool + " " + in.Pattern + " " + in.Glob + " " + in.Type + " " + in.Path)
@@ -188,66 +198,174 @@ var classPriority = map[Class]int{
 var wrappers = map[string]bool{"sudo": true, "time": true, "nice": true, "nohup": true, "command": true, "exec": true, "env": true}
 
 var (
-	segSplit     = regexp.MustCompile(`&&|\|\||;|\n`)
 	envAssign    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 	heredocStart = regexp.MustCompile(`<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 	redirectTo   = regexp.MustCompile(`(?:^|[^0-9&<>])>>?\s*([^\s&|;<>]+)`)
 )
 
-// ClassifyBash classifies a shell command line. The line is split into sequential
+// ClassifyBash classifies a shell command line. Heredoc bodies are set aside (they
+// are data, not commands), then the line is split, quote-aware, into sequential
 // segments (&&, ||, ;, newline). In each segment only the command before the first
-// pipe counts: a trailing `| head` or `| grep x` filters output and does not make
-// the call a read or a search. The highest-priority segment class wins, and paths
-// are collected from every segment.
+// pipe sets the class: a trailing `| head` or `| grep x` filters output and does not
+// make the call a read or a search. The highest-priority segment class wins. Reads
+// and edits are collected from every segment, and from interpreter heredocs
+// (`python3 - <<'EOF'`) that write files.
 func ClassifyBash(cmd string) Call {
 	best := Call{Class: ClassOther}
-	var paths []string
-	for _, seg := range segSplit.Split(stripHeredocs(cmd), -1) {
+	script, bodies := splitHeredocs(cmd)
+	for _, seg := range splitSegments(script) {
 		c := classifySegment(seg)
-		paths = append(paths, c.Paths...)
+		best.Reads = append(best.Reads, c.Reads...)
+		best.Edits = append(best.Edits, c.Edits...)
 		if classPriority[c.Class] > classPriority[best.Class] {
 			best.Class = c.Class
 			best.Query = c.Query
 		}
 	}
-	best.Paths = paths
+	for _, h := range bodies {
+		if !interpreters[commandWord(h.intro)] {
+			continue
+		}
+		if edits := scriptWrites(h.body); len(edits) > 0 {
+			best.Edits = append(best.Edits, edits...)
+			if classPriority[ClassEdit] > classPriority[best.Class] {
+				best.Class, best.Query = ClassEdit, ""
+			}
+		}
+	}
 	return best
 }
 
-// stripHeredocs drops heredoc bodies (`<<'EOF' ... EOF`), whose text is data, not
-// commands, keeping the introducing line.
-func stripHeredocs(cmd string) string {
-	lines := strings.Split(cmd, "\n")
+// heredoc is one heredoc: the line that introduced it and its body.
+type heredoc struct{ intro, body string }
+
+// splitHeredocs separates heredoc bodies (`<<'EOF' ... EOF`) from the command text,
+// keeping each introducing line in the script.
+func splitHeredocs(cmd string) (string, []heredoc) {
 	var out []string
+	var docs []heredoc
 	var term string
-	for _, l := range lines {
+	var body []string
+	for _, l := range strings.Split(cmd, "\n") {
 		if term != "" {
 			if strings.TrimSpace(l) == term {
-				term = ""
+				docs[len(docs)-1].body = strings.Join(body, "\n")
+				term, body = "", nil
+			} else {
+				body = append(body, l)
 			}
 			continue
 		}
 		out = append(out, l)
 		if m := heredocStart.FindStringSubmatch(l); m != nil {
 			term = m[1]
+			docs = append(docs, heredoc{intro: l})
 		}
 	}
-	return strings.Join(out, "\n")
+	if term != "" { // unterminated: keep what there is
+		docs[len(docs)-1].body = strings.Join(body, "\n")
+	}
+	return strings.Join(out, "\n"), docs
 }
 
-// classifySegment classifies one sequential segment.
-func classifySegment(seg string) Call {
-	pipeline := strings.SplitN(seg, "|", 2)
-	head := strings.TrimSpace(pipeline[0])
-	// A redirect into a file is an edit, whatever produced the output
-	// (`cat > f <<EOF`, `echo x >> f`). /dev/null and fd duplication are not edits.
-	var editPaths []string
-	for _, m := range redirectTo.FindAllStringSubmatch(head, -1) {
-		if p := strings.Trim(m[1], `'"`); p != "" && !strings.HasPrefix(p, "/dev/") {
-			editPaths = append(editPaths, p)
+// splitSegments splits a script into sequential segments on &&, ||, ; and newline,
+// ignoring separators inside single or double quotes.
+func splitSegments(script string) []string {
+	var segs []string
+	var cur strings.Builder
+	var quote rune
+	rs := []rune(script)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else if r == '\\' && quote == '"' && i+1 < len(rs) {
+				cur.WriteRune(r)
+				i++
+				r = rs[i]
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == ';' || r == '\n':
+			segs = append(segs, cur.String())
+			cur.Reset()
+			continue
+		case (r == '&' || r == '|') && i+1 < len(rs) && rs[i+1] == r:
+			segs = append(segs, cur.String())
+			cur.Reset()
+			i++
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	return append(segs, cur.String())
+}
+
+// pipelineHead returns the first command of a pipeline, ignoring | inside quotes.
+func pipelineHead(seg string) string {
+	var quote rune
+	for i, r := range seg {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '|':
+			return seg[:i]
 		}
 	}
-	words := shellWords(head)
+	return seg
+}
+
+// interpreters are the commands whose heredoc body is a program, scanned for the
+// files it writes.
+var interpreters = map[string]bool{
+	"python": true, "python3": true, "node": true, "ruby": true, "perl": true, "deno": true, "bun": true,
+}
+
+var (
+	// scriptWriteRe spots a program that writes files: Python open(..., 'w'/'a'/'x'),
+	// pathlib write_text/write_bytes, Node writeFileSync/appendFileSync, Ruby File.write.
+	scriptWriteRe = regexp.MustCompile(`open\([^)\n]*,\s*['"][wax]b?\+?['"]|\.write_(text|bytes)\(|(write|append)FileSync\(|File\.write\(`)
+	// scriptPathRe captures a relative file path literal used as an open() / Path()
+	// argument or assigned to a variable.
+	scriptPathRe = regexp.MustCompile(`(?:open\(|Path\(|FileSync\(|File\.write\(|=)\s*['"]([A-Za-z0-9_.][A-Za-z0-9_./-]*\.[A-Za-z0-9]+)['"]`)
+)
+
+// scriptWrites returns the file paths an interpreter heredoc writes, nil when it
+// writes nothing. It is a heuristic: a writing program's path literals are taken as
+// its targets.
+func scriptWrites(body string) []string {
+	if !scriptWriteRe.MatchString(body) {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range scriptPathRe.FindAllStringSubmatch(body, -1) {
+		p := m[1]
+		if seen[p] || (strings.HasPrefix(p, ".") && !strings.HasPrefix(p, "./")) {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// commandWord is the command name of a segment after wrappers and env assignments.
+func commandWord(seg string) string {
+	words := stripWrappers(shellWords(strings.TrimSpace(pipelineHead(seg))))
+	if len(words) == 0 {
+		return ""
+	}
+	return path.Base(words[0])
+}
+
+func stripWrappers(words []string) []string {
 	for len(words) > 0 && (wrappers[words[0]] || envAssign.MatchString(words[0]) || words[0] == "(" || words[0] == "{") {
 		words = words[1:]
 	}
@@ -255,27 +373,46 @@ func classifySegment(seg string) Call {
 	if len(words) > 1 && words[0] == "timeout" {
 		words = words[2:]
 	}
+	return words
+}
+
+// classifySegment classifies one sequential segment.
+func classifySegment(seg string) Call {
+	head := strings.TrimSpace(pipelineHead(seg))
+	// A redirect into a file is an edit, whatever produced the output
+	// (`cat > f <<EOF`, `echo x >> f`). /dev/null and fd duplication are not edits.
+	// Redirects are found on a copy with quoted text masked, so `awk 'NR>1'` is not
+	// a redirect into a file named 1. Masking preserves byte offsets.
+	masked := maskQuotes(head)
+	var editPaths []string
+	for _, m := range redirectTo.FindAllStringSubmatchIndex(masked, -1) {
+		if p := strings.Trim(head[m[2]:m[3]], `'"`); p != "" && !strings.HasPrefix(p, "/dev/") {
+			editPaths = append(editPaths, p)
+		}
+	}
+	words := stripWrappers(shellWords(stripRedirects(head, masked)))
 	if len(words) == 0 {
-		return Call{Class: ClassOther}
+		return Call{Class: ClassOther, Edits: editPaths}
 	}
 	name := path.Base(words[0])
 	if strings.HasPrefix(words[0], "./") {
 		name = words[0] // keep ./gradlew style launchers distinct
 	}
+	edit := func(paths ...string) Call { return Call{Class: ClassEdit, Edits: append(editPaths, paths...)} }
 	if name == "cd" || name == "export" || name == "echo" || name == "printf" || name == "true" || name == "set" {
 		if len(editPaths) > 0 {
-			return Call{Class: ClassEdit, Paths: editPaths}
+			return edit()
 		}
 		return Call{Class: ClassOther}
 	}
 	args := words[1:]
 	rest := strings.Join(nonFlagsPrefix(args), " ")
+	joined := strings.Join(args, " ")
 	class := ClassOther
 	for _, r := range bashRules {
 		if r.cmd != name {
 			continue
 		}
-		joined := strings.Join(args, " ")
 		if r.sub == "" || rest == r.sub || strings.HasPrefix(rest, r.sub+" ") || joined == r.sub || strings.HasPrefix(joined, r.sub+" ") {
 			class = r.class
 			break
@@ -283,27 +420,69 @@ func classifySegment(seg string) Call {
 	}
 	// In-place editors are edits, not reads.
 	if (name == "sed" || name == "perl") && hasInPlace(args) {
-		return Call{Class: ClassEdit, Paths: append(editPaths, lastNonFlag(args)...)}
+		return edit(lastNonFlag(args)...)
 	}
-	if name == "tee" || name == "mv" || name == "cp" || name == "rm" || name == "touch" || name == "patch" {
-		return Call{Class: ClassEdit, Paths: append(editPaths, lastNonFlag(args)...)}
+	switch name {
+	case "tee", "touch", "patch", "rm":
+		return edit(nonFlags(args)...)
+	case "mv", "cp":
+		if name == "mv" {
+			return edit(nonFlags(args)...)
+		}
+		return edit(lastNonFlag(args)...)
 	}
-	if len(editPaths) > 0 && class != ClassTest && class != ClassBuild {
-		return Call{Class: ClassEdit, Paths: editPaths}
-	}
-	c := Call{Class: class}
+	c := Call{Class: class, Edits: editPaths}
 	switch class {
 	case ClassRead:
 		if readArgCmds[name] {
-			c.Paths = fileArgs(args)
+			c.Reads = fileArgs(args)
 		} else if name == "sed" || name == "awk" || name == "jq" {
 			// sed -n '1,80p' FILE / awk PROG FILE / jq EXPR FILE: the last arg is the file.
-			c.Paths = lastNonFlag(args[min(1, len(args)):])
+			c.Reads = lastNonFlag(args[min(1, len(args)):])
 		}
 	case ClassSearch:
 		c.Query = normQuery(head)
 	}
+	// Output redirected into a file by a read or search is an edit of that file;
+	// tests and builds that write a log are still tests and builds.
+	if len(editPaths) > 0 && class != ClassTest && class != ClassBuild {
+		c.Class = ClassEdit
+	}
 	return c
+}
+
+// stripRedirects removes redirections (`> f`, `2>&1`, `<<'EOF'`, `< in`) so their
+// targets are not mistaken for command arguments.
+var redirectRe = regexp.MustCompile(`\d*(>>?|<<-?|<)&?\s*(['"][^'"]*['"]|[^\s;&|<>]+)?`)
+
+func stripRedirects(s, masked string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range redirectRe.FindAllStringIndex(masked, -1) {
+		b.WriteString(s[last:m[0]])
+		b.WriteByte(' ')
+		last = m[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// maskQuotes returns s with every byte inside single or double quotes replaced by
+// '_', the quotes themselves kept, so offsets line up with s.
+func maskQuotes(s string) string {
+	b := []byte(s)
+	var quote byte
+	for i := 0; i < len(b); i++ {
+		switch {
+		case quote != 0 && b[i] == quote:
+			quote = 0
+		case quote != 0:
+			b[i] = '_'
+		case b[i] == '\'' || b[i] == '"':
+			quote = b[i]
+		}
+	}
+	return string(b)
 }
 
 // shellWords splits a command into words, honouring single and double quotes.
@@ -374,6 +553,17 @@ func fileArgs(args []string) []string {
 			continue
 		}
 		out = append(out, a)
+	}
+	return out
+}
+
+// nonFlags returns every non-flag argument.
+func nonFlags(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if a != "" && !strings.HasPrefix(a, "-") {
+			out = append(out, a)
+		}
 	}
 	return out
 }

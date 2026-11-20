@@ -471,6 +471,7 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		DefaultRepo:        ctlRepo,
 		Adapters:           claudeAdapters,
 		AdapterVersion:     adapterVersion,
+		DraiverVersion:     version,
 		Actor:              resolveActor(),
 		ContextLimit:       contextLimit,
 		DefaultSupervision: defaultSupervision,

@@ -106,22 +106,60 @@ func HeadSHA(dir string) (string, error) { return git(dir, "rev-parse", "HEAD") 
 // AttemptBranch is the branch draiver cuts an attempt's worktree on.
 func AttemptBranch(ticket, att string) string { return "draiver/" + ticket + "/" + att }
 
-// InferBaseCommit infers an attempt's base commit after the fact: the merge-base of
-// the attempt branch and its base branch. It needs both to still exist in repo.
-func InferBaseCommit(repo, ticket, att, base string) (string, error) {
+// InferBaseCommit infers an attempt's base commit after the fact, and the head the
+// attempt's work ends at. Normally that is the merge-base of the attempt branch and
+// its base branch, with the branch itself as head. It needs both to still exist.
+//
+// Once the branch has been merged, that merge-base is the branch tip itself, which
+// would make the final diff empty. Two shapes are recovered:
+//
+//   - The branch was fast-forwarded onto the merge commit that landed it (its tip is
+//     a merge whose subject names the branch): head is that merge's second parent
+//     (the attempt's own last commit) and base is the merge-base of its parents.
+//   - The branch tip is still the attempt's own last commit, now reachable from base:
+//     the earliest merge on base that brought it in gives base as it stood (its first
+//     parent), and base is the merge-base of that and the tip.
+func InferBaseCommit(repo, ticket, att, base string) (baseCommit, head string, err error) {
 	if base == "" {
 		base = "HEAD"
 	}
-	return git(repo, "merge-base", AttemptBranch(ticket, att), base)
+	branch := AttemptBranch(ticket, att)
+	mb, err := git(repo, "merge-base", branch, base)
+	if err != nil {
+		return "", "", err
+	}
+	tip, err := git(repo, "rev-parse", branch)
+	if err != nil {
+		return "", "", err
+	}
+	if mb != tip {
+		return mb, branch, nil
+	}
+	if subj, err := git(repo, "log", "-1", "--format=%s", tip); err == nil && strings.Contains(subj, branch) {
+		if second, err := git(repo, "rev-parse", "--verify", "--quiet", tip+"^2"); err == nil && second != "" {
+			if pre, err := git(repo, "merge-base", tip+"^1", second); err == nil && pre != "" {
+				return pre, second, nil
+			}
+		}
+	}
+	merges, err := git(repo, "rev-list", "--ancestry-path", "--merges", "--reverse", tip+".."+base)
+	if err == nil && merges != "" {
+		first := strings.SplitN(merges, "\n", 2)[0]
+		if pre, err := git(repo, "merge-base", first+"^1", tip); err == nil && pre != "" {
+			return pre, branch, nil
+		}
+	}
+	return mb, branch, nil
 }
 
-// FinalDiff returns the files changed on the attempt branch relative to
-// baseCommit, and the total changed line count (added + deleted).
-func FinalDiff(repo, ticket, att, baseCommit string) (Diff, error) {
-	if repo == "" || baseCommit == "" {
-		return Diff{}, fmt.Errorf("metrics: final diff needs a repo and a base commit")
+// FinalDiff returns the files changed between baseCommit and head (the attempt
+// branch, or the commit its work ends at), and the total changed line count
+// (added + deleted).
+func FinalDiff(repo, baseCommit, head string) (Diff, error) {
+	if repo == "" || baseCommit == "" || head == "" {
+		return Diff{}, fmt.Errorf("metrics: final diff needs a repo, a base commit and a head")
 	}
-	out, err := git(repo, "diff", "--numstat", "--no-renames", baseCommit, AttemptBranch(ticket, att), "--")
+	out, err := git(repo, "diff", "--numstat", "--no-renames", baseCommit, head, "--")
 	if err != nil {
 		return Diff{}, err
 	}

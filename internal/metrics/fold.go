@@ -64,6 +64,8 @@ type pendingCall struct {
 	index int
 	class Class
 	call  Call
+	bash  bool
+	snap  *editSnap // set when the call edits files
 }
 
 // editSnap is the exploration state captured when a file is first edited.
@@ -178,44 +180,16 @@ func (s *State) onCall(ev agent.Event) {
 	idx := s.toolCalls
 	s.toolCalls++
 	s.byClass[c.Class]++
-	s.pending[ev.Tool.ID] = pendingCall{index: idx, class: c.Class, call: c}
-
-	switch c.Class {
-	case ClassRead:
-		for _, p := range c.Paths {
-			rel, ok := s.rel(p)
-			if !ok {
-				continue
-			}
-			if s.readFiles[rel] == 0 {
-				s.readOrder = append(s.readOrder, rel)
-			}
-			s.readFiles[rel]++
-			if IsDoc(rel) {
-				s.docsRead[rel] = true
-				if s.firstDocAt < 0 {
-					s.firstDocAt = idx
-				}
-			}
-		}
-	case ClassEdit:
-		snap := &editSnap{index: idx, readish: s.readish, searches: s.searches, ctx: s.ctx, msgID: ev.MessageID}
-		s.awaitingCtx = append(s.awaitingCtx, snap)
-		if s.firstEditAny == nil {
-			s.firstEditAny = snap
-		}
-		for _, p := range c.Paths {
-			rel, ok := s.rel(p)
-			if !ok {
-				continue
-			}
-			s.editFiles[rel] = true
-			if s.firstEditTo[rel] == nil {
-				s.firstEditTo[rel] = snap
-			}
-		}
+	pc := pendingCall{index: idx, class: c.Class, call: c, bash: ev.Tool.Name == "Bash"}
+	// An edit call snapshots the exploration state now, so its prefix covers the
+	// calls strictly before it. The snapshot is committed only once the result shows
+	// the edit happened.
+	if len(c.Edits) > 0 {
+		pc.snap = &editSnap{index: idx, readish: s.readish, searches: s.searches, ctx: s.ctx, msgID: ev.MessageID}
+		s.awaitingCtx = append(s.awaitingCtx, pc.snap)
 	}
-	// Counted after the snapshot, so a prefix covers the calls strictly before it.
+	s.pending[ev.Tool.ID] = pc
+
 	switch c.Class {
 	case ClassRead, ClassSubagent:
 		s.readish++
@@ -236,12 +210,27 @@ func (s *State) onResult(ev agent.Event) {
 		return
 	}
 	delete(s.pending, ev.Tool.ID)
-	if pc.class == ClassSearch && IsEmptySearch(ev.Tool.Result) {
+	if strings.Contains(ev.Tool.Result, "[Request interrupted by user") {
+		s.interrupts++
+	}
+	empty := pc.class == ClassSearch && IsEmptySearch(ev.Tool.Result)
+	if empty {
 		s.emptySearches++
 	}
-	failed := ev.Tool.IsError
+	// A search that found nothing (grep exits 1) is not an error.
+	failed := ev.Tool.IsError && !empty
+	kind := ErrNone
 	if failed {
-		s.errs[ClassifyError(pc.class, ev.Tool.Result)]++
+		kind = ClassifyError(pc.class, ev.Tool.Result)
+		s.errs[kind]++
+	}
+	// Reads and edits count only when the call took effect. A failed file tool (an
+	// Edit whose old_string did not match, a Read of a missing file) touched nothing.
+	// A failed Bash call may still have run its earlier segments, so it counts unless
+	// it never ran (permission denial) or could not find its command or file.
+	touched := !failed || (pc.bash && kind != ErrPermission && kind != ErrEnvDiscovery)
+	if touched {
+		s.commitTouches(pc)
 	}
 	switch pc.class {
 	case ClassTest:
@@ -257,14 +246,47 @@ func (s *State) onResult(ev agent.Event) {
 	}
 }
 
+// commitTouches records the files a completed call read and edited.
+func (s *State) commitTouches(pc pendingCall) {
+	for _, p := range pc.call.Reads {
+		rel, ok := s.rel(p)
+		if !ok {
+			continue
+		}
+		if s.readFiles[rel] == 0 {
+			s.readOrder = append(s.readOrder, rel)
+		}
+		s.readFiles[rel]++
+		if IsDoc(rel) {
+			s.docsRead[rel] = true
+			if s.firstDocAt < 0 || pc.index < s.firstDocAt {
+				s.firstDocAt = pc.index
+			}
+		}
+	}
+	for _, p := range pc.call.Edits {
+		rel, ok := s.rel(p)
+		if !ok {
+			continue
+		}
+		s.editFiles[rel] = true
+		if s.firstEditAny == nil || pc.snap.index < s.firstEditAny.index {
+			s.firstEditAny = pc.snap
+		}
+		if s.firstEditTo[rel] == nil || pc.snap.index < s.firstEditTo[rel].index {
+			s.firstEditTo[rel] = pc.snap
+		}
+	}
+}
+
 // rel turns a path as the agent wrote it into a repo-relative one. Paths under the
 // session's working directory are made relative. Relative paths are taken as
 // already repo-relative. Absolute paths elsewhere (/tmp, ~/.claude, the data root)
 // are not codebase files and are dropped (ok=false).
 func (s *State) rel(p string) (string, bool) {
 	p = strings.TrimSpace(p)
-	if p == "" {
-		return "", false
+	if p == "" || strings.ContainsAny(p, "*?[{$`") {
+		return "", false // a glob or an expansion names no single file
 	}
 	if strings.HasPrefix(p, "~") {
 		return "", false

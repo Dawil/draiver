@@ -44,6 +44,10 @@ type Watcher struct {
 	// same Raw, so teeing per event would duplicate the line; dedupe consecutive
 	// identical Raw to write each source line exactly once.
 	lastRaw []byte
+
+	// model is the last model recorded into the meter, so a model is written only
+	// when it changes rather than once per event (drv-054).
+	model string
 }
 
 // New returns a Watcher that promotes into ticket/attempt's log (attributing
@@ -92,6 +96,13 @@ func (w *Watcher) Process(ev agent.Event) (promoted bool, err error) {
 		if err := w.meter(*ev.Usage); err != nil {
 			return false, err
 		}
+	}
+	if ev.Model != "" && ev.Model != w.model {
+		model := ev.Model
+		if _, err := w.sess.UpdateMeter(func(m *session.Meter) { m.Model = model }); err != nil {
+			return false, fmt.Errorf("watch: meter model: %w", err)
+		}
+		w.model = model
 	}
 	p, ok := w.rec.Recognize(ev)
 	if !ok {

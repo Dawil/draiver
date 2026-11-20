@@ -65,6 +65,12 @@ type Config struct {
 	// creation. Empty means HEAD; ignored once the branch exists (a resume
 	// re-attaches to it).
 	Ref string
+
+	// OnCut, when set, is called with the worktree path right after Spawn or Resume
+	// freshly cut the attempt's branch (worktree.Worktree.Created), before the agent
+	// starts, so the caller can record the attempt's base-commit provenance
+	// (drv-054). It is best-effort: it cannot fail the spawn.
+	OnCut func(path string)
 }
 
 // Handle is one attempt's live-session controller. Construct it with New, then
@@ -129,6 +135,7 @@ func (h *Handle) Spawn(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("manage: worktree for %s/%s: %w", h.cfg.Ticket, h.cfg.Attempt, err)
 	}
+	h.cut(wt)
 
 	a := h.newAdapter()
 	sp := h.spec(wt.Path)
@@ -162,6 +169,13 @@ func (h *Handle) Spawn(ctx context.Context) error {
 	}
 	h.adapter = a
 	return nil
+}
+
+// cut reports a freshly cut worktree to the OnCut hook.
+func (h *Handle) cut(wt worktree.Worktree) {
+	if wt.Created && h.cfg.OnCut != nil {
+		h.cfg.OnCut(wt.Path)
+	}
 }
 
 // Kill reaps the live session process, keeping its session id and the ticket log
@@ -217,6 +231,7 @@ func (h *Handle) Resume(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("manage: worktree for %s/%s: %w", h.cfg.Ticket, h.cfg.Attempt, err)
 	}
+	h.cut(wt)
 
 	a := h.newAdapter()
 	if err := a.Resume(ctx, ident.SessionID, h.spec(wt.Path)); err != nil {

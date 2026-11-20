@@ -97,8 +97,7 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		opts.IncludeRunning = true // build it, then decide below with a clear message
-		row, err := metrics.Build(root, ticket, att, metrics.Options{Mode: mode, IncludeRunning: metricsIncludeRunning || !true, Normalize: claudecode.Normalize})
+		row, err := metrics.Build(root, ticket, att, opts)
 		if err != nil {
 			return err
 		}

@@ -312,3 +312,26 @@ func TestIngest_HonorsContextCancel(t *testing.T) {
 		t.Fatalf("ingest err = %v, want context.Canceled", err)
 	}
 }
+
+// The model the stream reports actually running is recorded on the meter (drv-054),
+// written only when it changes.
+func TestProcessRecordsObservedModel(t *testing.T) {
+	w, _, _, _, sess := newWatcher(t)
+	for _, ev := range []agent.Event{
+		{Kind: agent.EventSystem, Model: "model-a"},
+		{Kind: agent.EventAssistant, Model: "model-a", Text: "hi"},
+		{Kind: agent.EventAssistant, Model: "model-b", Text: "switched"},
+		{Kind: agent.EventAssistant, Text: "no model on this one"},
+	} {
+		if _, err := w.Process(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := sess.ReadMeter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Model != "model-b" {
+		t.Fatalf("meter model = %q, want model-b", m.Model)
+	}
+}
