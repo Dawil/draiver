@@ -22,12 +22,14 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agentmsg"
+	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/kb"
 	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/manage"
+	"github.com/Dawil/draiver/internal/metrics"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/protocol"
 	"github.com/Dawil/draiver/internal/session"
@@ -139,6 +141,9 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		// (drvctl-021).
 		Ref:  a.Base,
 		Spec: spec,
+		// Record the attempt's metrics provenance (drv-054) the moment its branch is
+		// freshly cut, when HEAD of the checkout is exactly the base commit.
+		OnCut: func(path string) { r.recordCut(a.Ticket, a.ID, path) },
 	})
 	if err != nil {
 		_ = sess.Close()
@@ -430,4 +435,37 @@ func authoritativeWake(eventType string) bool {
 		return true
 	}
 	return false
+}
+
+// recordCut writes an attempt's cut provenance into attempt.md (drv-054): the commit
+// its worktree was freshly cut from, the path-independent repo identity, and the
+// draiver build. Best-effort: a failure is logged and never fails the bring-up.
+func (r *Reconciler) recordCut(ticket, att, path string) {
+	if err := RecordCut(r.opt.Root, ticket, att, path, r.opt.DraiverVersion); err != nil {
+		r.opt.Logf("reconcile: record cut provenance %s/%s: %v", ticket, att, err)
+	}
+}
+
+// RecordCut is recordCut's body, exported so the acceptance suite can drive the same
+// writer over a real freshly cut worktree.
+func RecordCut(root store.Root, ticket, att, path, draiverVersion string) error {
+	base, repoID, err := metrics.CaptureCut(path)
+	if err != nil && base == "" {
+		return err
+	}
+	meta, err := attempt.LoadMeta(root, ticket, att)
+	if err != nil {
+		return fmt.Errorf("load attempt.md: %w", err)
+	}
+	meta.BaseCommit = base
+	if repoID != "" {
+		meta.RepoID = repoID
+	}
+	if draiverVersion != "" {
+		meta.DraiverVersion = draiverVersion
+	}
+	if err := attempt.WriteMeta(root, meta); err != nil {
+		return fmt.Errorf("write attempt.md: %w", err)
+	}
+	return nil
 }

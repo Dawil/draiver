@@ -74,6 +74,12 @@ type Meter struct {
 	// rule (per-request frames only) and agent.Totals for the derivations.
 	Totals agent.Totals `json:"totals"`
 
+	// Model is the model the session's stream last reported actually running
+	// (assistant messages' `model`, or the init frame's). It is folded into
+	// attempt.md's model_used on retire as drv-054 provenance: what ran, not what
+	// was requested. Empty until the stream names a model.
+	Model string `json:"model,omitempty"`
+
 	// Respawns counts how many times this attempt's session has been reaped and
 	// restarted; the StartLimit ceiling watches this counter.
 	Respawns int `json:"respawns"`

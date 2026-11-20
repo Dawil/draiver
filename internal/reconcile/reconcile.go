@@ -126,6 +126,11 @@ type Options struct {
 	// "unattributable" rather than the daemon refusing to start.
 	AdapterVersion string
 
+	// DraiverVersion is this draiver build's version, recorded in attempt.md as
+	// metrics provenance when an attempt's worktree is first cut (drv-054). Empty
+	// leaves the field unrecorded.
+	DraiverVersion string
+
 	// Actor is the identity stamped on promoted log events and escalations, e.g.
 	// "agent:claude-code". Required.
 	Actor string
@@ -1058,6 +1063,11 @@ func (r *Reconciler) foldMetrics(key worktree.Key) {
 	}
 	metrics := m.Totals.Metrics()
 	meta.Metrics = &metrics
+	// The model the transcript shows actually ran (drv-054 provenance), as distinct
+	// from the requested meta.Model.
+	if m.Model != "" {
+		meta.ModelUsed = m.Model
+	}
 	// Fold the run's protocol-append provenance (drvctl-034) alongside the metrics:
 	// the version handle of the invariant protocol this session launched with lives
 	// in session.json (recorded at spawn), and attempt.md is its durable A/B home.

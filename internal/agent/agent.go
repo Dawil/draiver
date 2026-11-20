@@ -8,6 +8,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // Adapter drives one live session: one OS process against one working
@@ -196,6 +197,21 @@ type Event struct {
 
 	// Err (EventError).
 	Err string `json:"err,omitempty"`
+
+	// TS is when the agent recorded the source line, zero when the wire line carries
+	// no timestamp. Model is the model that produced an assistant message (or the
+	// session's model on EventSystem), so a consumer can record what actually ran
+	// rather than what was requested. MessageID groups the events one agent message
+	// fanned out into: a per-message usage figure repeated on each of them must be
+	// counted once. Cwd is the session's working directory, set on EventSystem.
+	// ParentToolID is set on events emitted inside a subagent: the id of the tool call
+	// (e.g. Task) that spawned it. These are normalized provenance fields that the
+	// drv-054 metrics fold reads. Every one is optional.
+	TS           time.Time `json:"ts,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	MessageID    string    `json:"message_id,omitempty"`
+	Cwd          string    `json:"cwd,omitempty"`
+	ParentToolID string    `json:"parent_tool_id,omitempty"`
 
 	// Raw is the untouched agent line this Event was normalized from, for
 	// journalling. Nil for events the adapter synthesizes.

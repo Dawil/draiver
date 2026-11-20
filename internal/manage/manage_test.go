@@ -466,3 +466,34 @@ func TestNewValidatesArgs(t *testing.T) {
 		})
 	}
 }
+
+// OnCut fires once, with the worktree path, when Spawn freshly cuts the branch, and
+// not again when a later Spawn reuses the checkout (drv-054 provenance).
+func TestOnCutFiresOnlyOnAFreshCut(t *testing.T) {
+	sess, wm, ticket, att := newFixture(t)
+	f := &factory{}
+	var cuts []string
+	h, err := manage.New(sess, wm, f.new, manage.Config{
+		Ticket: ticket, Attempt: att, Adapter: "claude-code",
+		OnCut: func(path string) { cuts = append(cuts, path) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := h.Spawn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(cuts) != 1 || cuts[0] == "" {
+		t.Fatalf("cuts after first spawn = %v", cuts)
+	}
+	if err := h.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Spawn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(cuts) != 1 {
+		t.Fatalf("a respawn on the existing checkout must not re-cut: %v", cuts)
+	}
+}

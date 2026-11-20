@@ -598,3 +598,30 @@ func revParse(t *testing.T, dir, rev string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// Created marks only the Create call that freshly cut the branch (drv-054): HEAD of
+// that checkout is exactly the attempt's base commit. An idempotent re-Create and a
+// re-attach to a kept branch are not cuts.
+func TestCreatedMarksOnlyAFreshCut(t *testing.T) {
+	m := newManager(t)
+	ctx := context.Background()
+	wt := mustCreate(t, m, "PROJ-1", "0001")
+	if !wt.Created {
+		t.Fatal("first Create must report Created")
+	}
+	again := mustCreate(t, m, "PROJ-1", "0001")
+	if again.Created {
+		t.Fatal("an idempotent re-Create is not a cut")
+	}
+	commitIn(t, wt.Path, "work")
+	if err := m.Remove(ctx, wt.Key, RemoveOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	re, err := m.Create(ctx, Spec{Key: wt.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if re.Created {
+		t.Fatal("re-attaching to a kept branch is not a cut")
+	}
+}

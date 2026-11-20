@@ -157,6 +157,16 @@ func sanitizeEnvSlug(env string) string {
 	return s
 }
 
+// AttemptMetricsPath is an attempt's derived agent-performance metrics record
+// (drv-054): the persisted output of `draiver metrics --compute`, folded from the
+// session transcript, the log and the final diff. It is derived data, outside the
+// hash chain and outside the rebuildable session/ dir (so a session flush does not
+// drop it). It is safe to delete and is rebuilt from the transcript on the next
+// compute. It is deliberately separate from attempt.md's `metrics:` token block.
+func (r Root) AttemptMetricsPath(id, attempt string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), "metrics.json")
+}
+
 // DesiredMarkerPath is an attempt's transient imperative desired-marker: the
 // stamped "the client asked the daemon to run this now" flag `ctl start` writes
 // and the reconcile loop unions into its desired set (drvctl-016). It is

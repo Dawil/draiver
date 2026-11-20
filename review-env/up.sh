@@ -81,6 +81,13 @@ SYS
 "$BIN" new    LEDGER-2 --title "$ENV_NAME: ledger needs a human"    --repo "$PWD" --base main --type codebase >/dev/null 2>&1 || true
 "$BIN" escalate LEDGER-2 "which trunk is authoritative for $ENV_NAME?" >/dev/null 2>&1 || true
 
+# drv-054: three WIDGET-* attempts carrying the recorded fixture transcript, across two
+# clones of one remote, so the reviewer can run the metrics verb against real output:
+#   DRAIVER_DATA=$DATA $BIN metrics --codebase $RUN/metrics/widget-a --compute
+#   DRAIVER_DATA=$DATA $BIN metrics WIDGET-1 --json
+# Best-effort like every seed above. See review-env/seed-metrics.sh.
+DRAIVER_BIN="$BIN" sh review-env/seed-metrics.sh "$PWD/$RUN/metrics" >/dev/null 2>&1 || true
+
 # drv-043/drv-046: two Review tickets carrying real promotion-results so the reviewer
 # sees the board card's INTERACTIVE promotion controls live — the per-environment chips
 # (drv-046 makes them clickable, grey until first run) and the all-green "mark done" tick.
@@ -194,6 +201,7 @@ while [ "$i" -lt 150 ]; do
     # Best-effort: a hiccup here must never stop the env from coming up.
     node -e "const http=require('http');const req=http.request({host:'127.0.0.1',port:Number(process.env.DRAIVER_REVIEW_PORT),path:'/ticket/DUMMY-PROMO/0001/promote/staging?surface=card',method:'POST'},function(r){r.resume();r.on('end',function(){process.exit(0)})});req.on('error',function(){process.exit(0)});req.end();" 2>/dev/null || true
     echo "up: draiver webui listening on $DRAIVER_REVIEW_PORT (ENV_NAME=$ENV_NAME, data=$DATA)"
+    echo "up: metrics: DRAIVER_DATA=$DATA $BIN metrics --codebase $PWD/$RUN/metrics/widget-a --compute"
     exit 0
   fi
   i=$((i + 1))

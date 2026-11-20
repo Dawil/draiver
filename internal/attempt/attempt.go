@@ -63,6 +63,22 @@ type Meta struct {
 	// or none at all).
 	Overlay       string `yaml:"overlay,omitempty"`
 	OverlayCommit string `yaml:"overlay_commit,omitempty"`
+
+	// BaseCommit, RepoID, ModelUsed and DraiverVersion are drv-054's metrics
+	// provenance: which version of the codebase and which agent produced the
+	// attempt's numbers. BaseCommit is the SHA the attempt's worktree was cut from,
+	// captured by the supervisor when it first cuts the branch. RepoID is a
+	// path-independent codebase identity: the normalized `origin` URL, else the
+	// canonical git toplevel. ModelUsed is the model the transcript shows actually
+	// ran, folded on retire. It is distinct from Model, which is what was requested.
+	// DraiverVersion is the draiver build that cut the worktree. All four are
+	// machine-written and render only once recorded. An attempt that predates them
+	// leaves them empty, and `draiver metrics` reports unknown or a labelled
+	// inferred value.
+	BaseCommit     string `yaml:"base_commit,omitempty"`
+	RepoID         string `yaml:"repo_id,omitempty"`
+	ModelUsed      string `yaml:"model_used,omitempty"`
+	DraiverVersion string `yaml:"draiver_version,omitempty"`
 }
 
 // New identifies the parameters for creating an attempt.
@@ -336,6 +352,18 @@ func metaFrontmatter(m Meta) string {
 	}
 	if strings.TrimSpace(m.OverlayCommit) != "" {
 		b.WriteString(metaLine("overlay_commit", m.OverlayCommit))
+	}
+	// drv-054 metrics provenance renders only once recorded. It is machine-written
+	// like overlay above, so there is no commented placeholder.
+	for _, kv := range [][2]string{
+		{"base_commit", m.BaseCommit},
+		{"repo_id", m.RepoID},
+		{"model_used", m.ModelUsed},
+		{"draiver_version", m.DraiverVersion},
+	} {
+		if strings.TrimSpace(kv[1]) != "" {
+			b.WriteString(metaLine(kv[0], kv[1]))
+		}
 	}
 	return b.String()
 }

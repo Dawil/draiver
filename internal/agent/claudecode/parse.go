@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
 )
@@ -19,10 +20,31 @@ type wireEnvelope struct {
 	Subtype   string          `json:"subtype"`
 	SessionID string          `json:"session_id"`
 	Message   json.RawMessage `json:"message"`
+
+	// Provenance carried alongside the payload (drv-054): the line's wall-clock
+	// timestamp, the init frame's cwd and model, and the subagent parent link.
+	Timestamp       string `json:"timestamp"`
+	Cwd             string `json:"cwd"`
+	Model           string `json:"model"`
+	ParentToolUseID string `json:"parent_tool_use_id"`
+}
+
+// ts parses the envelope timestamp; an absent or malformed one is zero.
+func (e wireEnvelope) ts() time.Time {
+	if e.Timestamp == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, e.Timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // wireMessage is the Anthropic message inside an assistant/user line.
 type wireMessage struct {
+	ID      string        `json:"id"`
+	Model   string        `json:"model"`
 	Role    string        `json:"role"`
 	Content []wireContent `json:"content"`
 	Usage   *wireUsage    `json:"usage"`
@@ -92,7 +114,8 @@ func normalize(line []byte) []agent.Event {
 		// The init frame marks the session online; other system subtypes
 		// (thinking_tokens, ...) are progress noise we drop.
 		if env.Subtype == "init" {
-			return []agent.Event{{Kind: agent.EventSystem, SessionID: env.SessionID, Raw: raw}}
+			return []agent.Event{{Kind: agent.EventSystem, SessionID: env.SessionID, Raw: raw,
+				TS: env.ts(), Model: env.Model, Cwd: env.Cwd}}
 		}
 		return nil
 
@@ -100,7 +123,11 @@ func normalize(line []byte) []agent.Event {
 		return normalizeMessage(env, raw)
 
 	case "result":
-		return normalizeResult(line, raw)
+		evs := normalizeResult(line, raw)
+		for i := range evs {
+			evs[i].TS = env.ts()
+		}
+		return evs
 
 	case "control_request":
 		// The only inbound control request we model is the tool-permission
@@ -178,6 +205,15 @@ func normalizeMessage(env wireEnvelope, raw json.RawMessage) []agent.Event {
 	// context/cost gauge advances per assistant message, not only per turn.
 	if msg.Usage != nil {
 		out = append(out, usageEvent(env.SessionID, msg.Usage, 0, raw))
+	}
+	ts := env.ts()
+	for i := range out {
+		out[i].TS = ts
+		out[i].MessageID = msg.ID
+		out[i].ParentToolID = env.ParentToolUseID
+		if msg.Role == "assistant" {
+			out[i].Model = msg.Model
+		}
 	}
 	return out
 }
