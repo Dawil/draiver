@@ -16,6 +16,11 @@
 #             src/steps_widget12.go, a stale-binary `unknown command`, a transient
 #             tmp/notes.txt, and a shipped zz_widgetNN_focus_test.go), with a
 #             context-auto-stop escalation and a review on the log
+#   (drv-057) widget-a's main then gains C1, an AGENTS.md edit tagged agents-md-change:
+#   WIDGET-50, WIDGET-51  widget-a, cut after C1, the lighter widget transcript plus a
+#             scratch `cd /tmp/widget-scratch && cat > a.md` that metrics v3 ignores
+#   so `--split-at agents-md-change` puts WIDGET-1/40/41 before, WIDGET-50/51 after, and
+#   WIDGET-3 (no branch, base unknown) in the excluded count.
 # None records cut provenance, so base_commit shows as `inferred` / `unknown`. The seeded
 # log is written at seed time, after the fixture's whole clock, so every log ending
 # lands in the LAST session's (open-ended) window: session 1 reads `ended_by none` and
@@ -30,6 +35,8 @@
 #   draiver metrics WIDGET-40 --compute                        # sessions, invention
 #   draiver metrics --codebase WORKDIR/widget-a --compute --by file
 #   draiver metrics --codebase WORKDIR/widget-a --compute --by command
+#   draiver metrics --codebase WORKDIR/widget-a --compute --split-at agents-md-change
+#   draiver metrics --codebase WORKDIR/widget-a --compute --split-at agents-md-change --by file
 set -eu
 
 : "${DRAIVER_DATA:?DRAIVER_DATA must be set}"
@@ -108,4 +115,22 @@ for n in 40 41; do
   seq=$("$BIN" log WIDGET-$n --type escalation --tag context-auto-stop "Context window exhausted." | sed -n 's/.*escalation #\([0-9]*\).*/\1/p')
   DRAIVER_ACTOR=human:review "$BIN" resolve WIDGET-$n "$seq" "Restart context window." --attempt 0001 >/dev/null
   "$BIN" review WIDGET-$n "big.go fixed" --url "http://example.test/compare/main...draiver/WIDGET-$n/0001" >/dev/null
+done
+
+# drv-057: C1, an AGENTS.md change on main, then two attempts cut after it. Their
+# transcript is the lighter one plus a scratch write in /tmp after a `cd`, which
+# metrics v3 resolves outside the worktree and drops.
+printf '# Agents\nRun `go test ./...`.\nScratch goes in /tmp, never the repo root.\n' >"$A/AGENTS.md"
+g -C "$A" commit -qam "AGENTS.md: scratch in /tmp"
+g -C "$A" tag agents-md-change
+{
+  grep -v -e '"type":"result"' "$WORK/lighter.stream.jsonl"
+  printf '%s\n' '{"type":"assistant","parent_tool_use_id":null,"session_id":"fixture-session-widget","timestamp":"2026-11-01T10:10:40.000Z","message":{"model":"claude-fixture-2","id":"msg_scratch","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_scratch","name":"Bash","input":{"command":"cd /tmp/widget-scratch && cat > a.md <<EOF\nnotes\nEOF"}}],"usage":{"input_tokens":1000,"cache_read_input_tokens":20000,"cache_creation_input_tokens":0,"output_tokens":100}}}'
+  printf '%s\n' '{"type":"user","parent_tool_use_id":null,"session_id":"fixture-session-widget","timestamp":"2026-11-01T10:10:45.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_scratch","content":"","is_error":false}]}}'
+} >"$WORK/after.stream.jsonl"
+for n in 50 51; do
+  "$BIN" new WIDGET-$n --title "metrics: widget fix after the AGENTS.md change ($n)" --repo "$A" --base main >/dev/null
+  transcript WIDGET-$n "$WORK/after.stream.jsonl"
+  fix_on draiver/WIDGET-$n/0001 "$A"
+  "$BIN" review WIDGET-$n "widget fixed" --url "http://example.test/compare/main...draiver/WIDGET-$n/0001" >/dev/null
 done
