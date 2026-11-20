@@ -80,7 +80,7 @@ type pendingCall struct {
 	class Class
 	call  Call
 	bash  bool
-	main  bool // issued by the main conversation, not a subagent
+	main  bool      // issued by the main conversation, not a subagent
 	snap  *editSnap // set when the call edits files
 }
 

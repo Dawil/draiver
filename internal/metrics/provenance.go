@@ -233,3 +233,26 @@ func CaptureCut(dir string) (baseCommit, repoID string, err error) {
 	repoID, err = RepoID(dir)
 	return baseCommit, repoID, err
 }
+
+// LinesAtHead returns the line count of every text file tracked at the repo's HEAD.
+func LinesAtHead(repo string) (map[string]int, error) {
+	out, err := git(repo, "grep", "-c", "-I", "--no-color", "", "HEAD", "--")
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(line, "HEAD:")
+		if !ok {
+			continue
+		}
+		i := strings.LastIndex(rest, ":")
+		if i < 0 {
+			continue
+		}
+		if n, err := strconv.Atoi(rest[i+1:]); err == nil {
+			m[rest[:i]] = n
+		}
+	}
+	return m, nil
+}

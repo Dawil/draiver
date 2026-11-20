@@ -25,6 +25,7 @@ var (
 	metricsSince          string
 	metricsSort           string
 	metricsLimit          int
+	metricsBy             string
 )
 
 var metricsCmd = &cobra.Command{
@@ -62,13 +63,14 @@ func init() {
 	f.StringVar(&metricsSince, "since", "", "codebase: only attempts started on or after DATE (YYYY-MM-DD or RFC3339)")
 	f.StringVar(&metricsSort, "sort", "", "codebase: sort rows worst-first by METRIC (see docs/metrics.md)")
 	f.IntVar(&metricsLimit, "limit", 0, "codebase: show at most N rows (after --sort)")
+	f.StringVar(&metricsBy, "by", "", "codebase: hotspot view instead of attempt rows: file (ranked by context tokens) or command (recurring across attempts)")
 	rootCmd.AddCommand(metricsCmd)
 }
 
 // metricsFlagsReset clears the verb's flags; the cmd tests run many invocations in
 // one process.
 func metricsFlagsReset() {
-	metricsCodebase, metricsSince, metricsSort = "", "", ""
+	metricsCodebase, metricsSince, metricsSort, metricsBy = "", "", "", ""
 	metricsStored, metricsCompute, metricsRecompute, metricsJSON, metricsIncludeRunning = false, false, false, false, false
 	metricsLimit = 0
 }
@@ -82,8 +84,14 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	if (len(args) == 1) == (metricsCodebase != "") {
 		return fmt.Errorf("metrics: give exactly one target, a TICKET or --codebase PATH")
 	}
-	if len(args) == 1 && (metricsSince != "" || metricsSort != "" || metricsLimit != 0) {
-		return fmt.Errorf("metrics: --since, --sort and --limit apply to --codebase only")
+	if len(args) == 1 && (metricsSince != "" || metricsSort != "" || metricsLimit != 0 || metricsBy != "") {
+		return fmt.Errorf("metrics: --since, --sort, --limit and --by apply to --codebase only")
+	}
+	if metricsBy != "" && metricsBy != "file" && metricsBy != "command" {
+		return fmt.Errorf("metrics: --by must be file or command, not %q", metricsBy)
+	}
+	if metricsBy != "" && metricsSort != "" {
+		return fmt.Errorf("metrics: --by views have a fixed ranking; drop --sort")
 	}
 	root, err := resolveRoot()
 	if err != nil {
@@ -155,7 +163,11 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 		}
 		rep.Rows = append(rep.Rows, row)
 	}
+	if metricsBy != "" {
+		return runHotspots(out, cb, mode, rep)
+	}
 	rep.Aggregate.Groups = metrics.Aggregate(rep.Rows)
+	rep.Aggregate.Inventions = metrics.Inventions(rep.Rows)
 	if docs, err := metrics.UnreadDocs(cb, rep.Rows); err == nil {
 		rep.Aggregate.UnreadDocs = docs
 	}
@@ -237,10 +249,87 @@ type codebaseReport struct {
 	Total           int              `json:"total"`
 	ExcludedRunning int              `json:"excluded_running"`
 	Aggregate       struct {
-		Groups     []metrics.Group `json:"groups"`
-		UnreadDocs []string        `json:"unread_docs"`
+		Groups     []metrics.Group     `json:"groups"`
+		UnreadDocs []string            `json:"unread_docs"`
+		Inventions []metrics.Invention `json:"inventions"`
 	} `json:"aggregate"`
 	Rows []metrics.Row `json:"rows"`
+}
+
+// hotspotReport is the --by view: a codebase-wide ranking instead of attempt rows.
+type hotspotReport struct {
+	Target         metrics.Codebase         `json:"target"`
+	Mode           metrics.Mode             `json:"mode"`
+	MetricsVersion int                      `json:"metrics_version"`
+	By             string                   `json:"by"`
+	Filters        codebaseFilters          `json:"filters"`
+	Attempts       int                      `json:"attempts"` // selected attempts
+	WithMetrics    int                      `json:"with_metrics"`
+	Files          []metrics.FileHotspot    `json:"files,omitempty"`
+	Commands       []metrics.CommandHotspot `json:"commands,omitempty"`
+}
+
+func runHotspots(out io.Writer, cb metrics.Codebase, mode metrics.Mode, rep codebaseReport) error {
+	h := hotspotReport{
+		Target: cb, Mode: mode, MetricsVersion: metrics.Version, By: metricsBy,
+		Filters:  codebaseFilters{Since: metricsSince, Limit: metricsLimit, IncludeRunning: metricsIncludeRunning},
+		Attempts: len(rep.Rows),
+	}
+	for _, r := range rep.Rows {
+		if r.Metrics != nil {
+			h.WithMetrics++
+		}
+	}
+	switch metricsBy {
+	case "file":
+		lines, _ := metrics.LinesAtHead(cb.Toplevel)
+		h.Files = metrics.FileHotspots(rep.Rows, lines)
+		if metricsLimit > 0 && len(h.Files) > metricsLimit {
+			h.Files = h.Files[:metricsLimit]
+		}
+		if h.Files == nil {
+			h.Files = []metrics.FileHotspot{}
+		}
+	case "command":
+		h.Commands = metrics.CommandHotspots(rep.Rows)
+		if metricsLimit > 0 && len(h.Commands) > metricsLimit {
+			h.Commands = h.Commands[:metricsLimit]
+		}
+	}
+	if metricsJSON {
+		return writeJSON(out, h)
+	}
+	renderHotspots(out, h)
+	return nil
+}
+
+func renderHotspots(w io.Writer, h hotspotReport) {
+	fmt.Fprintf(w, "codebase %s\nrepo_id  %s\n", h.Target.Toplevel, h.Target.RepoID)
+	fmt.Fprintf(w, "%d attempt(s), %d with metrics, mode %s, metrics_version %d\n", h.Attempts, h.WithMetrics, h.Mode, h.MetricsVersion)
+	if h.WithMetrics == 0 {
+		fmt.Fprintln(w, "\nno stored metrics to rank. Run with --compute to compute and persist them.")
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	switch h.By {
+	case "file":
+		fmt.Fprintln(w, "\nfiles by context tokens:")
+		fmt.Fprintln(tw, "  PATH\tCONTEXT_TOKENS\tRESULT_CHARS\tATTEMPTS\tREADS\tWHOLE\tUNUSED_IN\tLINES@HEAD\tCROSS_TICKET_READERS")
+		for _, f := range h.Files {
+			fmt.Fprintf(tw, "  %s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", f.Path, f.ContextTokens, f.ResultChars, f.Attempts,
+				f.Reads, f.WholeReads, f.UnusedIn, intOr(f.LinesAtHead), listOr(f.CrossTicketReaders))
+		}
+	case "command":
+		fmt.Fprintf(w, "\ncommands recurring across >= %d attempts:\n", metrics.MinCommandAttempts)
+		if len(h.Commands) == 0 {
+			fmt.Fprintln(w, "  none")
+		}
+		fmt.Fprintln(tw, "  COMMAND\tATTEMPTS\tRUNS\tIN")
+		for _, c := range h.Commands {
+			fmt.Fprintf(tw, "  %s\t%d\t%d\t%s\n", c.Command, c.Attempts, c.Count, strings.Join(c.Readers, ", "))
+		}
+	}
+	tw.Flush()
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -290,10 +379,25 @@ func renderAttempt(w io.Writer, r metrics.Row) {
 	kv("review_round_trips", fmt.Sprint(m.ReviewRoundTrips))
 	kv("escalations", fmt.Sprint(m.Escalations))
 	kv("human_interrupts", fmt.Sprint(m.HumanInterrupts))
+	kv("context_auto_stops", fmt.Sprint(m.ContextAutoStops))
+	for i, rt := range m.RoundTrips {
+		kv(fmt.Sprintf("round_trip %d (review #%d)", i+1, rt.ReviewSeq),
+			fmt.Sprintf("%d human decision/note event(s), %d superseded", rt.HumanEvents, rt.HumanSuperseded))
+	}
+
+	section("sessions")
+	kv("sessions / segments", fmt.Sprintf("%d / %d", m.SessionCount, m.Segments))
+	kv("context_floor", intOr(m.ContextFloor))
+	kv("compactions", fmt.Sprint(m.Compactions))
+	for i, ss := range m.Sessions {
+		kv(fmt.Sprintf("session %d", i+1), fmt.Sprintf("%d segment(s), %d call(s), context start %s peak %s at-first-edit %s, ended_by %s",
+			ss.Segments, ss.Calls, intOr(ss.StartContext), intOr(ss.PeakContext), intOr(ss.ContextAtFirstProductiveEdit), ss.EndedBy))
+	}
 
 	section("totals")
 	kv("transcript", m.TranscriptStatus)
 	kv("wall_time", durationOr(m.WallTimeSeconds))
+	kv("active_time", durationOr(m.ActiveTimeSeconds))
 	kv("tool_calls", fmt.Sprintf("%d  (%s)", m.ToolCalls, classBreakdown(m.CallsByClass)))
 	kv("final_diff", m.FinalDiff)
 	kv("diff_files / diff_lines", intOr(m.DiffFiles)+" / "+intOr(m.DiffLines))
@@ -302,13 +406,14 @@ func renderAttempt(w io.Writer, r metrics.Row) {
 	kv("prefix_basis", m.PrefixBasis)
 	kv("exploration_prefix_calls", fmt.Sprint(m.ExplorationPrefixCalls))
 	kv("exploration_prefix_tokens", fmt.Sprint(m.ExplorationPrefixTokens))
+	kv("exploration_prefix_tokens_net", intOr(m.ExplorationPrefixTokensNet))
 	kv("search_prefix_calls", fmt.Sprint(m.SearchPrefixCalls))
 	kv("empty_searches", fmt.Sprint(m.EmptySearches))
 	kv("repeated_searches", fmt.Sprint(m.RepeatedSearches))
 	kv("files_read_distinct", fmt.Sprint(m.FilesReadDistinct))
 	kv("files_read_unused", fmt.Sprint(m.FilesReadUnused))
 	kv("wasted_context_ratio", floatOr(m.WastedContextRatio, "%.2f"))
-	kv("rereads", fmt.Sprint(m.Rereads))
+	kv("rereads", fmt.Sprintf("%d  (cross-session %d, same range %d; ranged reads %d)", m.Rereads, m.RereadsCrossSession, m.RereadsSameRange, m.RangedReads))
 	kv("docs_read", listOr(m.DocsRead))
 	kv("first_doc_read_index", intOr(m.FirstDocReadIndex))
 
@@ -324,6 +429,10 @@ func renderAttempt(w io.Writer, r metrics.Row) {
 	kv("tokens_to_first_green_test", intOr(m.TokensToFirstGreenTest))
 	kv("time_to_first_green_test", durationOr(m.TimeToFirstGreenTestSeconds))
 	kv("reverted_edits", intOr(m.RevertedEdits))
+
+	section("invention")
+	kv("transient_files", listOrDash(m.TransientFiles))
+	kv("ticket_scoped_test_files", listOrDash(m.TicketScopedTestFiles))
 	tw.Flush()
 	if len(m.EscalationTexts) > 0 {
 		fmt.Fprintf(w, "\nescalation texts are in --json (%d).\n", len(m.EscalationTexts))
@@ -365,6 +474,14 @@ func renderCodebase(w io.Writer, rep codebaseReport, sortBy *metrics.Numeric) {
 	}
 
 	fmt.Fprintf(w, "\nunread docs (in the repo at HEAD, read by no selected attempt): %s\n", listOr(rep.Aggregate.UnreadDocs))
+	if len(rep.Aggregate.Inventions) > 0 {
+		fmt.Fprintln(w, "\ninvented files (by name pattern):")
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		for _, inv := range rep.Aggregate.Inventions {
+			fmt.Fprintf(tw, "  %s\t%s\t%d attempt(s): %s\n", inv.Kind, inv.Pattern, len(inv.Attempts), strings.Join(inv.Attempts, ", "))
+		}
+		tw.Flush()
+	}
 
 	cols := codebaseColumns
 	title := "attempts"
@@ -464,6 +581,14 @@ func listOr(l []string) string {
 		return "none"
 	}
 	return strings.Join(l, ", ")
+}
+
+// listOrDash is listOr, but "-" when the list is not applicable (nil: no final diff).
+func listOrDash(l []string) string {
+	if l == nil {
+		return "-"
+	}
+	return listOr(l)
 }
 
 func num(f float64) string {

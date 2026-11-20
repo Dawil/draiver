@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -39,6 +40,12 @@ func onM(get func(v *Values) *float64) func(Row) *float64 {
 // NumericMetrics is the ordered table of every numeric v1 metric.
 var NumericMetrics = []Numeric{
 	{"wall_time_s", onM(func(v *Values) *float64 { return ff(v.WallTimeSeconds) })},
+	{"active_time_s", onM(func(v *Values) *float64 { return ff(v.ActiveTimeSeconds) })},
+	{"sessions", onM(func(v *Values) *float64 { return fi(v.SessionCount) })},
+	{"segments", onM(func(v *Values) *float64 { return fi(v.Segments) })},
+	{"context_auto_stops", onM(func(v *Values) *float64 { return fi(v.ContextAutoStops) })},
+	{"context_floor", onM(func(v *Values) *float64 { return fp(v.ContextFloor) })},
+	{"compactions", onM(func(v *Values) *float64 { return fi(v.Compactions) })},
 	{"tool_calls", onM(func(v *Values) *float64 { return fi(v.ToolCalls) })},
 	{"review_round_trips", onM(func(v *Values) *float64 { return fi(v.ReviewRoundTrips) })},
 	{"escalations", onM(func(v *Values) *float64 { return fi(v.Escalations) })},
@@ -47,6 +54,7 @@ var NumericMetrics = []Numeric{
 	{"diff_lines", onM(func(v *Values) *float64 { return fp(v.DiffLines) })},
 	{"exploration_prefix_calls", onM(func(v *Values) *float64 { return fi(v.ExplorationPrefixCalls) })},
 	{"exploration_prefix_tokens", onM(func(v *Values) *float64 { return fi(v.ExplorationPrefixTokens) })},
+	{"exploration_prefix_tokens_net", onM(func(v *Values) *float64 { return fp(v.ExplorationPrefixTokensNet) })},
 	{"search_prefix_calls", onM(func(v *Values) *float64 { return fi(v.SearchPrefixCalls) })},
 	{"empty_searches", onM(func(v *Values) *float64 { return fi(v.EmptySearches) })},
 	{"repeated_searches", onM(func(v *Values) *float64 { return fi(v.RepeatedSearches) })},
@@ -54,6 +62,9 @@ var NumericMetrics = []Numeric{
 	{"files_read_unused", onM(func(v *Values) *float64 { return fi(v.FilesReadUnused) })},
 	{"wasted_context_ratio", onM(func(v *Values) *float64 { return ff(v.WastedContextRatio) })},
 	{"rereads", onM(func(v *Values) *float64 { return fi(v.Rereads) })},
+	{"rereads_cross_session", onM(func(v *Values) *float64 { return fi(v.RereadsCrossSession) })},
+	{"rereads_same_range", onM(func(v *Values) *float64 { return fi(v.RereadsSameRange) })},
+	{"ranged_reads", onM(func(v *Values) *float64 { return fi(v.RangedReads) })},
 	{"docs_read", onM(func(v *Values) *float64 { return fi(len(v.DocsRead)) })},
 	{"first_doc_read_index", onM(func(v *Values) *float64 { return fp(v.FirstDocReadIndex) })},
 	{"env_discovery_errors", onM(func(v *Values) *float64 { return fi(v.EnvDiscoveryErrors) })},
@@ -67,6 +78,18 @@ var NumericMetrics = []Numeric{
 	{"tokens_to_first_green_test", onM(func(v *Values) *float64 { return fp(v.TokensToFirstGreenTest) })},
 	{"time_to_first_green_test_s", onM(func(v *Values) *float64 { return ff(v.TimeToFirstGreenTestSeconds) })},
 	{"reverted_edits", onM(func(v *Values) *float64 { return fp(v.RevertedEdits) })},
+	{"transient_files", onM(func(v *Values) *float64 {
+		if v.TransientFiles == nil {
+			return nil
+		}
+		return fi(len(v.TransientFiles))
+	})},
+	{"ticket_scoped_test_files", onM(func(v *Values) *float64 {
+		if v.TicketScopedTestFiles == nil {
+			return nil
+		}
+		return fi(len(v.TicketScopedTestFiles))
+	})},
 	{"normalized_work", func(r Row) *float64 {
 		if r.Usage == nil {
 			return nil
@@ -281,4 +304,185 @@ func UnreadDocs(cb Codebase, rows []Row) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// FileHotspot is one file's read footprint across the selected attempts, for
+// `--by file`. It is ranked by context tokens, not calls: one whole-file Read of a
+// large file is one call but can be tens of thousands of tokens.
+type FileHotspot struct {
+	Path          string `json:"path"`
+	Attempts      int    `json:"attempts"` // attempts that read it
+	Reads         int    `json:"reads"`
+	WholeReads    int    `json:"whole_reads"`
+	ResultChars   int    `json:"result_chars"`
+	ContextTokens int    `json:"context_tokens"`
+	UnusedIn      int    `json:"unused_in"` // attempts that read it without editing it or shipping it
+	// CrossTicketReaders are the attempts (ticket@attempt) that read the file while
+	// its name carries another ticket's id.
+	CrossTicketReaders []string `json:"cross_ticket_readers"`
+	// LinesAtHead is the file's line count at the codebase's HEAD; null when it is
+	// not tracked there (deleted, renamed, or binary).
+	LinesAtHead *int `json:"lines_at_head"`
+}
+
+// CommandHotspot is one normalized Bash command or search that recurs across
+// attempts, for `--by command`.
+type CommandHotspot struct {
+	Command  string   `json:"command"`
+	Attempts int      `json:"attempts"`
+	Count    int      `json:"count"`
+	Readers  []string `json:"in"` // ticket@attempt, sorted
+}
+
+// MinCommandAttempts is how many attempts a command must recur in to be a hotspot.
+const MinCommandAttempts = 2
+
+func rowRef(r Row) string { return r.Ticket + "@" + r.Attempt }
+
+// FileHotspots folds rows' per-file stats into a ranking by context tokens (then
+// result characters, then path). lines maps a path to its line count at HEAD.
+func FileHotspots(rows []Row, lines map[string]int) []FileHotspot {
+	by := map[string]*FileHotspot{}
+	for _, r := range rows {
+		if r.Metrics == nil {
+			continue
+		}
+		for _, f := range r.Metrics.Files {
+			h := by[f.Path]
+			if h == nil {
+				h = &FileHotspot{Path: f.Path, CrossTicketReaders: []string{}}
+				by[f.Path] = h
+			}
+			h.Attempts++
+			h.Reads += f.Reads
+			h.WholeReads += f.WholeReads
+			h.ResultChars += f.ResultChars
+			h.ContextTokens += f.ContextTokens
+			if f.Unused {
+				h.UnusedIn++
+			}
+			if f.CrossTicket {
+				h.CrossTicketReaders = append(h.CrossTicketReaders, rowRef(r))
+			}
+		}
+	}
+	out := make([]FileHotspot, 0, len(by))
+	for _, h := range by {
+		if n, ok := lines[h.Path]; ok {
+			h.LinesAtHead = &n
+		}
+		sort.Strings(h.CrossTicketReaders)
+		out = append(out, *h)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.ContextTokens != b.ContextTokens {
+			return a.ContextTokens > b.ContextTokens
+		}
+		if a.ResultChars != b.ResultChars {
+			return a.ResultChars > b.ResultChars
+		}
+		return a.Path < b.Path
+	})
+	return out
+}
+
+// CommandHotspots returns the normalized commands that ran in at least
+// MinCommandAttempts attempts, most widespread first (then most runs, then text).
+func CommandHotspots(rows []Row) []CommandHotspot {
+	by := map[string]*CommandHotspot{}
+	for _, r := range rows {
+		if r.Metrics == nil {
+			continue
+		}
+		for _, c := range r.Metrics.Commands {
+			h := by[c.Command]
+			if h == nil {
+				h = &CommandHotspot{Command: c.Command}
+				by[c.Command] = h
+			}
+			h.Attempts++
+			h.Count += c.Count
+			h.Readers = append(h.Readers, rowRef(r))
+		}
+	}
+	out := []CommandHotspot{}
+	for _, h := range by {
+		if h.Attempts < MinCommandAttempts {
+			continue
+		}
+		sort.Strings(h.Readers)
+		out = append(out, *h)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Attempts != b.Attempts {
+			return a.Attempts > b.Attempts
+		}
+		if a.Count != b.Count {
+			return a.Count > b.Count
+		}
+		return a.Command < b.Command
+	})
+	return out
+}
+
+// Invention is one normalized file-name pattern that attempts invented: transient
+// scratch files (created, then not shipped) or ticket-scoped throwaway tests.
+type Invention struct {
+	Kind     string   `json:"kind"` // transient | ticket-scoped-test
+	Pattern  string   `json:"pattern"`
+	Attempts []string `json:"attempts"` // ticket@attempt, sorted
+	Files    []string `json:"files"`    // the concrete paths, sorted
+}
+
+// Inventions aggregates rows' transient files and ticket-scoped test files by
+// NamePattern. Patterns seen in more attempts sort first.
+func Inventions(rows []Row) []Invention {
+	type key struct{ kind, pat string }
+	by := map[key]*Invention{}
+	seen := map[key]map[string]bool{}
+	add := func(kind, file string, r Row) {
+		k := key{kind, NamePattern(file)}
+		inv := by[k]
+		if inv == nil {
+			inv = &Invention{Kind: kind, Pattern: k.pat}
+			by[k], seen[k] = inv, map[string]bool{}
+		}
+		if ref := rowRef(r); !seen[k][ref] {
+			seen[k][ref] = true
+			inv.Attempts = append(inv.Attempts, ref)
+		}
+		if !slices.Contains(inv.Files, file) {
+			inv.Files = append(inv.Files, file)
+		}
+	}
+	for _, r := range rows {
+		if r.Metrics == nil {
+			continue
+		}
+		for _, f := range r.Metrics.TransientFiles {
+			add("transient", f, r)
+		}
+		for _, f := range r.Metrics.TicketScopedTestFiles {
+			add("ticket-scoped-test", f, r)
+		}
+	}
+	out := []Invention{}
+	for _, inv := range by {
+		sort.Strings(inv.Attempts)
+		sort.Strings(inv.Files)
+		out = append(out, *inv)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if len(a.Attempts) != len(b.Attempts) {
+			return len(a.Attempts) > len(b.Attempts)
+		}
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return a.Pattern < b.Pattern
+	})
+	return out
 }

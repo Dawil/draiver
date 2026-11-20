@@ -178,6 +178,13 @@ func (s *State) onRead(rel, rng string, chars int, main bool) {
 }
 
 var (
+	// leadingCdRe is a leading `cd DIR &&` (or `;`, newline): where the command ran,
+	// not what it was.
+	leadingCdRe = regexp.MustCompile(`^cd\s+("[^"]*"|'[^']*'|\S+)\s*(&&|;|\n)`)
+	// fdDupRe is a file-descriptor duplication such as 2>&1.
+	fdDupRe = regexp.MustCompile(`\s*\d*>&\d+`)
+	// outputFilterRe is a trailing `| head|tail [-n] [-]N` that only trims output.
+	outputFilterRe = regexp.MustCompile(`\s*\|\s*(head|tail)(\s+-n)?(\s+-?\d+)?\s*$`)
 	ticketIDRe = regexp.MustCompile(`(?i)\b[a-z][a-z]*-\d+\b`)
 	digitsRe   = regexp.MustCompile(`\d+`)
 )
@@ -186,6 +193,22 @@ var (
 // repeated_searches collapse (whitespace, quotes, case) plus ticket ids → <ticket> and
 // digit runs → N, so `go test ./x -run Drv044` and `… Drv047` are one command.
 func NormCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	for {
+		m := leadingCdRe.FindStringIndex(cmd)
+		if m == nil {
+			break
+		}
+		cmd = strings.TrimSpace(cmd[m[1]:])
+	}
+	cmd = fdDupRe.ReplaceAllString(cmd, "")
+	for {
+		next := outputFilterRe.ReplaceAllString(cmd, "")
+		if next == cmd {
+			break
+		}
+		cmd = next
+	}
 	q := normQuery(cmd)
 	q = ticketIDRe.ReplaceAllString(q, "<ticket>")
 	return digitsRe.ReplaceAllString(q, "N")
