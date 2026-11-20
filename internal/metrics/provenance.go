@@ -135,7 +135,11 @@ func InferBaseCommit(repo, ticket, att, base string) (baseCommit, head string, e
 	if mb != tip {
 		return mb, branch, nil
 	}
-	if subj, err := git(repo, "log", "-1", "--format=%s", tip); err == nil && strings.Contains(subj, branch) {
+	// The landing-merge case applies only when the tip really is the merge that landed
+	// the branch: its first parent is on base's first-parent history. A tip that merged
+	// base INTO the branch ("Merge forgejo/main into draiver/…") also names the branch,
+	// but its first parent is the branch's own previous commit (drv-054 #19).
+	if subj, err := git(repo, "log", "-1", "--format=%s", tip); err == nil && strings.Contains(subj, branch) && onFirstParent(repo, base, tip+"^1") {
 		if second, err := git(repo, "rev-parse", "--verify", "--quiet", tip+"^2"); err == nil && second != "" {
 			if pre, err := git(repo, "merge-base", tip+"^1", second); err == nil && pre != "" {
 				return pre, second, nil
@@ -150,6 +154,24 @@ func InferBaseCommit(repo, ticket, att, base string) (baseCommit, head string, e
 		}
 	}
 	return mb, branch, nil
+}
+
+// onFirstParent reports whether commit is on ref's first-parent history.
+func onFirstParent(repo, ref, commit string) bool {
+	sha, err := git(repo, "rev-parse", "--verify", "--quiet", commit)
+	if err != nil || sha == "" {
+		return false
+	}
+	out, err := git(repo, "rev-list", "--first-parent", ref)
+	if err != nil {
+		return false
+	}
+	for _, l := range strings.Split(out, "\n") {
+		if l == sha {
+			return true
+		}
+	}
+	return false
 }
 
 // FinalDiff returns the files changed between baseCommit and head (the attempt

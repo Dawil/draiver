@@ -273,11 +273,10 @@ func renderAttempt(w io.Writer, r metrics.Row) {
 	}
 
 	if u := r.Usage; u != nil {
-		section("tokens & cost (from attempt.md / meter)")
+		section("tokens (from attempt.md / meter)")
 		kv("input / output", fmt.Sprintf("%d / %d", u.InputTokens, u.OutputTokens))
 		kv("cache read / write", fmt.Sprintf("%d / %d", u.CacheReadTokens, u.CacheCreationTokens))
 		kv("normalized_work", fmt.Sprint(u.NormalizedWork))
-		kv("cost_usd", floatOr(u.CostUSD, "%.2f"))
 	}
 
 	m := r.Metrics

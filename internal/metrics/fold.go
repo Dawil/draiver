@@ -223,6 +223,11 @@ func (s *State) onResult(ev agent.Event) {
 	if failed {
 		kind = ClassifyError(pc.class, ev.Tool.Result)
 		s.errs[kind]++
+	} else if pc.bash && IsCobraUnknown(ev.Tool.Result) {
+		// A successful Bash result that is a CLI rejecting its verb or flag: the
+		// call did not do what the agent meant, whatever the exit code said.
+		failed, kind = true, ErrEnvDiscovery
+		s.errs[kind]++
 	}
 	// Reads and edits count only when the call took effect. A failed file tool (an
 	// Edit whose old_string did not match, a Read of a missing file) touched nothing.

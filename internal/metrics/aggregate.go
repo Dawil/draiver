@@ -73,12 +73,6 @@ var NumericMetrics = []Numeric{
 		}
 		return fi(r.Usage.NormalizedWork)
 	}},
-	{"cost_usd", func(r Row) *float64 {
-		if r.Usage == nil {
-			return nil
-		}
-		return ff(r.Usage.CostUSD)
-	}},
 }
 
 // LookupNumeric finds a numeric metric by name.

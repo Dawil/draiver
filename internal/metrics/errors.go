@@ -77,6 +77,16 @@ var envDiscoveryPatterns = []*regexp.Regexp{
 	rx(`(unauthori[sz]ed|authentication (failed|required)|permission denied \(publickey\)|could not read from remote|does not appear to be a git repository|not logged in)`),
 }
 
+// cobraUnknown matches a cobra CLI rejecting its invocation: `unknown command "x" for
+// "y"`, `unknown flag: --x`, `unknown shorthand flag: 'x' in -x`. It is env-discovery
+// regardless of exit code or position in the output: an agent that pipes or echoes
+// `exit=$?` gets a successful tool result, but it still drove a binary that doesn't
+// have the verb (typically a stale installed build, drv-054 #19).
+var cobraUnknown = rx(`unknown command "[^"\n]+" for "[^"\n]+"|unknown (shorthand )?flag: `)
+
+// IsCobraUnknown reports whether output carries a cobra unknown-command/flag error.
+func IsCobraUnknown(result string) bool { return cobraUnknown.MatchString(result) }
+
 // ClassifyError assigns a failed call to a kind. class is the call's class, so a
 // failed test run is a test failure and not a generic error. Ordering matters:
 // permission and edit-mechanics outcomes are unambiguous; an env-discovery
@@ -95,6 +105,9 @@ func ClassifyError(class Class, result string) ErrKind {
 		if re.MatchString(text) {
 			return ErrEditMechanics
 		}
+	}
+	if cobraUnknown.MatchString(text) {
+		return ErrEnvDiscovery
 	}
 	probe := text
 	if class == ClassTest || class == ClassBuild {

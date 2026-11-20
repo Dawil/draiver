@@ -153,6 +153,10 @@ func TestClassifyError(t *testing.T) {
 		{ClassOther, "Permission gate: Bash(rm -rf /) denied by policy", ErrPermission},
 		{ClassOther, "Protocol gate: log a decision first", ErrPermission},
 		{ClassOther, "something else broke", ErrOther},
+		// cobra rejections are env-discovery wherever they appear (drv-054 #19).
+		{ClassTest, "ok  \tpkg\t0.1s\nok  \tpkg2\t0.2s\nok\nError: unknown flag: --only", ErrEnvDiscovery},
+		{ClassOther, "draiver: unknown command \"promote\" for \"draiver\"\nexit=1", ErrEnvDiscovery},
+		{ClassOther, "Error: unknown shorthand flag: 'z' in -z", ErrEnvDiscovery},
 	}
 	for _, c := range cases {
 		if got := ClassifyError(c.class, c.result); got != c.want {

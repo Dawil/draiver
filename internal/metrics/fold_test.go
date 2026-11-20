@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -144,5 +145,16 @@ func TestFoldNoEdit(t *testing.T) {
 	}
 	if got.FilesReadDistinct != 1 || !reflect.DeepEqual(got.DocsRead, []string{"README.md"}) {
 		t.Fatalf("reads: %d %v", got.FilesReadDistinct, got.DocsRead)
+	}
+}
+
+// A successful Bash result that is a CLI rejecting its verb is still an
+// env-discovery error: drv-043 ran a stale `draiver promote` with `; echo exit=$?`.
+func TestFoldCobraUnknownOnSuccessfulBash(t *testing.T) {
+	s := NewState()
+	s.Step(agent.Event{Kind: agent.EventToolCall, Tool: &agent.ToolEvent{ID: "t1", Name: "Bash", Input: json.RawMessage(`{"command":"draiver promote local; echo exit=$?"}`)}})
+	s.Step(agent.Event{Kind: agent.EventToolResult, Tool: &agent.ToolEvent{ID: "t1", Name: "Bash", Result: "draiver: unknown command \"promote\" for \"draiver\"\nexit=1"}})
+	if got := s.Finalize(Diff{}).EnvDiscoveryErrors; got != 1 {
+		t.Fatalf("env_discovery_errors = %d, want 1", got)
 	}
 }

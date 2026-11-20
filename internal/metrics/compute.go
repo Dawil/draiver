@@ -38,15 +38,16 @@ type Options struct {
 	Now            func() time.Time
 }
 
-// Usage is the attempt's token and cost figures. They are reused from attempt.md's
-// `metrics:` block (folded on retire) and the session meter, never recomputed.
+// Usage is the attempt's token figures. They are reused from attempt.md's `metrics:`
+// block (folded on retire) and the session meter, never recomputed. There is no cost:
+// the meter's dollar figure was unreliable (null, or off by orders of magnitude) and
+// no verified, pinned per-model price table exists to derive one (drv-054 #19).
 type Usage struct {
-	InputTokens         int      `json:"input_tokens"`
-	OutputTokens        int      `json:"output_tokens"`
-	CacheReadTokens     int      `json:"cache_read_tokens"`
-	CacheCreationTokens int      `json:"cache_creation_tokens"`
-	NormalizedWork      int      `json:"normalized_work"`
-	CostUSD             *float64 `json:"cost_usd"`
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens"`
+	NormalizedWork      int `json:"normalized_work"`
 }
 
 // Row is one attempt in the verb's output.
@@ -285,10 +286,6 @@ func usageOf(root store.Root, ticket, att string, meta attempt.Meta) *Usage {
 			CacheReadTokens: t.CacheReadTokens, CacheCreationTokens: t.CacheCreationTokens,
 			NormalizedWork: t.NormalizedWork,
 		}
-	}
-	if meter.Usage.CostUSD > 0 {
-		c := meter.Usage.CostUSD
-		u.CostUSD = &c
 	}
 	return u
 }
