@@ -441,24 +441,31 @@ func authoritativeWake(eventType string) bool {
 // its worktree was freshly cut from, the path-independent repo identity, and the
 // draiver build. Best-effort: a failure is logged and never fails the bring-up.
 func (r *Reconciler) recordCut(ticket, att, path string) {
+	if err := RecordCut(r.opt.Root, ticket, att, path, r.opt.DraiverVersion); err != nil {
+		r.opt.Logf("reconcile: record cut provenance %s/%s: %v", ticket, att, err)
+	}
+}
+
+// RecordCut is recordCut's body, exported so the acceptance suite can drive the same
+// writer over a real freshly cut worktree.
+func RecordCut(root store.Root, ticket, att, path, draiverVersion string) error {
 	base, repoID, err := metrics.CaptureCut(path)
 	if err != nil && base == "" {
-		r.opt.Logf("reconcile: record cut provenance %s/%s: %v", ticket, att, err)
-		return
+		return err
 	}
-	meta, err := attempt.LoadMeta(r.opt.Root, ticket, att)
+	meta, err := attempt.LoadMeta(root, ticket, att)
 	if err != nil {
-		r.opt.Logf("reconcile: record cut provenance %s/%s: load attempt.md: %v", ticket, att, err)
-		return
+		return fmt.Errorf("load attempt.md: %w", err)
 	}
 	meta.BaseCommit = base
 	if repoID != "" {
 		meta.RepoID = repoID
 	}
-	if r.opt.DraiverVersion != "" {
-		meta.DraiverVersion = r.opt.DraiverVersion
+	if draiverVersion != "" {
+		meta.DraiverVersion = draiverVersion
 	}
-	if err := attempt.WriteMeta(r.opt.Root, meta); err != nil {
-		r.opt.Logf("reconcile: record cut provenance %s/%s: write attempt.md: %v", ticket, att, err)
+	if err := attempt.WriteMeta(root, meta); err != nil {
+		return fmt.Errorf("write attempt.md: %w", err)
 	}
+	return nil
 }
