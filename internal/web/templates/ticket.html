@@ -23,6 +23,7 @@
   </script>
   <script src="/static/favicon.js" defer></script>
   <script src="/static/reltime.js" defer></script>
+  <script src="/static/forkcopy.js" defer></script>
 </head>
 <body>
   {{/* Board-state signal on its own channel: a hidden poll that pulls only the
@@ -51,6 +52,22 @@
          recorded it; absent for an in-repo pyramid or no overlay. */}}
     {{if .Attempt.Overlay}}
     <p class="tagline overlay-provenance" data-testid="attempt-overlay">overlay: <code>{{.Attempt.Overlay}}</code>{{if .Attempt.OverlayCommit}} @ <code data-testid="attempt-overlay-commit">{{shortSHA .Attempt.OverlayCommit}}</code>{{end}}</p>
+    {{end}}
+    {{/* Fork this session (drvweb-029): a ready-to-paste command that opens an
+         interactive, read-only (plan-mode) fork of the attempt's claude-code session
+         under a NEW session id, so the operator can question the agent without the
+         exchange reaching the draiver log or the transcript draiver resumes. Built
+         server-side (forkCommand); absent when there is no claude-code session id or
+         no absolute worktree. The <code> is selectable as a manual fallback. */}}
+    {{if .ForkCommand}}
+    <div class="fork-session" data-testid="fork-session">
+      <button type="button" class="fork-copy" data-testid="fork-copy"
+        data-command="{{.ForkCommand}}"
+        title="Copy a command that opens a private fork of this agent's Claude Code session to ask it questions. The fork gets a new session id, so nothing reaches the draiver log or the session draiver resumes. It runs in plan mode (read-only) because it shares this attempt's worktree with the live agent. Run it on the host and as the user that runs claude."
+        aria-label="Copy fork-this-session command">Copy fork command</button>
+      <span class="fork-copied" data-testid="fork-copied" role="status" aria-live="polite"></span>
+      <code class="fork-command" data-testid="fork-command">{{.ForkCommand}}</code>
+    </div>
     {{end}}
   </header>
 

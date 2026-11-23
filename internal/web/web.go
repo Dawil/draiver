@@ -832,6 +832,11 @@ type detailVM struct {
 	// Review whose pyramid declares at least one promotion, so the surface is absent on
 	// every other attempt. Built by s.promoteSurface.
 	Promote *promoteSurfaceVM
+	// ForkCommand is the ready-to-paste "fork this session" shell command
+	// (drvweb-029), built server-side by forkCommand from session.json. Empty — and
+	// the copy button hidden — unless the attempt has a claude-code session with a
+	// session id and an absolute worktree. Rendering it writes no log event.
+	ForkCommand string
 }
 
 // capabilityVM drives the "capability-panel" partial (drvweb-017): a Capability's
@@ -1574,6 +1579,7 @@ func (s *Server) detail(id, att string) (detailVM, error) {
 	// result (not in Review, no pyramid, or no declared promotion) renders nothing. The
 	// git read behind it is bounded by a background context, matching pyramidBadge.
 	vm.Promote = s.promoteSurface(context.Background(), a)
+	vm.ForkCommand = s.forkCommandFor(id, att)
 	return vm, nil
 }
 
