@@ -177,6 +177,52 @@ table, and act:
 6. **Retire** — on `review`, run `ExecStopPost` hooks (tests, open PR); leave
    the human to `done`. Clean the worktree.
 
+## Handoff before reap (drvctl-061)
+
+Whenever the supervisor stops a live session — the context-limit auto-stop, or a
+`ctl stop` served by the owning `ctl up` — it first runs a **checkpoint**
+(`internal/handoff`), so what the agent knew about where it was up to survives the reap:
+
+1. The stop's durable record lands first: the auto-stop escalation (drvctl-012's
+   escalation-before-halt ordering is kept even if the checkpoint or reap fails), or
+   `ctl stop`'s interrupt hold.
+2. If a turn is in flight it is interrupted; the session is then prompted to run
+   `draiver log <ticket> --type note --tag handoff "…"` with a structured note —
+   *Done / In progress (next concrete step) / Uncommitted files / Gotchas / Don't redo*.
+3. The supervisor waits up to `stop_grace_seconds` for a new `note` tagged `handoff`.
+   A handoff turn that ends without one counts as a timeout. While it waits, the
+   session's permission asks are still answered (so `draiver log` can run) but the
+   completion gate and the human-interrupt hold are suspended, and the reconcile tick
+   leaves the run alone.
+4. Then it reaps. The outcome (note written / timed out) is a `ctl` system event.
+
+The note is written by the agent's own `draiver log`, so it is attributed to the session
+actor (drvctl-060) and appears in the next `brief` like any live fact.
+
+**Automatic restart.** After a *successful* handoff at the context limit, the supervisor
+resolves its own escalation (a `resolution` tagged `context-auto-restart`), discards the
+session id (the same flush as `ctl restart --new-session`), and the next tick brings the
+attempt back on a fresh session cold-started from the brief — no human click. The budget
+is `context_auto_restarts` per attempt, counted from those durable resolutions: once it
+is spent, the next trip on the same attempt is left open for a human, the signal the
+ticket is too big. A timed-out handoff never auto-restarts.
+
+| Config key | Default | Meaning |
+| --- | --- | --- |
+| `stop_grace_seconds` | `120` | How long a stopping session gets to log its handoff note. `0` disables the checkpoint everywhere — both paths reap immediately, exactly as before. |
+| `context_auto_restarts` | `1` | Restarts without a human after a successful auto-stop handoff. `0` = every auto-stop waits for a human. |
+
+**Headroom.** The handoff turn needs context of its own, and one tool result can
+overshoot the limit by tens of thousands of tokens. `ctl up` and each session start warn
+when `context_limit` + a 40K reserve exceeds `context_window`.
+
+**`ctl stop` routing.** `ctl stop` is a separate process with no channel to the session,
+so it writes a nonce-stamped `stop-request.json` in the attempt dir; the owning `ctl up`
+picks it up on its next tick, runs the checkpoint, reaps, and answers in
+`stop-result.json`. A request stamped by another daemon boot is swept unanswered; a client
+that gets no answer within the grace period plus 30s falls back to a direct reap and says
+so.
+
 ## Command surface (client)
 
 Global flags mirror `draiver` (`--data`, `--actor`, `--attempt`).
@@ -186,7 +232,7 @@ Global flags mirror `draiver` (`--data`, `--actor`, `--attempt`).
 | `draiverctl up [--concurrency N] [--budget …]` | Start `draiverctld` and begin reconciling the enabled fleet. |
 | `draiverctl down` | Drain: stop admitting, let live sessions checkpoint to the log, exit. |
 | `draiverctl start <ticket[@attempt]>` | Hand one attempt to a running `ctl up` to bring up in the background (imperative + **transient**: a desired-marker stamped with the daemon's boot nonce, swept if it restarts). The daemon climbs the self-heal cascade — resume a live session id, else spawn fresh on the surviving worktree, else rebuild from `brief`. Requires `ctl up` (errors otherwise, never orphans); watch with `logs -f`. Contrast `enable` (declarative + persistent). `--new-attempt` forks a new attempt (new id, `from` provenance) and starts the fork, **leaving the parent running** — a parallel branch. |
-| `draiverctl stop <ticket[@attempt]>` | Reap the session's process; keep id + worktree + log for a later `--resume`, and remove the desired-marker so the attempt leaves the imperative fleet. Stopping a **still-enabled**, Running attempt is a human interrupt (drvctl-060): it records an `interrupt` hold, so the daemon does not bring it back until the human acts (a message to the agent, a resolve, `enable`, or `ctl start`); to opt out of supervision entirely, `disable`. Idempotent. |
+| `draiverctl stop <ticket[@attempt]>` | Reap the session's process; keep id + worktree + log for a later `--resume`, and remove the desired-marker so the attempt leaves the imperative fleet. Stopping a **still-enabled**, Running attempt is a human interrupt (drvctl-060): it records an `interrupt` hold, so the daemon does not bring it back until the human acts (a message to the agent, a resolve, `enable`, or `ctl start`); to opt out of supervision entirely, `disable`. When a running `ctl up` owns the session, the stop is handed to it and it **checkpoints first** (drvctl-061): the session is asked for a handoff note and given up to `stop_grace_seconds`, then reaped; the output says whether a note landed. With no `ctl up` owning the session it reaps directly and says so. `--now` skips the checkpoint. Idempotent. |
 | `draiverctl restart <ticket[@attempt]>` | Reap, flush volatile state to a chosen depth, then hand the attempt to `ctl up` to bring back up (same transient handoff as `start`; requires `ctl up`, returns immediately, watch with `logs -f`). Depth flags are cumulative (deepest wins): none = resume the same session (a clean continue, no re-brief); `--new-session` flushes the conversation (L0) → fresh session on the same worktree; `--new-worktree` also rebuilds the checkout from HEAD (L1, discards uncommitted work); `--new-attempt` **forks a new attempt** (L2, `from` provenance) and **parks the parent** (it leaves the fleet). Re-brief happens iff the session layer was flushed. |
 | `draiverctl status [<ticket>]` | Live view: control state, session PID, model, tokens/$, **context-window %**, worktree, last event, watchdog health. |
 | `draiverctl logs [-f] <ticket[@attempt]>` | Tail the session's stream (durable events + raw stream-json). |
