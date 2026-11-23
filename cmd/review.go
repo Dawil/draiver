@@ -180,9 +180,21 @@ func reviewGate(ctx context.Context, root store.Root, ticket, att string) error 
 	if len(satisfied) > 0 {
 		have = fmt.Sprintf("required rung(s) green at HEAD: %s", quotedRungNames(satisfied))
 	}
+	// Say WHY (drv-063): the failing test per outstanding rung, and whether the rung
+	// was already red at the merge-base with the base branch (inherited from main).
+	// Best-effort context — the board-wide lookup failing just drops that line.
+	base := a.Base
+	if strings.TrimSpace(base) == "" {
+		base = "main"
+	}
+	all, err := project.LoadAll(root)
+	if err != nil {
+		all = []project.Attempt{a}
+	}
+	detail := refusalDiagnosis(p, outstanding, a.Events, head, base, gitMergeBase(ctx, wt.Path, base), all)
 	return fmt.Errorf(
-		"review refused: required rung(s) %s of %s not green at HEAD %s (%s) — climb with `draiver test --log`, then claim review; a result logged before a later commit is stale and does not count",
-		quotedRungNames(outstanding), pyramid.FileName, shortSHA(head), have)
+		"review refused: required rung(s) %s of %s not green at HEAD %s (%s) — climb with `draiver test --log`, then claim review; a result logged before a later commit is stale and does not count%s",
+		quotedRungNames(outstanding), pyramid.FileName, shortSHA(head), have, detail)
 }
 
 // quotedRungNames renders a list of levels as their quoted names, for a gate

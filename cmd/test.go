@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -414,6 +415,12 @@ func climb(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyrami
 			continue
 		}
 		if lv.IsRequired() {
+			var rf *rungFailure
+			if !errors.As(err, &rf) {
+				// An environment fault (up/healthcheck): name the rung, keep the message
+				// and exit code (rungFailure unwraps to the *exitError).
+				err = &rungFailure{Rung: lv.Name, Tests: []string{err.Error()}, err: err}
+			}
 			return false, advisoryReds, err
 		}
 		advisoryReds = append(advisoryReds, lv.Name)
@@ -469,19 +476,29 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 	}
 
 	fmt.Fprintf(out, "== %s: %s\n", lv.Name, lv.Run)
-	runErr := runShell(ctx, cmd, wd, lv.Run, extraEnv)
+	// Tee the run's output through a failScanner so a red rung can name its failing
+	// tests (drv-063) without changing what streams to the console.
+	fs := &failScanner{}
+	runErr := runShellTo(ctx, cmd, wd, lv.Run, extraEnv, io.MultiWriter(cmd.OutOrStdout(), fs), io.MultiWriter(cmd.ErrOrStderr(), fs))
 
 	// A BDD/acceptance rung (drv-016) declares the cucumber-JSON its runner writes.
 	// Capture it whether the run passed or failed — a red run's report is exactly
 	// what drv-018 renders to show which scenarios broke — but never let capture
 	// change the rung's verdict (best-effort, like `down`): the run's exit code
 	// stays authoritative.
+	var rep cucumber.Report
 	if cj := strings.TrimSpace(lv.CucumberJSON); cj != "" {
-		captureCucumber(cmd, wd, lv.Name, cj)
+		rep = captureCucumber(cmd, wd, lv.Name, cj)
 	}
 
 	if runErr != nil {
-		return fmt.Errorf("rung %q not green: %w", lv.Name, runErr)
+		// A BDD rung names its failed scenarios from its own report; anything else
+		// names what the failScanner recognised in its output.
+		tests := failedScenarios(rep)
+		if len(tests) == 0 {
+			tests = fs.failures()
+		}
+		return &rungFailure{Rung: lv.Name, Tests: tests, run: true, err: runErr}
 	}
 	return nil
 }
@@ -493,19 +510,20 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 // whose runner forgot to write the report still passes (loudly). Durable storage of
 // the report/embeddings is drv-017's concern; this only proves the JSON is present
 // and consumable and surfaces what it contains.
-func captureCucumber(cmd *cobra.Command, wd, rung, rel string) {
+func captureCucumber(cmd *cobra.Command, wd, rung, rel string) cucumber.Report {
 	path := filepath.Join(wd, rel)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: rung %q cucumber-JSON %q not captured (ignored): %v\n", rung, rel, err)
-		return
+		return nil
 	}
 	rep, err := cucumber.Parse(data)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: rung %q cucumber-JSON %q not valid (ignored): %v\n", rung, rel, err)
-		return
+		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "== %s: captured cucumber-JSON %s — %s\n", rung, rel, rep.Summary())
+	return rep
 }
 
 // runShell runs one shell command in wd, wiring its stdio to the cobra command's
@@ -517,10 +535,16 @@ func captureCucumber(cmd *cobra.Command, wd, rung, rel string) {
 // environment. For a local, in-repo pyramid it is empty and rc.Env is left unset, so
 // the command inherits os.Environ() exactly as before — byte-for-byte unchanged.
 func runShell(ctx context.Context, cmd *cobra.Command, wd, script string, extraEnv []string) error {
+	return runShellTo(ctx, cmd, wd, script, extraEnv, cmd.OutOrStdout(), cmd.ErrOrStderr())
+}
+
+// runShellTo is runShell with explicit output streams (a rung's run tees through a
+// failScanner).
+func runShellTo(ctx context.Context, cmd *cobra.Command, wd, script string, extraEnv []string, stdout, stderr io.Writer) error {
 	rc := exec.CommandContext(ctx, "sh", "-c", script)
 	rc.Dir = wd
-	rc.Stdout = cmd.OutOrStdout()
-	rc.Stderr = cmd.ErrOrStderr()
+	rc.Stdout = stdout
+	rc.Stderr = stderr
 	rc.Stdin = os.Stdin
 	if len(extraEnv) > 0 {
 		rc.Env = append(os.Environ(), extraEnv...)
