@@ -85,17 +85,24 @@ func roleColor(role string) string {
 // `ctl logs -f` follow and disk replay alike; transport fields (event uuids, the
 // session id, envelope wrappers) are dropped.
 //
-// The timestamp is render-time wallclock captured as each line is emitted, NOT a
-// recorded event time — the normalized event and the stream-json envelope carry
-// none, and the on-disk stream.jsonl format and `--json` passthrough must stay
-// byte-for-byte unchanged (drvctl-025 #3). It is truthful for the live follow and
-// honest-but-approximate for historical replay.
+// The timestamp column is the event's RECORDED time (agent.Event.TS, parsed by
+// claudecode.Normalize from the stream-json `"timestamp"` every assistant/user
+// record carries), shown local — so replaying a finished attempt shows when each
+// line happened, not when it was rendered (drv-066). Records with no timestamp
+// (system/init, result, control_request) inherit the last recorded time seen
+// earlier in the stream; only before any timestamp has been seen does the column
+// fall back to render-time wallclock (now). This is render-only: the on-disk
+// stream.jsonl and the `--json` passthrough stay byte-for-byte unchanged
+// (drvctl-025 #3).
 type streamRenderer struct {
 	out       io.Writer
 	styled    bool // out is a TTY: colours + italics + ANSI markdown on
 	md        *glamour.TermRenderer
 	ctxTokens int // last-known cumulative context tokens; -1 until first usage
 	now       func() time.Time
+	// lastTS is the most recent recorded event time seen in the agent stream; zero
+	// until the first timestamped event. Untimestamped events stamp with it.
+	lastTS time.Time
 	// suppressSystem drops the synthetic system-role lifecycle lines the agent
 	// stream carries — `session online` (EventSystem) and `turn end` (EventTurnEnd)
 	// — from the render (drv-045). The web "Agent Logs" panel sets it so the agent
@@ -167,6 +174,11 @@ func (r *streamRenderer) renderEvent(ev agent.Event) {
 	if ev.Usage != nil && ev.Usage.ContextTokens > 0 {
 		r.ctxTokens = ev.Usage.ContextTokens
 	}
+	// Advance the recorded-time cursor: a timestamped event stamps its own lines
+	// with that time, and an untimestamped one (init, turn end) inherits it (drv-066).
+	if !ev.TS.IsZero() {
+		r.lastTS = ev.TS
+	}
 	switch ev.Kind {
 	case agent.EventSystem:
 		// The session id is a transport handle, not something a human reading the
@@ -216,16 +228,24 @@ func (r *streamRenderer) renderEvent(ev agent.Event) {
 	}
 }
 
-// emit writes body under role at render-time wallclock, one physical line at a
-// time, each carrying the full `[<prefix>]: ` so every line stays independently
-// greppable (drvctl-025 #8).
+// emit writes an agent-stream body under role, stamped with the last recorded
+// event time (see stamp), one physical line at a time, each carrying the full
+// `[<prefix>]: ` so every line stays independently greppable (drvctl-025 #8).
 func (r *streamRenderer) emit(role, body string) {
-	r.emitAt(role, r.now().Format(tsLayout), body)
+	r.emitAt(role, r.stamp(), body)
+}
+
+// stamp is the agent stream's timestamp column: the last recorded event time
+// (local), or render-time wallclock only before any recorded time has been seen.
+func (r *streamRenderer) stamp() string {
+	if !r.lastTS.IsZero() {
+		return r.lastTS.Local().Format(tsLayout)
+	}
+	return r.now().Format(tsLayout)
 }
 
 // emitAt is emit with an explicit timestamp column, for a source that carries its
-// own recorded time (the ctl.jsonl health log) rather than the stream's render-time
-// approximation.
+// own recorded time on a separate log (the ctl.jsonl health / system logs).
 func (r *streamRenderer) emitAt(role, ts, body string) {
 	prefix := r.prefixAt(role, ts)
 	for _, line := range r.bodyLines(role, body) {
@@ -239,12 +259,12 @@ func (r *streamRenderer) emitAt(role, ts, body string) {
 // tinted by its colour — the datetime, tokens, brackets and delimiter stay
 // uncoloured (drvctl-025 #17).
 func (r *streamRenderer) prefix(role string) string {
-	return r.prefixAt(role, r.now().Format(tsLayout))
+	return r.prefixAt(role, r.stamp())
 }
 
 // prefixAt renders the prefix column with an explicit datetime stamp, so a source
 // carrying its own recorded time (ctl.jsonl health) sits in the same fixed-width
-// column as the render-time-stamped agent stream.
+// column as the agent stream.
 func (r *streamRenderer) prefixAt(role, ts string) string {
 	tok := "-"
 	if r.ctxTokens >= 0 {
