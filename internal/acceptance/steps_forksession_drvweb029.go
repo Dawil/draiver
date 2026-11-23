@@ -129,7 +129,8 @@ func thenForkButtonAbsent(w *World, sr *StepRun) error {
 	if strings.Contains(page, `data-testid="fork-session"`) {
 		return fmt.Errorf("fork-session button rendered for an attempt with no session id")
 	}
-	return nil
+	// Evidence: the same header with no copy button or command.
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "fork-session-absent", false, `[data-testid="ticket-detail"]`, "")
 }
 
 // shootForkCopy clicks the real copy button in a browser and waits for its status
