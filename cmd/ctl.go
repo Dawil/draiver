@@ -32,12 +32,16 @@ var (
 	ctlConfigPath    string
 	ctlContextWindow int // -1 sentinel: resolve from config
 	ctlContextLimit  int // -1 sentinel: resolve from config
-	ctlBackgroundCap time.Duration
-	ctlLogsFollow    bool
-	ctlLogsJSON      bool
-	ctlLogsTail      int               // -f backlog window: last N stream records before following
-	ctlStatusAll     bool              // include terminal Done attempts in the list view
-	ctlPermRules     map[string]string // --permission tool=rule, layered over config
+	// ctlUpContextLimit is the resolved auto-stop threshold, for ctl up's headroom
+	// warning (drvctl-061).
+	ctlUpContextLimit int
+	ctlStopNow        bool
+	ctlBackgroundCap  time.Duration
+	ctlLogsFollow     bool
+	ctlLogsJSON       bool
+	ctlLogsTail       int               // -f backlog window: last N stream records before following
+	ctlStatusAll      bool              // include terminal Done attempts in the list view
+	ctlPermRules      map[string]string // --permission tool=rule, layered over config
 
 	// restart depth flags — the cumulative degree axis (drvctl-016). The deepest
 	// one passed wins; a deeper flag implies every shallower flush.
@@ -93,6 +97,11 @@ var ctlUpCmd = &cobra.Command{
 			return err
 		}
 		ctrl := reconcile.Controller{PID: os.Getpid(), Nonce: nonce, Started: time.Now()}
+		// Headroom check (drvctl-061): the handoff turn at the context limit needs
+		// room of its own; warn rather than silently assume it exists.
+		if w := reconcile.HeadroomWarning(ctlUpContextLimit, ctlContextWindow); w != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "draiverctld: warning: %s\n", w)
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "draiverctld %s up (pid %d) — %s, tick every %s (Ctrl-C to drain)\n", version, ctrl.PID, repoNote, ctlInterval)
 		return r.Run(ctx, ctlInterval, ctrl)
 	},
@@ -142,25 +151,50 @@ var ctlStartCmd = &cobra.Command{
 
 var ctlStopCmd = &cobra.Command{
 	Use:   "stop <ticket[@attempt]>",
-	Short: "Reap an attempt's session, keeping its id + log for a later resume",
-	Args:  cobra.ExactArgs(1),
+	Short: "Checkpoint and reap an attempt's session, keeping its id + log for a later resume",
+	Long: "stop ends an attempt's session and holds the attempt so it is not auto-resumed.\n\n" +
+		"When a running `ctl up` owns the session, stop hands the stop to it: the supervisor " +
+		"first asks the session to log a handoff note (`draiver log <ticket> --type note --tag " +
+		"handoff`) and waits up to stop_grace_seconds for it, then reaps — so the next session " +
+		"picks up where this one stopped. With no `ctl up` owning the session it reaps directly " +
+		"and says so. --now skips the handoff and reaps immediately, as does stop_grace_seconds: 0.",
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, ticket, att, err := newCtlTarget(args[0])
 		if err != nil {
 			return err
 		}
-		res, err := r.Stop(ticket, att)
+		res, err := r.StopWithHandoff(ticket, att, ctlStopNow)
 		if err != nil {
 			return err
 		}
-		out := cmd.OutOrStdout()
-		if res.Signaled {
-			fmt.Fprintf(out, "stopped %s/%s (pid %d) — session id kept for resume\n", ticket, att, res.PID)
-		} else {
-			fmt.Fprintf(out, "%s/%s already stopped (no live process)\n", ticket, att)
-		}
+		fmt.Fprint(cmd.OutOrStdout(), stopMessage(ticket, att, res))
 		return nil
 	},
+}
+
+// stopMessage renders a `ctl stop` result truthfully: whether the supervisor ran the
+// handoff checkpoint (and whether a note landed), or reaped directly and why.
+func stopMessage(ticket, att string, res reconcile.StopResult) string {
+	var b strings.Builder
+	switch {
+	case res.Handoff && res.NoteSeq > 0:
+		fmt.Fprintf(&b, "stopped %s/%s (pid %d) via draiverctld (pid %d) — handoff note #%d logged first; session id kept for resume\n",
+			ticket, att, res.PID, res.ControllerPID, res.NoteSeq)
+	case res.Handoff && res.Outcome != "":
+		fmt.Fprintf(&b, "stopped %s/%s (pid %d) via draiverctld (pid %d) — no handoff note (%s); session id kept for resume\n",
+			ticket, att, res.PID, res.ControllerPID, res.Outcome)
+	case res.Handoff:
+		fmt.Fprintf(&b, "%s/%s: %s\n", ticket, att, res.Note)
+	case res.Signaled:
+		fmt.Fprintf(&b, "stopped %s/%s (pid %d) — session id kept for resume\n", ticket, att, res.PID)
+	default:
+		fmt.Fprintf(&b, "%s/%s already stopped (no live process)\n", ticket, att)
+	}
+	if res.Direct && res.Note != "" {
+		fmt.Fprintf(&b, "note: %s\n", res.Note)
+	}
+	return b.String()
 }
 
 var ctlRestartCmd = &cobra.Command{
@@ -439,6 +473,7 @@ func newReconciler() (*reconcile.Reconciler, error) {
 	if ctlContextLimit >= 0 {
 		contextLimit = ctlContextLimit
 	}
+	ctlUpContextLimit = contextLimit
 	permPolicy, err := resolvePermPolicy(cfg, ctlPermRules)
 	if err != nil {
 		return nil, err
@@ -469,18 +504,23 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		return nil, fmt.Errorf("config default_supervision: %w", err)
 	}
 	return reconcile.New(reconcile.Options{
-		Root:               root,
-		DefaultRepo:        ctlRepo,
-		Adapters:           claudeAdapters,
-		AdapterVersion:     adapterVersion,
-		DraiverVersion:     version,
-		Actor:              resolveActor(),
-		ContextLimit:       contextLimit,
-		BackgroundCap:      ctlBackgroundCap,
-		DefaultSupervision: defaultSupervision,
-		ReviewEnvMaxAge:    time.Duration(cfg.ReviewEnvMaxAgeMinutes) * time.Minute,
-		AsyncJobReapMaxAge: time.Duration(cfg.AsyncJobReapMinutes) * time.Minute,
-		PermPolicy:         permPolicy,
+		Root:           root,
+		DefaultRepo:    ctlRepo,
+		Adapters:       claudeAdapters,
+		AdapterVersion: adapterVersion,
+		DraiverVersion: version,
+		Actor:          resolveActor(),
+		ContextLimit:   contextLimit,
+		ContextWindow:  ctlContextWindow,
+		// Checkpoint-before-reap (drvctl-061): the grace a stopping session gets to
+		// log its handoff note, and how many auto-stops restart without a human.
+		StopGrace:           time.Duration(cfg.StopGraceSeconds) * time.Second,
+		ContextAutoRestarts: cfg.ContextAutoRestarts,
+		BackgroundCap:       ctlBackgroundCap,
+		DefaultSupervision:  defaultSupervision,
+		ReviewEnvMaxAge:     time.Duration(cfg.ReviewEnvMaxAgeMinutes) * time.Minute,
+		AsyncJobReapMaxAge:  time.Duration(cfg.AsyncJobReapMinutes) * time.Minute,
+		PermPolicy:          permPolicy,
 		BaseSpec: agent.SessionSpec{
 			Model:          ctlModel,
 			PermissionMode: ctlPermMode,
@@ -614,6 +654,7 @@ func init() {
 	// start --new-attempt forks a parallel branch (the fork runs alongside the
 	// parent) — contrast restart --new-attempt, which parks the parent.
 	ctlStartCmd.Flags().BoolVar(&ctlStartNewAttempt, "new-attempt", false, "fork a new attempt (new id, provenance to this one) and start the fork, leaving the parent running — a parallel branch")
+	ctlStopCmd.Flags().BoolVar(&ctlStopNow, "now", false, "reap immediately, skipping the handoff checkpoint (the pre-drvctl-061 behaviour)")
 	ctlLogsCmd.Flags().BoolVarP(&ctlLogsFollow, "follow", "f", false, "keep printing new stream lines as they are appended")
 	ctlLogsCmd.Flags().BoolVar(&ctlLogsJSON, "json", false, "print the raw stream.jsonl lines verbatim (machine form for | jq / replay) instead of the human-readable rendering")
 	// -f follows from the last N stream records (tail semantics) rather than

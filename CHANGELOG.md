@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-23
+
 ### Added
 
 - **Per-ticket changelog fragments under `changelog.d/`, a generated `CHANGELOG.md`, and
@@ -32,6 +34,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neither. The previous coverage guard now checks the changelog as rendered from the
   fragments. Format and policy: `changelog.d/README.md`; acceptance coverage in
   `features/changelog/changelog-fragments.feature`.
+- **`draiver metrics`: per-attempt and per-codebase agent-performance metrics folded from
+  session transcripts, plus attempt provenance (drv-054).** `draiver metrics TICKET` and
+  `draiver metrics --codebase PATH` report how accessible a codebase was to the agents that
+  worked it: exploration and search before the first productive edit, empty and repeated
+  searches, files read but never used, which docs were read (and, per codebase, which never
+  were), and failed tool calls split by kind — env-discovery errors (the accessibility
+  signal, including a stale binary's `unknown command`), test and build failures, edit
+  mechanics and permission denials — alongside outcome, review round trips (with structural
+  per-trip signals), escalations and the existing token figures. Every value is a
+  deterministic fold of the transcript, the log and git: the same inputs give
+  byte-identical JSON. Restart-spanning attempts are split into sessions and segments, with
+  per-session context figures (start, peak, at first productive edit), `ended_by` read from
+  the log, context auto-stops, compactions, `active_time_s` and a reread split
+  (cross-session, same-range, ranged). Invention detection reports transient files and
+  ticket-scoped throwaway tests, and `--codebase --by file|command` ranks hotspot files by
+  context tokens (with cross-ticket readers and line counts) and recurring normalized
+  commands. Stored vs computed is explicit: `--stored` (default) never computes and labels
+  each row `stored`, `missing` or `stale`; `--compute`/`--recompute` persist to
+  `attempts/<id>/metrics.json`, outside the hash chain, versioned by `metrics_version`.
+  Codebase output aggregates count/median/p90 grouped by model, with `--since`, `--sort` and
+  `--limit` and a `draiver ctl logs` pointer on every row; `--json` is stable and documented
+  in `docs/metrics.md`. Newly cut attempts now record `base_commit`, `repo_id` and
+  `draiver_version` in attempt.md, and the model actually used is folded in on retire;
+  older attempts report these as `inferred` or `unknown`.
+- **`draiver metrics --codebase --split-at COMMIT` reports a before/after per cohort, and
+  Bash paths now follow `cd` (drv-057).** `--split-at` sorts each selected attempt by its
+  `base_commit` provenance: **after** when the base contains COMMIT, **before** when it
+  doesn't. It reports the full aggregate for each cohort, or the full ranking with
+  `--by file|command`, in both human and `--json` output. This gives a clean before/after
+  for one change, such as an AGENTS.md edit, without date windows. Attempts whose base is
+  unknown are counted in `excluded_unknown_base`, listed, and kept out of both cohorts. A
+  commit the repo doesn't have is an error, so a typo can't put every attempt in "before".
+  The fold also fixes how Bash paths resolve. A `cd DIR` earlier in the same command
+  (`cd DIR &&`, `cd DIR;` or a newline) now moves where later relative paths resolve, and
+  paths that end up outside the worktree are dropped. So `cd /tmp/x && cat > a.md` no
+  longer counts as creating a repo file. drv-051's `transient_files` shrinks from about 35
+  phantom scratch files to the one real throwaway test, and its `reverted_edits` drops from
+  35 to 1. `metrics_version` is now 3, so v2 rows read as `stale` until `--compute`
+  refreshes them.
+- **`internal/acceptance/README.md`: how to write a BDD step and which helpers to reuse
+  (drv-060).** One page covers the anatomy of a ticket's scenarios (a feature under
+  `features/<capability>/`, a `steps_<topic>_<ticket>.go` that registers in `init()`, the
+  `TestFeaturesHaveStepDefinitions` drift guard), how steps share state through the
+  `World`, the every-scenario artefact rule (`shoot` vs `attachText`, and what happens
+  without a browser), a table of the shared fixtures with `file:line`, a copy-paste feature
+  plus step file, and how to run the suite. Agents no longer need to read other tickets'
+  step files to learn the conventions. `AGENTS.md` and `docs/acceptance-criteria.md` link
+  to it. A new unit test, `TestReadmeHelperTableIsCurrent`, fails if a row in the helper
+  table stops pointing at its declaration. A new knowledge check in `evals/` asks which
+  helpers to reuse.
+- **The cold-start brief shows the branch state, read from git (drv-064).** `draiver brief`
+  (and the cold-start / restart brief the daemon injects) now carries a short **Branch
+  state** block computed from the attempt's worktree: the branch, HEAD, base tip and
+  merge-base; the files committed since the merge-base (`git diff --stat
+  <merge-base>...HEAD`, capped at 14 files then "+N more"); uncommitted changes (`git
+  status --short`, capped at 6); how many commits the base has gained since the
+  merge-base, with up to 5 subjects; and a reminder to compare with three-dot diffs. The
+  block is bounded to 40 lines and omitted when the attempt has no worktree. A resumed
+  agent now gets facts from git instead of re-deriving them from diffs or trusting stale
+  notes.
+- **Agent-context evals as an advisory `evals` test-pyramid rung (drv-065).** The new top
+  rung tests this repo's agent context (AGENTS.md, docs, READMEs and test ergonomics). A
+  headless `claude -p` runs in throwaway clones at HEAD, and its work is scored. Knowledge
+  checks ask questions the docs should answer. Task checks are E1 (add a BDD scenario for
+  a small web change) and E3 (main has moved: prepare only the branch's own change); both
+  are checked deterministically. The suite is promptfoo, pinned to `0.121.20` and kept
+  under `evals/`. draiver gains no eval interface: the rung is plain `run:`,
+  `environment: agent` (its healthchecks require the `claude` CLI and credentials, so a
+  box without them blocks), `required: false` and `artifacts: [evals/_artifacts]`. A bare
+  `draiver test` never runs it. `draiver test evals --only` runs it and records no gate
+  result. The pass-rate threshold (80%) and repeats (5) live in
+  `evals/promptfooconfig.yaml`. Each case gets its own data root, config, cache and
+  `TMPDIR`, has every remote stripped, and drops the parent session's variables, so it is
+  safe to run from inside a supervised session. A tripwire turns any change to the source
+  checkout into an error. `docs/evals.md` explains how to measure a docs change by running
+  the same suite at a commit and at its parent (`EVALS_REF`).
+- **`draiver fork`, and a "fork this session" copy button on the attempt page (drvweb-029).**
+  A `claude-code` attempt with a session id now shows a **Copy fork command** button on the
+  right of the attempt page's Agent Logs header. It copies `draiver fork '<ticket>@<attempt>'`
+  (with `--data` when the board serves a non-default data root), and the command is also
+  shown in a selectable `<code>` inside the Agent Logs panel. The new `draiver fork` verb
+  changes into the attempt's worktree, recreating it at the same path on the attempt's
+  branch if the daemon reclaimed it. It then runs `claude --resume <id> --fork-session
+  --permission-mode plan`, a private, read-only fork under a new session id. Nothing reaches
+  the draiver log or the transcript draiver resumes, and the fork can't edit the worktree it
+  shares with the agent. The board and the verb share one gate (`session.ForkCheck`): no
+  button and no fork without a `claude-code` session id. `draiver fork --print` shows the
+  directory and command instead of running claude. Copying falls back from
+  `navigator.clipboard` to `execCommand('copy')` for boards served over plain http. Nothing
+  here writes a log event. The acceptance rung's browser suite now runs once per unit-test
+  package instead of three times, which keeps it under `go test`'s 10-minute timeout.
 
 ### Changed
 
@@ -52,6 +145,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on any missing or duplicated entry, so a future ticket that lands without an entry
   turns the rung red. A third scenario builds the binary and asserts `--version`
   reports the topmost released section.
+- **AGENTS.md gains a "Branches and scope" section (drv-059).** Agents are told to compare
+  their branch with three dots (`git diff main...HEAD`), since a two-dot diff shows work
+  landed on `main` since the cut as if the branch had deleted it; to check
+  `git log --oneline -- <file>` on both sides before restoring or reverting files they
+  didn't author; and to `draiver escalate` review feedback that goes beyond the spec before
+  coding it. Docs-only; the drv-059 knowledge checks and eval E3 measure its effect.
+
+  The evals harness gets two fixes from measuring this change. Every case now carries a
+  `weight` (`light`, or `heavy` for E1), so `EVALS_FILTER=weight=light` runs everything but the
+  20-minute E1, which is how `docs/evals.md` now says to run a per-ticket before/after.
+  `evals/run.sh` also disables promptfoo's 300s scheduler queue timeout, which had been
+  erroring every task row queued behind E1.
+- **Agents are steered off low-value reads: a slim `.test-pyramid.yaml`, guidance against
+  reading `CHANGELOG.md`, and ignore files for minified assets (drv-061).** The repo's
+  `.test-pyramid.yaml` drops from 205 lines (14KB) to 96 lines (4KB). Its explanatory prose
+  now lives in `docs/test-pyramid.md` under "This repo's pyramid", and
+  `TestRepoPyramidSemantics` pins the config to a golden taken before the change, so the
+  config is provably unchanged. `AGENTS.md` tells agents not to read the generated
+  `CHANGELOG.md` (read two recent `changelog.d/` fragments for style) and to grep, then
+  read large files by offset and limit. `changelog.d/README.md` explains that the version
+  comes from `version.FromChangelog`. New `.rgignore` and `.ignore` files keep
+  `internal/web/static/*.min.js` and `features/_artifacts/` out of ripgrep results, so a
+  search like `confirm(` no longer returns 50KB of minified htmx.
+- **Faster, focused acceptance testing: the browser suite leaves the unit rung,
+  `--tags`/`--dir`/`--name` focus runs, a browser-free artefact check, and refused
+  reviews that say why (drv-063).** `go test ./...` no longer runs Playwright scenarios.
+  The in-process suite tests sit behind the `bdd` build tag (`go test -tags bdd
+  ./internal/acceptance`), and the `zz_*` feature runners are gone, because the
+  acceptance rung already runs those features. `go run ./features/acceptance` takes
+  `--tags @a,@b`, `--dir features/<cap>` and `--name <substring>`, and so does `draiver
+  test acceptance`. A focused `draiver test` runs only the named rung, records no
+  test-result, and refuses `--log`/`--detach`, because the review gate needs the full
+  suite. A full acceptance run now fails if a passing scenario attached nothing. A new
+  unit test checks the same rule without a browser by reading the step sources with
+  `go/ast`. Every screenshot goes through one shared `capture`, which retries once and
+  then attaches the page's rendered HTML. This replaces the per-file fallbacks and the
+  `shootRestart` path that dropped the artefact. When `draiver review` is refused for a
+  red rung, the message names the rung and the failing test, and says whether that rung
+  was already red at the merge-base with the base branch.
+- **The board caches each attempt's git state in memory, so an idle webui stops running git for every card on every poll (drvweb-030).**
+  The test-pyramid badge used to start several `git` subprocesses per card on every 3s
+  board poll: about 2.2s of a 2.7s render over roughly 200 mostly-Done attempts. A
+  transparent in-memory cache now sits in front of those reads (`internal/web/pyramidcache.go`).
+  It changes how often git runs, never what is rendered. An entry is reused only while a
+  cheap check says its inputs are unchanged. Branch tips are read straight from the ref files
+  (loose refs and `packed-refs`) with no subprocess. Live worktrees come from one
+  `git worktree list` per repo. The dirtiness of live worktrees is sampled once per render,
+  in parallel. The overlay revision is resolved the same way, and the operator config is
+  memoized on its file stat. A commit, a dirtied or reclaimed worktree, or a moved overlay
+  shows up on the very next render, not after a timeout. A dirty worktree is never served
+  from the cache, so a green badge still means "clean at HEAD". Push, sync, promote,
+  review-env and mark-done drop the attempt's entry so their own response re-reads git.
+  Failed reads are cached for only 2s, concurrent renders share one git run per attempt,
+  and idle entries are evicted. Warm renders of a 200-attempt fixture fall from about 1.2s
+  to about 50ms. On a real data root the warm render takes about 0.3s, down from 2.3s.
+  Repos using the reftable ref backend skip the cache and read git directly, as before.
+
+### Fixed
+
+- **Review environments now honour test-pyramid overlays: Launch exports
+  `DRAIVER_CODEBASE_DIR` / `DRAIVER_OVERLAY_DIR` and runs the attempt's overlay revision
+  (drv-053).** For an overlay-only codebase the board found the overlay's review env but
+  launched it without the drv-041 execution contract, so an `up:
+  $DRAIVER_OVERLAY_DIR/review-env/up.sh` expanded to `/review-env/up.sh` and failed — and the
+  same empty env was replayed into `down` and every healthcheck. Launch now pins one overlay
+  revision (the attempt's overlay branch `draiver/<ticket>/<attempt>` tip, else the overlay
+  HEAD — committed state only, so overlay-main WIP never leaks), cuts a dedicated detached
+  overlay checkout at it beside the codebase review worktree, re-resolves the env definition
+  from that checkout, and exports both variables into `up`, `down`, and the healthchecks via
+  the persisted record (`script_env`, plus `overlay_repo` / `overlay_commit` /
+  `overlay_worktree`). The panel, badge, and Launch handler read the same pinned revision.
+  Both checkouts are removed on a confirmed teardown or failed launch and kept on a leak. A
+  failed `up` now runs `down` best-effort (relayed into System Logs) so a half-started env no
+  longer leaks, and a confirm-down healthcheck that could not run (failed to start, or exit
+  126/127) is treated as inconclusive — `teardown-failed` — instead of "confirmed down". An
+  in-repo pyramid's review env is unchanged.
+- **`draiver ctl logs` and the web Agent Logs panel stamp each agent line with the time it
+  was recorded, not the time it was rendered (drv-066).** Replaying a finished attempt
+  used to show the current time on every line, so historical logs said nothing about
+  timing. The renderer now reads the `"timestamp"` that Claude Code writes on every
+  assistant and user record and shows it in local time. Records that carry no timestamp,
+  such as session init and the turn-end result, take the last recorded time before them.
+  Only a stream that starts with untimestamped records shows the current time, and only
+  until the first recorded time appears. `stream.jsonl` on disk and the `--json` output
+  are unchanged.
+- **Supervised sessions now know who they are, wait on their own background work, and stay stopped when a human interrupts (drvctl-060).** Three fixes in how the supervisor starts, judges and resumes a session:
+
+  - **Identity.** The daemon now hands every session `DRAIVER_ACTOR=agent:<adapter>` and `DRAIVER_ATTEMPT=<id>`, so agents no longer prefix each `draiver` call with an `export`. Inside a supervised session (`DRAIVER_SESSION_*` set), a write whose actor resolves to `human:*` without an explicit `--actor` is refused with an actionable error, instead of being silently misattributed to a person (drv-047's false gotcha). The onboarding skill no longer tells supervised agents to export these.
+  - **Background work.** The completion gate tracks background tasks the agent launched — a `run_in_background` command or an async `Agent`/`Task` subagent — from the stream, and treats a turn that ends while any are outstanding as "still working": no nudge, no halt (drv-051 was halted mid-fan-out, killing five subagents). A cap (default 2h, `ctl up --background-cap`) bounds the wait; past it the gate escalates with that reason, checked from the reconcile tick too.
+  - **Interrupts.** A human interrupt — Claude Code's `[Request interrupted by user]`, or `ctl stop` on an enabled attempt — records a durable `interrupt` event. The supervisor no longer auto-resumes over it (drv-044 was resumed ~10s after each interrupt); the attempt is held, worktree kept warm, until the human posts a message to the agent, resolves an escalation, re-enables it, or runs `ctl start`. The board shows it Pending, "interrupted by human".
 
 ## [0.11.0] - 2026-11-13
 

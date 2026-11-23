@@ -35,6 +35,7 @@ import (
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/watch"
+	"github.com/Dawil/draiver/internal/worktree"
 )
 
 // defaultAdapter is the adapter name assumed for an attempt whose attempt.md
@@ -236,6 +237,25 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 	}
 	permGate := gate.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.PermPolicy, handle, handle.Kill)
 	limitGate := limit.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, r.opt.ContextLimit, handle.Kill)
+	// Checkpoint before the auto-stop reap (drvctl-061): ask the live session for a
+	// handoff note, then — on success and within the attempt's restart budget —
+	// resolve the escalation and flush the session id so the spent run is re-admitted
+	// as a fresh session cold-started from the brief.
+	if r.opt.StopGrace > 0 && r.opt.ContextLimit > 0 {
+		key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
+		limitGate.WithHandoff(limit.Handoff{
+			Grace:        r.opt.StopGrace,
+			Session:      handle,
+			AutoRestarts: r.opt.ContextAutoRestarts,
+			Restart:      func() error { return r.flushSession(a.Ticket, a.ID) },
+			Report:       func(rep limit.Report) { r.reportAutoStop(key, rep) },
+			Ctx:          ctx,
+			Poll:         r.opt.HandoffPoll,
+		})
+		if w := HeadroomWarning(r.opt.ContextLimit, r.opt.ContextWindow); w != "" {
+			r.opt.Logf("reconcile: %s/%s: %s", a.Ticket, a.ID, w)
+		}
+	}
 
 	// The completion gate's baseline is the same log-tail-at-session-start snapshot
 	// the protocol gate takes: a review/escalation must be logged *during* this
