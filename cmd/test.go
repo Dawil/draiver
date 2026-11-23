@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,6 +39,34 @@ var testLog bool
 // single-rung run breaks that premise, so it must not write a gate event.
 var testOnly bool
 
+// testFocusTags / testFocusDir / testFocusName focus a BDD rung on a subset of its
+// scenarios (drv-063). draiver gives them no meaning of its own: it exports them to
+// the rung as $DRAIVER_FOCUS_TAGS / $DRAIVER_FOCUS_DIR / $DRAIVER_FOCUS_NAME (the
+// same repo-agnostic contract as $DRAIVER_TICKET) and the repo's runner reads them.
+// A focused run runs ONLY the target rung and is NEVER a gate result — the review gate
+// needs the full suite — so it refuses --log and --detach and records nothing.
+var (
+	testFocusTags string
+	testFocusDir  string
+	testFocusName string
+)
+
+// focusEnv returns the $DRAIVER_FOCUS_* assignments for the set focus flags, or nil
+// when the run is not focused.
+func focusEnv() []string {
+	var env []string
+	if v := strings.TrimSpace(testFocusTags); v != "" {
+		env = append(env, "DRAIVER_FOCUS_TAGS="+v)
+	}
+	if v := strings.TrimSpace(testFocusDir); v != "" {
+		env = append(env, "DRAIVER_FOCUS_DIR="+v)
+	}
+	if v := strings.TrimSpace(testFocusName); v != "" {
+		env = append(env, "DRAIVER_FOCUS_NAME="+v)
+	}
+	return env
+}
+
 var testCmd = &cobra.Command{
 	Use:   "test [RUNG]",
 	Short: "Run the worktree's test pyramid; --log records a passing result",
@@ -56,7 +85,12 @@ var testCmd = &cobra.Command{
 		"tree. With --log it refuses a dirty tree, then on a green target through RUNG\n" +
 		"appends one durable test-result event carrying the rung and the HEAD commit —\n" +
 		"so brief replays \"rung green @ sha\" for the next agent. A failing run logs\n" +
-		"nothing.",
+		"nothing.\n" +
+		"\n" +
+		"--tags/--dir/--name focus a BDD rung on part of its suite while you iterate\n" +
+		"(e.g. `draiver test acceptance --tags @drv-046`): only RUNG runs, with\n" +
+		"$DRAIVER_FOCUS_TAGS/_DIR/_NAME exported for the repo's runner, and nothing is\n" +
+		"recorded or captured — the review gate needs the full suite.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
@@ -71,6 +105,13 @@ var testCmd = &cobra.Command{
 		// than silently preferring one.
 		if testOnly && testLog {
 			return fmt.Errorf("--only and --log are mutually exclusive: a single-rung run cannot record a gate result (--only captures a report on demand; --log records the review gate, which the full climb proves)")
+		}
+
+		// A focused run (drv-063) can never record or answer a gate: --log would record a
+		// partial suite as the rung's green, and --detach lands a result the gate reads.
+		focus := focusEnv()
+		if len(focus) > 0 && (testLog || testDetach) {
+			return fmt.Errorf("--tags/--dir/--name focus a run on part of the suite, which can never be a gate result: drop --log/--detach (the review gate needs the full suite — climb with `draiver test --log` or `draiver test --detach`)")
 		}
 
 		out := cmd.OutOrStdout()
@@ -118,8 +159,17 @@ var testCmd = &cobra.Command{
 		// it (drv-047). It reuses runRung (so it is overlay-compatible for free) and the
 		// existing artefact capture, but writes NO test-result event and tolerates a dirty
 		// tree. The exit code is that rung's alone.
-		if testOnly {
+		if testOnly && len(focus) == 0 {
 			return runOnlyRung(ctx, cmd, wd, p, levels[len(levels)-1], extraEnv)
+		}
+
+		// A focused run executes exactly the target rung with the focus exported, and
+		// — unlike --only — captures no artefacts either: a partial report must not
+		// become the attempt's latest BDD evidence. Nothing is recorded.
+		if len(focus) > 0 {
+			lv := levels[len(levels)-1]
+			fmt.Fprintf(out, "focused run of rung %q (%s) — lower rungs are not run; records no result and captures no report: the review gate needs the full suite\n", lv.Name, strings.Join(focus, " "))
+			return runRung(ctx, cmd, wd, p, lv, append(append([]string{}, extraEnv...), focus...))
 		}
 
 		// --log demands a commit that fully captures the tree under test, so refuse a
@@ -365,6 +415,12 @@ func climb(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyrami
 			continue
 		}
 		if lv.IsRequired() {
+			var rf *rungFailure
+			if !errors.As(err, &rf) {
+				// An environment fault (up/healthcheck): name the rung, keep the message
+				// and exit code (rungFailure unwraps to the *exitError).
+				err = &rungFailure{Rung: lv.Name, Tests: []string{err.Error()}, err: err}
+			}
 			return false, advisoryReds, err
 		}
 		advisoryReds = append(advisoryReds, lv.Name)
@@ -420,19 +476,29 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 	}
 
 	fmt.Fprintf(out, "== %s: %s\n", lv.Name, lv.Run)
-	runErr := runShell(ctx, cmd, wd, lv.Run, extraEnv)
+	// Tee the run's output through a failScanner so a red rung can name its failing
+	// tests (drv-063) without changing what streams to the console.
+	fs := &failScanner{}
+	runErr := runShellTo(ctx, cmd, wd, lv.Run, extraEnv, io.MultiWriter(cmd.OutOrStdout(), fs), io.MultiWriter(cmd.ErrOrStderr(), fs))
 
 	// A BDD/acceptance rung (drv-016) declares the cucumber-JSON its runner writes.
 	// Capture it whether the run passed or failed — a red run's report is exactly
 	// what drv-018 renders to show which scenarios broke — but never let capture
 	// change the rung's verdict (best-effort, like `down`): the run's exit code
 	// stays authoritative.
+	var rep cucumber.Report
 	if cj := strings.TrimSpace(lv.CucumberJSON); cj != "" {
-		captureCucumber(cmd, wd, lv.Name, cj)
+		rep = captureCucumber(cmd, wd, lv.Name, cj)
 	}
 
 	if runErr != nil {
-		return fmt.Errorf("rung %q not green: %w", lv.Name, runErr)
+		// A BDD rung names its failed scenarios from its own report; anything else
+		// names what the failScanner recognised in its output.
+		tests := failedScenarios(rep)
+		if len(tests) == 0 {
+			tests = fs.failures()
+		}
+		return &rungFailure{Rung: lv.Name, Tests: tests, run: true, err: runErr}
 	}
 	return nil
 }
@@ -444,19 +510,20 @@ func runRung(ctx context.Context, cmd *cobra.Command, wd string, p *pyramid.Pyra
 // whose runner forgot to write the report still passes (loudly). Durable storage of
 // the report/embeddings is drv-017's concern; this only proves the JSON is present
 // and consumable and surfaces what it contains.
-func captureCucumber(cmd *cobra.Command, wd, rung, rel string) {
+func captureCucumber(cmd *cobra.Command, wd, rung, rel string) cucumber.Report {
 	path := filepath.Join(wd, rel)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: rung %q cucumber-JSON %q not captured (ignored): %v\n", rung, rel, err)
-		return
+		return nil
 	}
 	rep, err := cucumber.Parse(data)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: rung %q cucumber-JSON %q not valid (ignored): %v\n", rung, rel, err)
-		return
+		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "== %s: captured cucumber-JSON %s — %s\n", rung, rel, rep.Summary())
+	return rep
 }
 
 // runShell runs one shell command in wd, wiring its stdio to the cobra command's
@@ -468,10 +535,16 @@ func captureCucumber(cmd *cobra.Command, wd, rung, rel string) {
 // environment. For a local, in-repo pyramid it is empty and rc.Env is left unset, so
 // the command inherits os.Environ() exactly as before — byte-for-byte unchanged.
 func runShell(ctx context.Context, cmd *cobra.Command, wd, script string, extraEnv []string) error {
+	return runShellTo(ctx, cmd, wd, script, extraEnv, cmd.OutOrStdout(), cmd.ErrOrStderr())
+}
+
+// runShellTo is runShell with explicit output streams (a rung's run tees through a
+// failScanner).
+func runShellTo(ctx context.Context, cmd *cobra.Command, wd, script string, extraEnv []string, stdout, stderr io.Writer) error {
 	rc := exec.CommandContext(ctx, "sh", "-c", script)
 	rc.Dir = wd
-	rc.Stdout = cmd.OutOrStdout()
-	rc.Stderr = cmd.ErrOrStderr()
+	rc.Stdout = stdout
+	rc.Stderr = stderr
 	rc.Stdin = os.Stdin
 	if len(extraEnv) > 0 {
 		rc.Env = append(os.Environ(), extraEnv...)
@@ -625,6 +698,9 @@ func rungNames(p *pyramid.Pyramid) string {
 func init() {
 	testCmd.Flags().BoolVar(&testLog, "log", false, "on all-green, append a durable test-result event (refuses a dirty tree)")
 	testCmd.Flags().BoolVar(&testOnly, "only", false, "run and capture exactly RUNG — its own env lifecycle and nothing below it — regardless of lower rungs; captures the report on demand but records no gate result (mutually exclusive with --log)")
+	testCmd.Flags().StringVar(&testFocusTags, "tags", "", "focused run: only scenarios carrying any of these comma-separated tags (exported as $DRAIVER_FOCUS_TAGS); runs only RUNG and records nothing")
+	testCmd.Flags().StringVar(&testFocusDir, "dir", "", "focused run: only the features under this directory, e.g. features/overlays (exported as $DRAIVER_FOCUS_DIR); runs only RUNG and records nothing")
+	testCmd.Flags().StringVar(&testFocusName, "name", "", "focused run: only scenarios whose name contains this text (exported as $DRAIVER_FOCUS_NAME); runs only RUNG and records nothing")
 	testCmd.Flags().BoolVar(&testDetach, "detach", false, "run the climb out-of-band and land a durable pass/fail result on the attempt's log; returns at once so the session can `park` (drvctl-055)")
 	rootCmd.AddCommand(testCmd)
 }

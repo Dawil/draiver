@@ -29,8 +29,7 @@ is safe if a `defer_` restores it.
 
 ## Artefacts: every scenario attaches one
 
-`TestEveryScenarioHasAnArtifact` requires **every** scenario, UI or not, to have at
-least one step that appends to `sr.Embeddings`:
+Every scenario, UI or not, needs at least one step that appends to `sr.Embeddings`:
 
 - **UI:** `shoot(w, sr, path, name, fullPage, waitSel, clickSel)` takes a Playwright
   PNG of `currentBoard(w)` at `path`. `clickSel` clicks first (for example to open a
@@ -38,10 +37,20 @@ least one step that appends to `sr.Embeddings`:
 - **CLI or anything else:** `attachText(sr, name, content)` attaches the captured
   output as `text/plain`.
 
-**Without a browser** (`webshot.Available()` false), `shoot` errors and fails the
-scenario; the suite tests in `acceptance_test.go` skip, so only the drift guard runs.
-The rung's `bdd` env blocks without one. Locally: `npm install --prefix
-features/screenshots`.
+The rule is checked twice:
+
+- **Without a browser, in `unit`:** `TestEveryScenarioCanAttachAnArtefact`
+  (`artefactcheck_test.go`) reads the step sources with `go/ast`, without running
+  them. A step attaches if its function (or a package function it calls) appends to
+  `*.Embeddings`. Each scenario needs at least one such step. Calling `shoot`,
+  `attachText` or `capture` counts, so you annotate nothing.
+- **At runtime:** `go run ./features/acceptance` fails a full run if a passing
+  scenario attached nothing.
+
+`shoot` goes through the shared `capture` (`steps.go`). It retries a failed screenshot
+once, then attaches the page's rendered HTML. With no browser at all, it attaches the
+HTML straight away. Don't write your own "no browser" fallback. Locally, `npm install
+--prefix features/screenshots` installs the browser deps.
 
 ## Helpers to reuse
 
@@ -54,18 +63,18 @@ update its row.
 | `seedBoard` | `steps.go:231` | temp data root with attempt `ACC-1/0001` + a live `httptest` webui; `w.set("board", b)` it |
 | `currentBoard` | `steps.go:295` | the `*board` under key `"board"`; `b.url(path)`, `b.root` (`store.Root`) |
 | `seedRun` | `steps.go:282` | a captured BDD run, so the report panel renders |
-| `shoot` | `steps.go:308` | Playwright screenshot artefact of a board page |
+| `shoot` | `steps.go:310` | Playwright screenshot of a board page; retries once, then attaches the rendered HTML |
 | `attachText` | `steps_recall.go:27` | text artefact (CLI output, JSON, HTML excerpt) |
 | `getBody` | `steps_recall.go:50` | GET a URL, require 200, return the body |
-| `getHTML` | `steps_morph.go:51` | GET a path on `currentBoard`, require 200 |
-| `setBoard` | `steps_tabs.go:156` | `seedTabsBoard` (Running/review/done, optional run) stored as `"board"` |
-| `shootTabs` | `steps_tabs.go:465` | full-page shot of the attempt page after clicking a tab |
+| `getHTML` | `steps_morph.go:47` | GET a path on `currentBoard`, require 200 |
+| `setBoard` | `steps_tabs.go:152` | `seedTabsBoard` (Running/review/done, optional run) stored as `"board"` |
+| `shootTabs` | `steps_tabs.go:461` | full-page shot of the attempt page after clicking a tab |
 | `seedTypedTicket` | `steps_codebase.go:29` | bare data root + one ticket (optional `type:`), no server |
 | `addTypedTicket` | `steps_codebase.go:44` | add another ticket to an existing root |
 | `seedLedgerBoard` | `steps_codebase_web.go:42` | live board over a root you build in a callback |
 | `seedRerunBoard` | `steps_reportfidelity.go:67` | real git repo + managed worktree + board, for rerun/report flows |
-| `seedGitBoard` | `steps_git.go:91` | board over a repo, worktree and bare origin (`advanced`/`uptodate`/`dirty`/`ahead`) |
-| `gitc` | `steps_git.go:69` | run `git -C dir …` with a fixed identity, returning an error |
+| `seedGitBoard` | `steps_git.go:88` | board over a repo, worktree and bare origin (`advanced`/`uptodate`/`dirty`/`ahead`) |
+| `gitc` | `steps_git.go:66` | run `git -C dir …` with a fixed identity, returning an error |
 | `overlayBin` | `steps_overlay.go:86` | builds the real `draiver` binary once per run; run it with `--data <root>` |
 | `ovRepoRoot` | `steps_overlay.go:109` | the module root (where `go.mod` is) |
 | `ovChildEnv` | `steps_overlay.go:293` | an env for a shelled `draiver` with `DRAIVER_*`/`XDG_CACHE_HOME` isolated |
@@ -135,22 +144,17 @@ func thenWidgetOnBoard(w *World, sr *StepRun) error {
 ## Running it
 
 ```sh
-go test ./internal/acceptance -run TestFeaturesHaveStepDefinitions  # drift guard, fast
-draiver test acceptance        # the rung: changelog → unit → acceptance (all features)
-go run ./features/acceptance   # the whole suite directly; artefacts in features/_artifacts/
+go test ./internal/acceptance                       # drift guard + static artefact check, no browser, seconds
+go run ./features/acceptance --tags @drv-NNN        # only your scenarios (feature/rule/scenario tags; comma = OR)
+go run ./features/acceptance --dir features/<cap>   # only one capability folder
+go run ./features/acceptance --name "substring"     # scenarios whose name contains it
+draiver test acceptance --tags @drv-NNN             # the same, through the rung's own command
+go run ./features/acceptance                        # the whole suite; artefacts in features/_artifacts/
+go test -tags bdd ./internal/acceptance             # the old in-process suite tests, on demand
 ```
 
-To run only your feature, use a scratch test, and delete it before you commit:
+The flags combine (AND). A focused run never records a rung result: `draiver test`
+with `--tags/--dir/--name` runs only the named rung and refuses `--log`/`--detach`.
+The review gate needs the full suite. Don't write `zz_*` wrapper tests. Use the
+flags instead.
 
-```go
-// internal/acceptance/zz_focus_test.go — DELETE before commit
-func TestFocus(t *testing.T) {
-	res, err := Run("../../features/<capability>", t.TempDir())
-	if err != nil || res.ScenariosFailed != 0 {
-		t.Fatalf("err=%v\n%s", err, res.Report.Summary())
-	}
-}
-```
-
-Run it with `go test ./internal/acceptance -run TestFocus -v`. drv-063 adds focused
-flags to the runner.

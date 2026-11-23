@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -10,9 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/project"
@@ -160,23 +157,12 @@ func shootRestart(w *World, sr *StepRun, name, waitSel, clickSel, afterWait stri
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/ticket/"+rsTicket+"/"+rsAtt), webshot.Options{
+	return capture(sr, b.url("/ticket/"+rsTicket+"/"+rsAtt), name, webshot.Options{
 		Width: 1280, Height: 1000, FullPage: true,
 		WaitSelector:           waitSel,
 		ClickSelector:          clickSel,
 		AfterClickWaitSelector: afterWait,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     name,
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }
 
 func thenOffersResolveAndRestart(w *World, sr *StepRun) error {

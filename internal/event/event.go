@@ -82,9 +82,16 @@ type Event struct {
 	// message marker the in-session unread notice counts — actor is never used, as
 	// spine notes are stamped human:* too. omitempty, so every unmarked event hashes
 	// and serialises exactly as before.
-	To   string `yaml:"to,omitempty"`
-	Prev string `yaml:"prev"`
-	Hash string `yaml:"hash"`
+	To string `yaml:"to,omitempty"`
+	// FailedRung and FailedTests carry a FAILING `test-result`'s diagnosis (drv-063):
+	// the required rung the climb halted at and the tests/scenarios that failed in
+	// it, so a refused review can name them. omitempty, following the Outcome/Rung/
+	// Commit forward-compatible precedent, so every other event hashes and serialises
+	// exactly as before.
+	FailedRung  string   `yaml:"failed_rung,omitempty"`
+	FailedTests []string `yaml:"failed_tests,omitempty"`
+	Prev        string   `yaml:"prev"`
+	Hash        string   `yaml:"hash"`
 
 	Body string `yaml:"-"`
 }
@@ -111,6 +118,8 @@ type hashable struct {
 	WokenChild  string   `yaml:"woken_child,omitempty"`
 	WokenSeq    int      `yaml:"woken_seq,omitempty"`
 	To          string   `yaml:"to,omitempty"`
+	FailedRung  string   `yaml:"failed_rung,omitempty"`
+	FailedTests []string `yaml:"failed_tests,omitempty"`
 	Prev        string   `yaml:"prev"`
 }
 
@@ -137,6 +146,8 @@ func (e Event) ComputeHash() string {
 		WokenChild:  e.WokenChild,
 		WokenSeq:    e.WokenSeq,
 		To:          e.To,
+		FailedRung:  e.FailedRung,
+		FailedTests: e.FailedTests,
 		Prev:        e.Prev,
 	}
 	front, err := yaml.Marshal(h)

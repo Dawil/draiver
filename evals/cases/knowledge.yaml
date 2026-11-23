@@ -132,6 +132,27 @@
         style from changelog.d (its README or recent fragments), and does NOT tell the
         agent to read or edit the generated CHANGELOG.md.
 
+- description: "knowledge: run only your own BDD scenarios (drv-063)"
+  metadata: {kind: knowledge, ticket: drv-063, weight: light}
+  vars:
+    prompt: >-
+      You are a coding agent iterating on the BDD scenarios you added for ticket
+      drv-123 in this repository. How do you run only those scenarios, without the
+      whole acceptance suite, and can that run count as the passing result the review
+      gate needs? Name the exact commands. Answer briefly.
+  assert:
+    - type: icontains-all
+      transform: JSON.parse(output).answer
+      value: ["--tags", "@drv-123"]
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer runs a focused run with a tag filter (for example `draiver test
+        acceptance --tags @drv-123` or `go run ./features/acceptance --tags @drv-123`),
+        says a focused run records no rung result and so cannot satisfy the review
+        gate (the full suite must still be climbed), and does NOT suggest writing a
+        throwaway zz_*_test.go wrapper.
+
 - description: "knowledge: where draiver's version comes from (drv-061)"
   metadata: {kind: knowledge, ticket: drv-061, weight: light}
   vars:
