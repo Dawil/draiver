@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
@@ -55,6 +56,50 @@ const (
 // IsMessage reports whether e is a human→agent message (carries the explicit
 // marker).
 func IsMessage(e event.Event) bool { return e.To == ToAgent }
+
+// IsHuman reports whether e was authored by a human (a `human:*` actor).
+func IsHuman(e event.Event) bool { return strings.HasPrefix(e.Actor, "human:") }
+
+// IsDeliverable reports whether e is a human event the live session must see
+// (drvctl-062): an explicit message (the drvctl-059 `to: agent` marker, any type),
+// a human `decision` or `resolution`, or any human event that supersedes earlier
+// facts. A human `note` counts only when marked: daemon spine notes (retire,
+// restart flush, fork, land) are stamped `human:*` too, so an unmarked note cannot
+// be told from bookkeeping. Agent-authored events never count — the session wrote
+// them.
+func IsDeliverable(e event.Event) bool {
+	if IsMessage(e) {
+		return true
+	}
+	if !IsHuman(e) {
+		return false
+	}
+	if len(e.Supersedes) > 0 {
+		return true
+	}
+	return e.Type == "decision" || e.Type == "resolution"
+}
+
+// Kind is the short label a deliverable event is announced under: `supersede` for
+// an event that retires earlier facts, else its type.
+func Kind(e event.Event) string {
+	if len(e.Supersedes) > 0 {
+		return "supersede"
+	}
+	return e.Type
+}
+
+// After returns the deliverable events in events with seq > floor, in log order.
+// It is the push side's view (drvctl-062): floor is the session's push cursor.
+func After(events []event.Event, floor int) []event.Event {
+	var out []event.Event
+	for _, e := range events {
+		if e.Seq > floor && IsDeliverable(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
 
 // Session is the in-session context the notice needs: which attempt the running
 // session works and the log seq it started at.
@@ -187,17 +232,10 @@ func AdvanceCursor(root store.Root, ticket, attempt string, seq int) error {
 	return writeSeq(cursorPath(root, ticket, attempt), seq)
 }
 
-// Unread returns the marked messages in events with seq > max(watermark, cursor),
-// in log order.
+// Unread returns the deliverable human events (IsDeliverable) in events with
+// seq > max(watermark, cursor), in log order.
 func Unread(events []event.Event, watermark, cursor int) []event.Event {
-	floor := max(watermark, cursor)
-	var out []event.Event
-	for _, e := range events {
-		if e.Seq > floor && IsMessage(e) {
-			out = append(out, e)
-		}
-	}
-	return out
+	return After(events, max(watermark, cursor))
 }
 
 // Notice is the count-only banner. It deliberately carries no message content —
@@ -210,5 +248,77 @@ func Notice(n int) string {
 	return fmt.Sprintf("📬 %d unread %s from the human since this session started — run `draiver messages` to read.", n, noun)
 }
 
+// tag renders `#15 supersede (retires #14)`.
+func tag(e event.Event) string {
+	t := fmt.Sprintf("#%d %s", e.Seq, Kind(e))
+	if len(e.Supersedes) > 0 {
+		refs := make([]string, len(e.Supersedes))
+		for i, s := range e.Supersedes {
+			refs[i] = "#" + strconv.Itoa(s)
+		}
+		t += " (retires " + strings.Join(refs, ", ") + ")"
+	}
+	return t
+}
+
+// warnListCap bounds how many events the write warning names inline.
+const warnListCap = 3
+
+// Warning is the line `draiver log` and `draiver review` print from inside a
+// session, under the count-only Notice, when it has unread human events
+// (drvctl-062). It names each by seq and kind — `#15 supersede (retires #14)` — so
+// a write on a stale view is caught (drv-044: a decision logged after the human had
+// already retracted its premise). Like Notice it carries no content: the agent
+// pulls that with `draiver messages`, and the pushed turn quotes it.
+func Warning(unread []event.Event) string {
+	n := len(unread)
+	noun := "events"
+	if n == 1 {
+		noun = "event"
+	}
+	parts := make([]string, 0, warnListCap+1)
+	for i, e := range unread {
+		if i == warnListCap {
+			parts = append(parts, fmt.Sprintf("+%d more", n-warnListCap))
+			break
+		}
+		parts = append(parts, tag(e))
+	}
+	return fmt.Sprintf("⚠️ %d new human %s since your last read: %s — run `draiver messages` to read.", n, noun, strings.Join(parts, "; "))
+}
+
+// pushBodyCap bounds each event body quoted in a pushed turn, and pushListCap the
+// number of events quoted in full; the rest are named by label only.
+const (
+	pushBodyCap = 1500
+	pushListCap = 5
+)
+
+// PushText is the short user turn the supervisor injects into a live session when
+// the human appends deliverable events mid-session (drvctl-062). It quotes each
+// event's text (capped) so the agent can act before its next step, and tells it how
+// to acknowledge — the push itself does not mark anything read.
+func PushText(ticket string, evs []event.Event) string {
+	var b strings.Builder
+	noun := "an event"
+	if len(evs) > 1 {
+		noun = fmt.Sprintf("%d events", len(evs))
+	}
+	fmt.Fprintf(&b, "📬 The human just appended %s to your attempt's log while you were working. Read before your next step — it may change or retract what you are doing:\n", noun)
+	for i, e := range evs {
+		if i >= pushListCap {
+			fmt.Fprintf(&b, "\n- %s\n", tag(e))
+			continue
+		}
+		body := strings.TrimSpace(e.Body)
+		if r := []rune(body); len(r) > pushBodyCap {
+			body = string(r[:pushBodyCap]) + fmt.Sprintf("… (truncated — `draiver recall %s %d` for the rest)", ticket, e.Seq)
+		}
+		fmt.Fprintf(&b, "\n── %s · %s ──\n%s\n", tag(e), e.Actor, body)
+	}
+	b.WriteString("\nAct on it, log what you did, and run `draiver messages` to acknowledge — `draiver review` refuses while human events are unread.")
+	return b.String()
+}
+
 // ReviewHint is printed when `draiver review` is soft-stopped on unread messages.
-const ReviewHint = "review not recorded — read with `draiver messages`, or re-run with `--ignore-unread` to claim anyway."
+const ReviewHint = "review not recorded — read with `draiver messages` (or re-run with `--ack` to read them now and claim), or `--ignore-unread` to claim without reading."

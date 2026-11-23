@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -212,5 +213,52 @@ func TestLogToRejectsUnknownRecipient(t *testing.T) {
 	dir := newTicket(t)
 	if _, code := run(t, "--data", dir, "log", "PROJ-1", "--type", "note", "--to", "bob", "x"); code == 0 {
 		t.Fatal("--to other than agent must be rejected")
+	}
+}
+
+// TestHumanDecisionAndSupersedeCountWithoutMarker (drvctl-062): a human decision
+// or a human supersede is a deliverable event even without `to: agent`; an
+// agent-authored one never is. log names them by seq and kind, without content.
+func TestHumanDecisionAndSupersedeCountWithoutMarker(t *testing.T) {
+	dir, _ := msgWorld(t)
+	run(t, "--data", dir, "--actor", "agent:x", "log", "PROJ-1", "--type", "decision", "my own decision")
+	_, stderr, _ := runSplit(t, "--data", dir, "status", "PROJ-1")
+	if strings.Contains(stderr, "📬") {
+		t.Fatalf("agent-authored events must not notify: %q", stderr)
+	}
+	run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", "--type", "decision", "Build the export feature")
+	evs, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
+	dec := evs[len(evs)-1].Seq
+	run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", "--type", "note", "--supersedes", strconv.Itoa(dec), "SECRET ignore that, it was for another ticket")
+	_, stderr, _ = runSplit(t, "--data", dir, "--actor", "agent:x", "log", "PROJ-1", "--type", "note", "x")
+	want := fmt.Sprintf("2 new human events since your last read: #%d decision; #%d supersede (retires #%d)", dec, dec+1, dec)
+	if !strings.Contains(stderr, "📬 2 unread messages") || !strings.Contains(stderr, want) {
+		t.Fatalf("log must print the notice and name the events: %q", stderr)
+	}
+	if strings.Contains(stderr, "SECRET") {
+		t.Fatalf("warning must carry no content: %q", stderr)
+	}
+	// Read-only verbs keep only the count.
+	_, stderr, _ = runSplit(t, "--data", dir, "status", "PROJ-1")
+	if strings.Contains(stderr, "new human event") {
+		t.Fatalf("read-only verbs print the count notice only: %q", stderr)
+	}
+}
+
+// TestReviewAckReadsAndClaims (drvctl-062): `review --ack` prints the unread events,
+// marks them read, and records the claim; the notice is gone afterwards.
+func TestReviewAckReadsAndClaims(t *testing.T) {
+	dir, _ := msgWorld(t)
+	run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", "--type", "decision", "ACK-BODY use sqlite")
+	if _, stderr, code := runSplit(t, "--data", dir, "--actor", "agent:x", "review", "PROJ-1", "done"); code != ExitUnreadMessages || !strings.Contains(stderr, "--ack") || !strings.Contains(stderr, "decision") {
+		t.Fatalf("review must refuse first, naming --ack: %d %q", code, stderr)
+	}
+	stdout, _, code := runSplit(t, "--data", dir, "--actor", "agent:x", "review", "PROJ-1", "done", "--ack")
+	if code != 0 || !strings.Contains(stdout, "ACK-BODY use sqlite") || !strings.Contains(stdout, "Acknowledged 1 human event") || !strings.Contains(stdout, "review claimed") {
+		t.Fatalf("--ack must print, mark read and claim: code=%d %q", code, stdout)
+	}
+	_, stderr, _ := runSplit(t, "--data", dir, "status", "PROJ-1")
+	if strings.Contains(stderr, "📬") {
+		t.Fatalf("--ack must clear the notice: %q", stderr)
 	}
 }
