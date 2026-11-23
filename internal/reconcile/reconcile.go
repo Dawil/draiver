@@ -51,6 +51,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
@@ -58,6 +59,7 @@ import (
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/gate"
+	"github.com/Dawil/draiver/internal/handoff"
 	"github.com/Dawil/draiver/internal/limit"
 	"github.com/Dawil/draiver/internal/manage"
 	"github.com/Dawil/draiver/internal/project"
@@ -168,6 +170,30 @@ type Options struct {
 	// escalation (internal/limit). Zero or negative disables the backstop.
 	ContextLimit int
 
+	// ContextWindow is the model's context capacity in tokens (config
+	// context_window). It is only used for the handoff headroom check (drvctl-061):
+	// the checkpoint turn needs room above ContextLimit, so session start warns when
+	// ContextLimit + HandoffReserve exceeds it. Zero skips the check.
+	ContextWindow int
+
+	// StopGrace is the checkpoint-before-reap grace period (drvctl-061, config
+	// stop_grace_seconds): before either stop path reaps a live session — the
+	// context-limit auto-stop or a supervised `ctl stop` — the session is asked to
+	// log a handoff note and given up to this long to do it. Zero disables the
+	// checkpoint everywhere: both paths reap immediately, exactly as before.
+	StopGrace time.Duration
+
+	// ContextAutoRestarts is how many times an attempt is restarted on a fresh
+	// context window without a human after a successful auto-stop handoff
+	// (drvctl-061, config context_auto_restarts). A trip past the budget escalates
+	// to a human as before. Zero never auto-restarts.
+	ContextAutoRestarts int
+
+	// HandoffPoll overrides how often a checkpoint re-reads the log for the handoff
+	// note (handoff.DefaultPoll when zero) and how often a `ctl stop` client polls
+	// for the daemon's stop result. Tests shorten it.
+	HandoffPoll time.Duration
+
 	// Proc probes and stops foreign session processes on restart. Zero value
 	// defaults to OSProc{}.
 	Proc Proc
@@ -263,6 +289,54 @@ type run struct {
 	// completeGate is the session's completion gate, kept on the run so the tick can
 	// fire its background-cap timer (drvctl-060). Nil for an adopted session.
 	completeGate *completion.Gate
+
+	// limitGate is the session's context-limit gate, kept on the run so the tick can
+	// see a handoff checkpoint in progress and leave the run alone (drvctl-061).
+	// Nil for an adopted session.
+	limitGate *limit.Gate
+
+	// turnActive tracks whether the session has a turn in flight (set by any
+	// mid-turn frame, cleared by a top-level turn end), so a `ctl stop` checkpoint
+	// knows whether to interrupt first (drvctl-061).
+	turnActive atomic.Bool
+
+	// stopMu guards stopCk, the `ctl stop` handoff checkpoint while it runs.
+	stopMu sync.Mutex
+	stopCk *handoff.Checkpoint
+}
+
+// spent reports whether the run's ingest goroutine has returned (its session
+// process is gone). An adopted run has no ingest and is never spent.
+func (rn *run) spent() bool {
+	if rn.done == nil {
+		return false
+	}
+	select {
+	case <-rn.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// stopCheckpoint returns the running `ctl stop` checkpoint, or nil.
+func (rn *run) stopCheckpoint() *handoff.Checkpoint {
+	rn.stopMu.Lock()
+	defer rn.stopMu.Unlock()
+	return rn.stopCk
+}
+
+// checkpointing reports whether a handoff checkpoint (auto-stop or `ctl stop`) is
+// running on this session: it is deliberately still live while it writes its
+// handoff note, so the tick must not retire it (drvctl-061).
+func (rn *run) checkpointing() bool {
+	if rn == nil || rn.adopted {
+		return false
+	}
+	if rn.limitGate != nil && rn.limitGate.Checkpointing() {
+		return true
+	}
+	return rn.stopCheckpoint() != nil
 }
 
 // New validates opt, applies defaults, and returns a Reconciler with an empty run
@@ -460,6 +534,10 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 		}
 	}
 
+	// Serve `ctl stop` requests handed to this daemon (drvctl-061): checkpoint an
+	// owned session before reaping it, or reap directly.
+	r.serveStopRequests(ctx)
+
 	// The completion gate's background cap is a timer, not only a turn-end check: a
 	// session idling on hung background tasks emits no frames, so fire it from the
 	// tick (drvctl-060).
@@ -470,6 +548,16 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	// (blocked); retire further gates reclamation on a clean checkout.
 	for _, key := range current {
 		if _, ok := desired[key]; ok {
+			continue
+		}
+		// A session mid-handoff (drvctl-061) left the desired set the moment its
+		// escalation or interrupt hold landed, but it is deliberately still live while
+		// it writes its note; the checkpoint reaps it itself, and the next tick
+		// retires the spent run.
+		r.mu.Lock()
+		rn := r.runs[key]
+		r.mu.Unlock()
+		if rn.checkpointing() {
 			continue
 		}
 		r.retire(ctx, key, r.stateOf(key))
@@ -721,7 +809,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 
 	stream := w.handle.Stream()
 	ictx, cancel := context.WithCancel(ctx)
-	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo, completeGate: w.completeGate}
+	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo, completeGate: w.completeGate, limitGate: w.limitGate}
 
 	r.mu.Lock()
 	r.runs[key] = rn
@@ -843,7 +931,7 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 			if !ok {
 				return
 			}
-			r.dispatch(ctx, key, pg, permGate, lg, cg, w, ev)
+			r.dispatch(ctx, key, rn, pg, permGate, lg, cg, w, ev)
 		}
 	}
 }
@@ -855,9 +943,20 @@ func (r *Reconciler) ingest(ctx context.Context, key worktree.Key, rn *run, pg *
 // answering; a cleared request falls through to the permission gate, which allows
 // it or escalates-and-halts. Ordering protocol → permission is what keeps the two
 // from double-answering the agent.
-func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, ev agent.Event) {
+func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, rn *run, pg *protocol.Gate, permGate *gate.Gate, lg *limit.Gate, cg *completion.Gate, w *watch.Watcher, ev agent.Event) {
 	if _, err := w.Process(ev); err != nil {
 		r.opt.Logf("reconcile: watch %s/%s: %v", key.Ticket, key.Attempt, err)
+	}
+	trackTurn(rn, ev)
+
+	// A `ctl stop` handoff checkpoint is running (drvctl-061): feed it the stream and
+	// answer permission asks (its `draiver log` must run), but skip the completion
+	// gate and the human-interrupt hold — the checkpoint's own interrupt and handoff
+	// turn would trip both.
+	checkpointing := false
+	if ck := rn.stopCheckpoint(); ck != nil {
+		ck.Observe(ev)
+		checkpointing = true
 	}
 
 	// Context-window backstop: after the meter has folded this event's usage,
@@ -868,6 +967,13 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 		r.opt.Logf("reconcile: limit gate %s/%s: %v", key.Ticket, key.Attempt, err)
 	} else if out == limit.Stopped {
 		r.opt.Logf("reconcile: context auto-stop %s/%s at %d tokens", key.Ticket, key.Attempt, ev.Usage.ContextTokens)
+		return
+	} else if out == limit.Checkpointing {
+		checkpointing = true
+	}
+
+	if checkpointing {
+		r.gatePermission(ctx, key, pg, permGate, ev)
 		return
 	}
 
@@ -901,6 +1007,12 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 		return
 	}
 
+	r.gatePermission(ctx, key, pg, permGate, ev)
+}
+
+// gatePermission runs a permission event through the protocol gate then the
+// permission gate (protocol → permission, so the two never double-answer).
+func (r *Reconciler) gatePermission(ctx context.Context, key worktree.Key, pg *protocol.Gate, permGate *gate.Gate, ev agent.Event) {
 	if ev.Kind != agent.EventPermission {
 		return
 	}
@@ -914,6 +1026,19 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 	}
 	if _, err := permGate.Consider(ctx, ev); err != nil {
 		r.opt.Logf("reconcile: permission gate %s/%s: %v", key.Ticket, key.Attempt, err)
+	}
+}
+
+// trackTurn keeps rn.turnActive current: any mid-turn frame marks a turn in
+// flight; a top-level turn end clears it (drvctl-061).
+func trackTurn(rn *run, ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventTurnEnd:
+		if ev.Origin == "" {
+			rn.turnActive.Store(false)
+		}
+	case agent.EventAssistant, agent.EventToolCall, agent.EventToolResult, agent.EventUsage, agent.EventPermission:
+		rn.turnActive.Store(true)
 	}
 }
 

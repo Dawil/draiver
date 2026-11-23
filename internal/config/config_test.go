@@ -484,3 +484,30 @@ func writeConfig(t *testing.T, body string) string {
 	}
 	return path
 }
+
+// drvctl-061: stop_grace_seconds and context_auto_restarts follow the
+// omitted-vs-explicit-0 pattern — omitted takes the builtin, 0 disables.
+func TestLoad_StopGraceAndAutoRestarts(t *testing.T) {
+	c, err := Load(writeConfig(t, `{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StopGraceSeconds != DefaultStopGraceSeconds || c.ContextAutoRestarts != DefaultContextAutoRestarts {
+		t.Errorf("omitted: grace=%d restarts=%d, want defaults %d/%d", c.StopGraceSeconds, c.ContextAutoRestarts,
+			DefaultStopGraceSeconds, DefaultContextAutoRestarts)
+	}
+	c, err = Load(writeConfig(t, `{"stop_grace_seconds": 0, "context_auto_restarts": 0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StopGraceSeconds != 0 || c.ContextAutoRestarts != 0 {
+		t.Errorf("explicit 0: grace=%d restarts=%d, want 0/0", c.StopGraceSeconds, c.ContextAutoRestarts)
+	}
+	c, err = Load(writeConfig(t, `{"stop_grace_seconds": 45, "context_auto_restarts": 2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StopGraceSeconds != 45 || c.ContextAutoRestarts != 2 {
+		t.Errorf("set: grace=%d restarts=%d, want 45/2", c.StopGraceSeconds, c.ContextAutoRestarts)
+	}
+}

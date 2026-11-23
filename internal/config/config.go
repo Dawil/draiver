@@ -26,6 +26,17 @@ const (
 	DefaultContextWindow = 200_000
 	DefaultContextLimit  = 150_000
 
+	// DefaultStopGraceSeconds is the builtin checkpoint-before-reap grace period
+	// (drvctl-061): how long a session being stopped — at the context limit or by a
+	// supervised `ctl stop` — gets to log its handoff note before it is reaped anyway.
+	DefaultStopGraceSeconds = 120
+
+	// DefaultContextAutoRestarts is the builtin number of times an attempt is
+	// restarted on a fresh context window without a human after a successful
+	// auto-stop handoff (drvctl-061). One: a second trip on the same attempt is the
+	// signal it is too big or needs a human, so it escalates.
+	DefaultContextAutoRestarts = 1
+
 	// DefaultSupervision is the built-in coordinator supervision mode (drvctl-042)
 	// when config sets none: "passthrough", the floor — a sub-ticket escalation
 	// routes straight to Needs-me and no coordinator wakes. Opting a fleet into
@@ -56,6 +67,18 @@ type Config struct {
 	// fill crosses it is halted and the stop recorded as an escalation. 0 disables
 	// the auto-stop.
 	ContextLimit int `json:"context_limit"`
+
+	// StopGraceSeconds is the checkpoint-before-reap grace period in seconds
+	// (drvctl-061): before the supervisor reaps a live session — at the context
+	// limit, or on a supervised `ctl stop` — it asks the session to log a handoff
+	// note and waits up to this long for it. 0 disables the checkpoint everywhere
+	// (both paths reap immediately, as before).
+	StopGraceSeconds int `json:"stop_grace_seconds"`
+
+	// ContextAutoRestarts is how many times an attempt is restarted on a fresh
+	// context window without a human after a successful auto-stop handoff
+	// (drvctl-061). 0 never auto-restarts: every auto-stop waits for a human.
+	ContextAutoRestarts int `json:"context_auto_restarts"`
 
 	// PermissionsDefault is the permission-gate default rule ("allow" | "escalate")
 	// for any tool not named in Permissions. Empty leaves the gate's base default
@@ -270,6 +293,8 @@ func Default() Config {
 	return Config{
 		ContextWindow:          DefaultContextWindow,
 		ContextLimit:           DefaultContextLimit,
+		StopGraceSeconds:       DefaultStopGraceSeconds,
+		ContextAutoRestarts:    DefaultContextAutoRestarts,
 		DefaultSupervision:     DefaultSupervision,
 		ReviewEnvMaxAgeMinutes: DefaultReviewEnvMaxAgeMinutes,
 		AsyncJobReapMinutes:    DefaultAsyncJobReapMinutes,
@@ -290,6 +315,8 @@ func Default() Config {
 type file struct {
 	ContextWindow                      *int                 `json:"context_window,omitempty"`
 	ContextLimit                       *int                 `json:"context_limit,omitempty"`
+	StopGraceSeconds                   *int                 `json:"stop_grace_seconds,omitempty"`
+	ContextAutoRestarts                *int                 `json:"context_auto_restarts,omitempty"`
 	PermissionsDefault                 *string              `json:"permissions_default,omitempty"`
 	Permissions                        map[string]string    `json:"permissions,omitempty"`
 	ReviewLinkHosts                    []string             `json:"review_link_hosts,omitempty"`
@@ -365,6 +392,12 @@ func Load(flagVal string) (Config, error) {
 	}
 	if f.ContextLimit != nil {
 		c.ContextLimit = *f.ContextLimit
+	}
+	if f.StopGraceSeconds != nil {
+		c.StopGraceSeconds = *f.StopGraceSeconds
+	}
+	if f.ContextAutoRestarts != nil {
+		c.ContextAutoRestarts = *f.ContextAutoRestarts
 	}
 	if f.PermissionsDefault != nil {
 		c.PermissionsDefault = *f.PermissionsDefault
