@@ -5,7 +5,8 @@
 #
 # Knobs (all optional):
 #   EVALS_REPEAT=N         repeats per case (config default: 5)
-#   EVALS_FILTER=k=v       only cases whose metadata matches, e.g. kind=knowledge, ticket=drv-059
+#   EVALS_FILTER=k=v       only cases whose metadata matches, e.g. kind=knowledge, ticket=drv-059,
+#                          weight=light (everything but the heavy E1)
 #   EVALS_REF=<rev>        evaluate the agent context at <rev> instead of HEAD
 #   EVALS_MODEL=<model>    agent model (default: the claude CLI's default)
 #   EVALS_GRADER_MODEL=<m> llm-rubric grader model (default: haiku)
@@ -21,6 +22,9 @@ rm -rf "$art" && mkdir -p "$art"
 # promptfoo's own state (sqlite DB, logs) goes to a throwaway dir, never ~/.promptfoo.
 PROMPTFOO_CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/draiver-evals-promptfoo-XXXXXX")
 export PROMPTFOO_CONFIG_DIR
+# promptfoo drops a request after 300s in its scheduler queue by default; a 20-minute E1
+# holding both slots would error every row queued behind it. 0 disables the queue timeout.
+export PROMPTFOO_SCHEDULER_QUEUE_TIMEOUT_MS="${PROMPTFOO_SCHEDULER_QUEUE_TIMEOUT_MS:-0}"
 export PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 PROMPTFOO_DISABLE_SHARING=1
 trap 'rm -rf "$PROMPTFOO_CONFIG_DIR"' EXIT
 

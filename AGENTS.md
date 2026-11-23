@@ -33,3 +33,17 @@ Rungs (`.test-pyramid.yaml`), bottom-up; bare `draiver test` climbs to `acceptan
 - **Every BDD scenario must attach an artefact** (`shoot(...)` or `attachText(...)`).
   `TestEveryScenarioHasAnArtifact` enforces it but skips without a browser, so a local
   unit run won't catch a missing one.
+
+## Branches and scope
+
+Your branch was cut from `main`, and `main` keeps moving while you work.
+
+- **Compare your branch with three dots:** `git diff main...HEAD` (and
+  `git log main..HEAD` for your commits). A two-dot `git diff main..HEAD` also shows
+  everything that landed on `main` since your cut — as if your branch had deleted it.
+- To see what `main` has gained since your cut: `git log HEAD..main --oneline`.
+- **Before restoring or reverting files you didn't author**, run
+  `git log --oneline -- <file>` on both sides (`main` and `HEAD`). Don't log a
+  "regression" gotcha, and don't `git checkout main -- <file>`, without that check.
+- **Feedback that goes beyond the spec** — a new control, another ticket's concern —
+  `draiver escalate` to confirm scope before you write any code for it.
