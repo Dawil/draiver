@@ -57,7 +57,11 @@ var archiveCmd = &cobra.Command{
 		if archiveAbandoned {
 			outcome = "abandoned"
 		}
-		res, err := repo.New(root, resolveActor()).Archive(ticket, att, outcome)
+		actor, err := resolveWriteActor()
+		if err != nil {
+			return err
+		}
+		res, err := repo.New(root, actor).Archive(ticket, att, outcome)
 		if err != nil {
 			return err
 		}
@@ -87,7 +91,11 @@ var unarchiveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		res, err := repo.New(root, resolveActor()).Unarchive(ticket, att)
+		actor, err := resolveWriteActor()
+		if err != nil {
+			return err
+		}
+		res, err := repo.New(root, actor).Unarchive(ticket, att)
 		if err != nil {
 			return err
 		}

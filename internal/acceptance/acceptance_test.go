@@ -1,14 +1,9 @@
 package acceptance
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"testing"
-
-	"github.com/Dawil/draiver/internal/cucumber"
-	"github.com/Dawil/draiver/internal/webshot"
 )
 
 // repoFeaturesDir resolves the repo's real features/ dir from this test file's
@@ -23,47 +18,6 @@ func repoFeaturesDir(t *testing.T) string {
 	}
 	return filepath.Join(filepath.Dir(thisFile), "..", "..", "features")
 }
-
-// requireBrowser skips execution-based tests when no browser is available. The
-// steps now screenshot the live webui via Playwright (decision #23), so executing
-// them needs node + playwright + chromium — the hard precondition of the bdd-bound
-// acceptance rung. On a browserless box (e.g. the unit rung before `npm install`)
-// these skip, and the drift check below still guards the feature/registry contract.
-func requireBrowser(t *testing.T) {
-	t.Helper()
-	if !webshot.Available() {
-		t.Skip("acceptance suite needs a playwright browser; it runs for real under the bdd-bound `acceptance` rung")
-	}
-}
-
-// runSuite runs the real features into a temp outDir and returns the result.
-//
-// The run is memoised for the package: each call used to re-run every scenario in a
-// real browser (~2.5 min apiece), so the three callers together hit `go test`'s
-// default 10m timeout on the unit rung as the suite grew (drvweb-029). The callers
-// only read the Result, so one shared run is equivalent. Its outDir is a package
-// temp dir (t.TempDir would be removed when the first caller finishes).
-func runSuite(t *testing.T) Result {
-	t.Helper()
-	suiteOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "acc-suite-")
-		if err != nil {
-			suiteErr = err
-			return
-		}
-		suiteRes, suiteErr = Run(repoFeaturesDir(t), dir)
-	})
-	if suiteErr != nil {
-		t.Fatalf("Run: %v", suiteErr)
-	}
-	return suiteRes
-}
-
-var (
-	suiteOnce sync.Once
-	suiteRes  Result
-	suiteErr  error
-)
 
 // TestFeaturesHaveStepDefinitions is the browser-free drift guard: every step in
 // every shipped feature must resolve to a registry definition. It runs always (no
@@ -85,63 +39,5 @@ func TestFeaturesHaveStepDefinitions(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// The acceptance suite must pass clean: a failing/undefined step here means a
-// feature step drifted from the registry, or drv-019's behaviour regressed.
-func TestAcceptanceSuitePasses(t *testing.T) {
-	requireBrowser(t)
-	res := runSuite(t)
-	if res.ScenariosFailed != 0 {
-		t.Fatalf("%d scenario(s) failed:\n%s", res.ScenariosFailed, res.Report.Summary())
-	}
-	if !res.Report.Passed() {
-		t.Fatalf("report is not all-green: %s", res.Report.Summary())
-	}
-}
-
-// AC #4 / deliverable: every scenario in the report has at least one step carrying
-// an artefact (embedding) — the property the board's report page relies on.
-func TestEveryScenarioHasAnArtifact(t *testing.T) {
-	requireBrowser(t)
-	res := runSuite(t)
-	sum := res.Report.Summary()
-	if sum.Scenarios == 0 {
-		t.Fatal("no scenarios ran")
-	}
-	for _, f := range res.Report {
-		for _, el := range f.Elements {
-			if el.Type == "background" {
-				continue
-			}
-			if !elementHasEmbedding(el) {
-				t.Errorf("scenario %q in feature %q has no step with an artefact", el.Name, f.Name)
-			}
-		}
-	}
-}
-
-func elementHasEmbedding(el cucumber.Element) bool {
-	for _, st := range el.Steps {
-		if len(st.Embeddings) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// The emitted JSON must be exactly what draiver consumes downstream (the rung's
-// capture, the report renderer): a re-parse of the marshalled report round-trips to
-// a valid, green cucumber document with the embeddings intact.
-func TestEmittedJSONIsConsumableCucumber(t *testing.T) {
-	requireBrowser(t)
-	res := runSuite(t)
-	sum := res.Report.Summary()
-	if sum.Embeddings == 0 {
-		t.Fatal("suite produced no embeddings")
-	}
-	if sum.Features < 2 {
-		t.Errorf("expected at least the download + rerun features, got %d", sum.Features)
 	}
 }

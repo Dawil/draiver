@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -247,6 +248,11 @@ func runDetachedTest(ctx context.Context, cmd *cobra.Command, ticket, att, rung,
 			why = fmt.Sprintf("%s (advisory rung(s) also red: %v)", why, advisoryReds)
 		}
 		fmt.Fprintf(out, "detached climb red through %q: %s\n", rung, why)
+		var rf *rungFailure
+		if errors.As(failErr, &rf) {
+			return recordDetachedFailure(root, ticket, att, rung, sha, launchSeq, logRel, rf.Rung, rf.Tests,
+				fmt.Sprintf("Rung `%s` **not green** @ `%s`: %s. Iterate, then relaunch `draiver test --detach && draiver park`.", rung, shortSHA(sha), why))
+		}
 		return recordDetachedResult(root, ticket, att, rung, sha, launchSeq, logRel, false, nil,
 			fmt.Sprintf("Rung `%s` **not green** @ `%s`: %s. Iterate, then relaunch `draiver test --detach && draiver park`.", rung, shortSHA(sha), why))
 	}
@@ -278,6 +284,24 @@ func recordDetachedResult(root store.Root, ticket, att, rung, sha string, launch
 		Refs:      []int{launchSeq},
 		Artefacts: arts,
 		Body:      body,
+	})
+	return err
+}
+
+// recordDetachedFailure is recordDetachedResult for a red climb that knows which
+// required rung halted it and which tests failed there (drv-063): the event carries
+// them as failed_rung / failed_tests, so a refused review can name them.
+func recordDetachedFailure(root store.Root, ticket, att, rung, sha string, launchSeq int, logRel, failedRung string, failedTests []string, body string) error {
+	_, _, err := appendEventAt(root, ticket, att, event.Event{
+		Type:        "test-result",
+		Outcome:     "fail",
+		Rung:        rung,
+		Commit:      sha,
+		Refs:        []int{launchSeq},
+		Artefacts:   []string{logRel},
+		FailedRung:  failedRung,
+		FailedTests: failedTests,
+		Body:        body,
 	})
 	return err
 }

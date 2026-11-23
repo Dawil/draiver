@@ -1,8 +1,6 @@
 package acceptance
 
 import (
-	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
@@ -627,20 +624,9 @@ func shootFlowClick(w *World, sr *StepRun, name, clickSel string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/"), webshot.Options{
+	return capture(sr, b.url("/"), name, webshot.Options{
 		Width: 1280, Height: 900, FullPage: true,
 		ClickSelector:          clickSel,
 		AfterClickWaitSelector: `.metric-oldest-on`, // the pressed tile after the swap
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     name,
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }

@@ -25,7 +25,7 @@ Rungs (`.test-pyramid.yaml`), bottom-up; bare `draiver test` climbs to `acceptan
 | rung | runs | typical time |
 |---|---|---|
 | `changelog` | `go run ./cmd/changelog check` | seconds |
-| `unit` | `go test ./...` | 5–9 min |
+| `unit` | `go test ./...` (no browser scenarios since drv-063) | ~10 s (was ~3 min with a browser) |
 | `acceptance` | `go run ./features/acceptance` (needs a browser) | several min |
 | `integration`, `evals` | advisory; run only on request | — |
 
@@ -34,9 +34,17 @@ Rungs (`.test-pyramid.yaml`), bottom-up; bare `draiver test` climbs to `acceptan
 - **Never sleep-poll** (`sleep N; cat …` is blocked). For any other long one-off
   command, run it in the background and wait for its completion notification.
 - Before the full climb, run `go test ./internal/<pkg>/...` on the packages you touched.
+- **Iterate on only your scenarios** with a focused run:
+  `draiver test acceptance --tags @drv-NNN` (or `go run ./features/acceptance --tags
+  @drv-NNN`). `--dir features/<cap>` and `--name <substring>` also work, and the flags
+  combine. A focused run records no rung result and refuses `--log`/`--detach`, so
+  finish with the full detached climb. Don't write `zz_*` wrapper tests.
 - **Every BDD scenario must attach an artefact** (`shoot(...)` or `attachText(...)`).
-  `TestEveryScenarioHasAnArtifact` enforces it but skips without a browser, so a local
-  unit run won't catch a missing one.
+  `go test ./internal/acceptance` checks this without a browser, by reading the step
+  sources (`TestEveryScenarioCanAttachAnArtefact`).
+- If `draiver review` is refused for a red rung, the message names the rung and the
+  failing test. It also says whether that rung was already red at the merge-base with
+  `main` (inherited) or was broken by your branch.
 
 ## Branches and scope
 
@@ -51,3 +59,13 @@ Your branch was cut from `main`, and `main` keeps moving while you work.
   "regression" gotcha, and don't `git checkout main -- <file>`, without that check.
 - **Feedback that goes beyond the spec** — a new control, another ticket's concern —
   `draiver escalate` to confirm scope before you write any code for it.
+
+## Reading the repo cheaply
+
+- **Don't read `CHANGELOG.md`**: it is generated (thousands of lines). For house style,
+  read two recent `changelog.d/*.md` fragments.
+- For files over about 500 lines (e.g. `internal/web/web.go`), grep for the symbol, then
+  Read with offset/limit rather than reading the whole file.
+- `.rgignore`/`.ignore` keep minified assets (`internal/web/static/*.min.js`) and
+  `features/_artifacts/` out of `rg`/Grep results; with plain `grep -r`, pass
+  `--exclude='*.min.js' --exclude-dir=_artifacts`.

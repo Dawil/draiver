@@ -29,6 +29,7 @@ import (
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/session"
+	"github.com/Dawil/draiver/internal/systemlog"
 	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/worktree"
 )
@@ -104,6 +105,9 @@ func (r *Reconciler) Start(ticket, attempt string) (StartResult, error) {
 		return StartResult{}, err
 	}
 	if err := r.handOff(ctrl, ticket, attempt); err != nil {
+		return StartResult{}, err
+	}
+	if err := r.liftInterrupt(ticket, attempt); err != nil {
 		return StartResult{}, err
 	}
 	return StartResult{ControllerPID: ctrl.PID, Attempt: attempt}, nil
@@ -243,6 +247,12 @@ func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
 	res, err := r.reap(ticket, attempt)
 	if err != nil {
 		return res, err
+	}
+	// A human stopping an enabled, Running attempt is an interrupt (drvctl-060): the
+	// enable bit would otherwise re-admit — and resume — it on the very next tick
+	// (drv-044). Record the hold so it stays stopped until the human acts.
+	if a, lerr := project.LoadAttempt(r.opt.Root, ticket, attempt); lerr == nil && a.Enabled && a.State == project.Running {
+		r.recordInterrupt(worktree.Key{Ticket: ticket, Attempt: attempt}, "the human stopped the session with `ctl stop`")
 	}
 	if err := removeDesiredMarker(r.opt.Root, ticket, attempt); err != nil {
 		return res, fmt.Errorf("reconcile: clear desired marker %s/%s: %w", ticket, attempt, err)
@@ -511,4 +521,52 @@ func (r *Reconciler) recordFlush(ticket, attempt string, level FlushLevel) {
 	}); err != nil {
 		r.opt.Logf("reconcile: record flush %s/%s: %v", ticket, attempt, err)
 	}
+}
+
+// recordInterrupt appends the durable `interrupt` hold for key (drvctl-060), unless
+// the attempt is already held — so a `ctl stop` and the interrupted-turn frame it
+// provokes on the stream record one hold, not two. Best-effort: a failure is logged.
+func (r *Reconciler) recordInterrupt(key worktree.Key, why string) {
+	a, err := project.LoadAttempt(r.opt.Root, key.Ticket, key.Attempt)
+	if err != nil {
+		r.opt.Logf("reconcile: record interrupt %s/%s: %v", key.Ticket, key.Attempt, err)
+		return
+	}
+	if a.Interrupted() {
+		return
+	}
+	body := fmt.Sprintf("Interrupted by human: %s. Supervision is holding this attempt — it will not be auto-resumed. "+
+		"To continue, post a message to the agent, resolve an escalation, or run `draiver ctl start %s@%s`.", why, key.Ticket, key.Attempt)
+	if _, err := ticketlog.Append(r.opt.Root, key.Ticket, key.Attempt, event.Event{
+		Type:  project.InterruptType,
+		Actor: r.opt.Actor,
+		Body:  body,
+	}); err != nil {
+		r.opt.Logf("reconcile: record interrupt %s/%s: %v", key.Ticket, key.Attempt, err)
+		return
+	}
+	r.emitSystem(key, systemlog.SystemEvent{
+		Class:   systemlog.ClassCtlSession,
+		Message: "ctl: interrupted by human — holding, no auto-resume",
+	})
+}
+
+// liftInterrupt releases an interrupt hold when the human runs `ctl start` on a
+// held attempt (drvctl-060), by appending the `start` event DeriveInterrupted keys
+// on. A no-op for an attempt that is not held.
+func (r *Reconciler) liftInterrupt(ticket, attempt string) error {
+	a, err := project.LoadAttempt(r.opt.Root, ticket, attempt)
+	if err != nil {
+		return err
+	}
+	held, ie := project.DeriveInterrupted(a.Events)
+	if !held {
+		return nil
+	}
+	_, err = ticketlog.Append(r.opt.Root, ticket, attempt, event.Event{
+		Type:  project.StartType,
+		Actor: r.opt.Actor,
+		Body:  fmt.Sprintf("Started by the human with `ctl start`, lifting interrupt #%d — the session resumes where it stopped.", ie.Seq),
+	})
+	return err
 }

@@ -42,7 +42,11 @@ var resolveCmd = &cobra.Command{
 			return err
 		}
 
-		r := repo.New(root, resolveActor())
+		actor, err := resolveWriteActor()
+		if err != nil {
+			return err
+		}
+		r := repo.New(root, actor)
 		if resolveByFlag != "" {
 			e, err := r.ResolveBy(resolveByFlag, id, att, seq, answer)
 			if err != nil {

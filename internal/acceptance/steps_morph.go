@@ -1,16 +1,12 @@
 package acceptance
 
 import (
-	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/webshot"
 )
 
@@ -241,18 +237,7 @@ func shootMorph(w *World, sr *StepRun, path, name, waitSel string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url(path), webshot.Options{
+	return capture(sr, b.url(path), name, webshot.Options{
 		Width: 1280, Height: 1000, FullPage: true, WaitSelector: waitSel,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     name,
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }

@@ -95,6 +95,7 @@ func resetForRun(t *testing.T) {
 	logTo, reviewIgnoreUnread = "", false
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog, testDetach, testOnly = false, false, false
+	testFocusTags, testFocusDir, testFocusName = "", "", ""
 	parkClear = false
 	forkPrint = false
 	reportJSON, reportRun, reportOut = "", "", ""

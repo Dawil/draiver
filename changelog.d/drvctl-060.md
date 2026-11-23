@@ -1,0 +1,8 @@
+---
+section: Fixed
+---
+**Supervised sessions now know who they are, wait on their own background work, and stay stopped when a human interrupts (drvctl-060).** Three fixes in how the supervisor starts, judges and resumes a session:
+
+- **Identity.** The daemon now hands every session `DRAIVER_ACTOR=agent:<adapter>` and `DRAIVER_ATTEMPT=<id>`, so agents no longer prefix each `draiver` call with an `export`. Inside a supervised session (`DRAIVER_SESSION_*` set), a write whose actor resolves to `human:*` without an explicit `--actor` is refused with an actionable error, instead of being silently misattributed to a person (drv-047's false gotcha). The onboarding skill no longer tells supervised agents to export these.
+- **Background work.** The completion gate tracks background tasks the agent launched — a `run_in_background` command or an async `Agent`/`Task` subagent — from the stream, and treats a turn that ends while any are outstanding as "still working": no nudge, no halt (drv-051 was halted mid-fan-out, killing five subagents). A cap (default 2h, `ctl up --background-cap`) bounds the wait; past it the gate escalates with that reason, checked from the reconcile tick too.
+- **Interrupts.** A human interrupt — Claude Code's `[Request interrupted by user]`, or `ctl stop` on an enabled attempt — records a durable `interrupt` event. The supervisor no longer auto-resumes over it (drv-044 was resumed ~10s after each interrupt); the attempt is held, worktree kept warm, until the human posts a message to the agent, resolves an escalation, re-enables it, or runs `ctl start`. The board shows it Pending, "interrupted by human".

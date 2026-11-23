@@ -18,7 +18,6 @@ import (
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/ticketlog"
 	"github.com/Dawil/draiver/internal/web"
-	"github.com/Dawil/draiver/internal/webshot"
 	"github.com/Dawil/draiver/internal/worktree"
 )
 
@@ -484,15 +483,8 @@ func d44ThenPromotedAtHead(w *World, sr *StepRun) error {
 	if !strings.Contains(body, `data-promote-class="ok"`) {
 		return fmt.Errorf("attempt page should show the dev promotion as promoted @ HEAD (ok), got no ok panel:\n%s", body)
 	}
-	// The screenshot is the corroborating artefact, captured under the bdd `acceptance`
-	// rung where a browser is a hard precondition. On a browserless box (the unit rung, a
-	// freshly-cut worktree before `npm install`) the real assertions above have already
-	// run; attach the rendered HTML instead of failing, mirroring how the unit-rung
-	// guard skips the UI capture rather than the whole feature.
-	if !webshot.Available() {
-		attachText(sr, "overlay-promotion-check-result", "webshot unavailable — promoted @ HEAD panel rendered:\n\n"+body)
-		return nil
-	}
+	// The screenshot is the corroborating artefact; shoot falls back to the rendered
+	// HTML on a browserless box (drv-063), so the assertions above stand on their own.
 	tab := `[data-testid="attempt-tab-promote"]`
 	return shoot(w, sr, "/ticket/"+d44Ticket+"/"+d44Att, "overlay-promotion-check-result", true, tab, tab)
 }

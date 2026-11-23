@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -12,9 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/project"
 	"github.com/Dawil/draiver/internal/store"
@@ -251,24 +248,13 @@ func whenSyncFromPanel(w *World, sr *StepRun) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/ticket/"+gitTicket+"/"+gitAtt), webshot.Options{
+	return capture(sr, b.url("/ticket/"+gitTicket+"/"+gitAtt), "sync-" + b.variant, webshot.Options{
 		Width: 1280, Height: 1000, FullPage: true,
 		ClickSelector:          `[data-testid="attempt-tab-git"]`,
 		ClickSelector2:         `[data-testid="action-git-sync"]`,
 		AfterClickWaitSelector: `#git-result[data-kind]`,
 		AcceptDialogs:          true,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     "sync-" + b.variant,
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }
 
 // notesCount returns how many `note` events the attempt has recorded — the durable
@@ -381,20 +367,9 @@ func thenPositionShown(w *World, sr *StepRun) error {
 		return errors.New("position line does not show 'ahead 1 · behind 0' versus the primary remote")
 	}
 	// Screenshot the revealed panel (select the Git controls tab first).
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/ticket/"+gitTicket+"/"+gitAtt), webshot.Options{
+	return capture(sr, b.url("/ticket/"+gitTicket+"/"+gitAtt), "git-position-ahead", webshot.Options{
 		Width: 1280, Height: 1000, FullPage: true,
 		ClickSelector:          `[data-testid="attempt-tab-git"]`,
 		AfterClickWaitSelector: `[data-testid="git-position"]`,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     "git-position-ahead",
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }

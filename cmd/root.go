@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/repo"
@@ -143,6 +145,32 @@ func resolveActor() string {
 	return "human:" + u
 }
 
+// resolveWriteActor is resolveActor for a verb that writes (drvctl-060). Inside a
+// supervised session (the daemon set DRAIVER_SESSION_*) it refuses an actor that
+// resolves to `human:*` unless that came from an explicit --actor: the daemon hands
+// every session DRAIVER_ACTOR=agent:<adapter>, so a human actor there means the
+// agent overrode or unset it, and the write would be misattributed to a person
+// (drv-047's false gotcha #6, stamped human:david).
+func resolveWriteActor() (string, error) {
+	return writeActorFor(actorFlag, os.Getenv, resolveActor())
+}
+
+// writeActorFor is resolveWriteActor's pure core: flag is the --actor value, getenv
+// the environment, resolved the actor resolveActor produced.
+func writeActorFor(flag string, getenv func(string) string, resolved string) (string, error) {
+	if flag != "" || !strings.HasPrefix(resolved, "human:") {
+		return resolved, nil
+	}
+	s, ok := agentmsg.FromEnv(getenv)
+	if !ok {
+		return resolved, nil
+	}
+	return "", fmt.Errorf("refusing to write as %q from inside the supervised session for %s/%s: "+
+		"this session's writes are attributed to its agent (the daemon sets %s=agent:<adapter>). "+
+		"Leave %s unset or agent:*, or pass an explicit --actor if a human really is the author",
+		resolved, s.Ticket, s.Attempt, agentmsg.EnvActor, agentmsg.EnvActor)
+}
+
 // resolveAttempt resolves which attempt of a ticket a command targets:
 // --attempt, then $DRAIVER_ATTEMPT, then the ticket's latest attempt.
 func resolveAttempt(root store.Root, id string) (string, error) {
@@ -188,6 +216,10 @@ func appendEvent(id string, e event.Event) (event.Event, string, error) {
 // internal/repo (drv-008); this is the CLI's thin adapter over that gateway,
 // stamping the actor resolved from the CLI's --actor/env/$USER context.
 func appendEventAt(root store.Root, id, att string, e event.Event) (event.Event, string, error) {
-	ev, err := repo.New(root, resolveActor()).AppendAt(id, att, e)
+	actor, err := resolveWriteActor()
+	if err != nil {
+		return event.Event{}, att, err
+	}
+	ev, err := repo.New(root, actor).AppendAt(id, att, e)
 	return ev, att, err
 }
