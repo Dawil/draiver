@@ -1,0 +1,38 @@
+# evals/promptfooconfig.yaml — draiver's agent-context evals (drv-065).
+#
+# These test the repo's AGENT CONTEXT (AGENTS.md, docs, READMEs, test ergonomics) at a
+# commit: a headless `claude -p` runs in a throwaway clone and either answers a
+# question the docs should answer (knowledge) or does a small task that is then checked
+# deterministically (task). No draiver attempts are run. See docs/evals.md.
+#
+# Run via the advisory `evals` rung: `draiver test evals --only`.
+description: draiver agent-context evals
+
+# The pass-rate policy lives here, in the repo: promptfoo exits non-zero (100) when the
+# share of passing rows (all cases × repeats) is below this percentage.
+env:
+  PROMPTFOO_PASS_RATE_THRESHOLD: "80"
+
+evaluateOptions:
+  # Each case is stochastic; repeat it so a pass rate means something. Override per run
+  # with EVALS_REPEAT=N (evals/run.sh passes it as --repeat).
+  repeat: 5
+  # Task cases build and test a full clone each; keep the box responsive.
+  maxConcurrency: 2
+
+prompts:
+  - "{{prompt}}"
+
+providers:
+  - id: file://lib/provider.cjs
+    label: claude-p
+
+defaultTest:
+  options:
+    # llm-rubric assertions are graded by a tool-less `claude -p` (haiku by default,
+    # EVALS_GRADER_MODEL to change), never an external API key.
+    provider: file://lib/grader.cjs
+
+tests:
+  - file://cases/knowledge.yaml
+  - file://cases/tasks.yaml

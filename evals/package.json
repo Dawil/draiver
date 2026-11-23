@@ -1,0 +1,8 @@
+{
+  "name": "draiver-evals",
+  "private": true,
+  "description": "drv-065: agent-context evals (advisory evals rung). Pinned exactly.",
+  "dependencies": {
+    "promptfoo": "0.121.20"
+  }
+}
