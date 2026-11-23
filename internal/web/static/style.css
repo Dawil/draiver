@@ -80,17 +80,21 @@ body {
 }
 .card:hover { border-color: var(--accent); }
 /* The top-right action cluster: the optional play button and the always-present
-   archive tick/cross, laid out in a flex row so two buttons never overlap. Reserve
-   room on the tile so the corner actions never sit over the ticket id — 36px for
-   the archive button alone, more when the play button is also present. */
+   archive tick/cross, laid out in a flex row so two buttons never overlap. */
 .card-actions { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; align-items: center; z-index: 1; }
-/* Every card now carries at least two corner buttons — the always-present favourite
-   star (drv-050) beside the archive X — so the base reserve holds two. */
-.card-wrap:has(.card-actions) .card { padding-right: 62px; }
+/* drvweb-031: the 22px buttons occupy only the card's TOP row (wrap y 8–30), so only
+   that row — the ticket id line — reserves room for them; the title and every line
+   below use the card's full width. min-height keeps the id row at least as tall as
+   the buttons, so the line under it starts below them and never slides beneath.
+   Every card carries at least two corner buttons — the always-present favourite star
+   (drv-050) beside the archive X: 8px inset + 2×22px + a 6px gap = 58px from the
+   edge, less the card's own 12px padding, plus a 4px gutter → 50px. The reserve is
+   static (the buttons fade in on hover by opacity only), so hovering never reflows. */
+.card-wrap:has(.card-actions) .card .tid { padding-right: 50px; min-height: 22px; }
 /* Three corner buttons (star+play+archive, star+mark-done+archive, or
-   star+restart-context+archive) need the wider reserve. */
-.card-wrap:has(.enable-form) .card, .card-wrap:has(.markdone-form) .card,
-.card-wrap:has(.restart-context-card-form) .card { padding-right: 88px; }
+   star+restart-context+archive): 8 + 3×22 + 2×6 = 86px, − 12 + 4 → 78px. */
+.card-wrap:has(.enable-form) .card .tid, .card-wrap:has(.markdone-form) .card .tid,
+.card-wrap:has(.restart-context-card-form) .card .tid { padding-right: 78px; }
 /* Green play button: enable a parked Running attempt into supervision. Colour is
    the eucalypt --dot-running (the same green the running dot uses); the play
    triangle carries the meaning as shape, not colour alone, and it is a real
@@ -361,7 +365,6 @@ body {
    declared promotion. The panel's left accent mirrors its chip class. */
 .promote { display: flex; flex-direction: column; gap: 10px; }
 .promote-head { display: flex; align-items: center; gap: 6px; }
-.promote-title { font-size: 15px; margin: 0; }
 .promote-panel { border: 1px solid var(--line); border-left: 3px solid var(--line);
          border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .promote-panel.promote-ok { border-left-color: var(--done); }
@@ -482,7 +485,6 @@ body {
 /* drv-013 Git controls: a grouped section driving the attempt's local git folder
    (push / sync) from the board. Pills match the other actions. */
 .git-controls { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
-.git-controls-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 4px; }
 .git-controls-hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
 .git-actions { display: flex; gap: 8px; }
 .action-git-push, .action-git-sync { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: 13px; cursor: pointer; }
@@ -507,7 +509,6 @@ body {
    track the six lifecycle states. */
 .review-env { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
 .review-env-head { display: flex; align-items: center; gap: 6px; }
-.review-env-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 4px; }
 .review-env-env, .review-env-status, .review-env-meta { font-size: 12px; color: var(--muted); margin: 2px 0; }
 .review-env-note { font-size: 13px; margin: 6px 0 10px; padding: 8px 10px; border: 1px solid var(--waratah, #b00); border-radius: 8px; background: var(--panel-2); color: var(--ink); }
 .review-env-state { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
@@ -526,7 +527,6 @@ body {
    itself lives inside a sandboxed iframe with its own styles. */
 .bdd-report { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
 .bdd-report-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; }
-.bdd-report-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
 .bdd-run-select { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .bdd-run-select select { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
 .bdd-report-open { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; }
