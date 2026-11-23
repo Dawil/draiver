@@ -188,6 +188,20 @@ func (r Root) DesiredMarkerPath(id, attempt string) string {
 	return filepath.Join(r.AttemptDir(id, attempt), "desired.json")
 }
 
+// StopRequestPath is the `ctl stop` handoff request a client writes for the running
+// `ctl up` to serve (drvctl-061): the daemon owns the live session, so it — not the
+// client — runs the checkpoint-before-reap. Transient, nonce-stamped like the
+// desired marker, and out of the hash chain.
+func (r Root) StopRequestPath(id, attempt string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), "stop-request.json")
+}
+
+// StopResultPath is where the daemon reports how it served a `ctl stop` request
+// (drvctl-061), for the waiting client to read.
+func (r Root) StopResultPath(id, attempt string) string {
+	return filepath.Join(r.AttemptDir(id, attempt), "stop-result.json")
+}
+
 // --- session runtime paths (draiverctld; rebuildable, out of the hash chain) ---
 
 // SessionDir holds an attempt's per-session runtime state. It is rebuildable

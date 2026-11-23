@@ -191,6 +191,18 @@ type StopResult struct {
 	Signaled bool
 	// AlreadyStopped is true when there was no live process to signal.
 	AlreadyStopped bool
+
+	// The `ctl stop` handoff (drvctl-061, StopWithHandoff). Handoff is true when the
+	// owning `ctl up` ran the checkpoint-before-reap; Outcome is its handoff.Outcome
+	// and NoteSeq the handoff note's seq when one was written. Direct is true when
+	// the session was reaped with no checkpoint although one was asked for, and Note
+	// says why. ControllerPID is the `ctl up` the stop was handed to.
+	Handoff       bool
+	Outcome       string
+	NoteSeq       int
+	Direct        bool
+	Note          string
+	ControllerPID int
 }
 
 // reap terminates an attempt's recorded session process and clears the now-stale
@@ -251,13 +263,7 @@ func (r *Reconciler) Stop(ticket, attempt string) (StopResult, error) {
 	// A human stopping an enabled, Running attempt is an interrupt (drvctl-060): the
 	// enable bit would otherwise re-admit — and resume — it on the very next tick
 	// (drv-044). Record the hold so it stays stopped until the human acts.
-	if a, lerr := project.LoadAttempt(r.opt.Root, ticket, attempt); lerr == nil && a.Enabled && a.State == project.Running {
-		r.recordInterrupt(worktree.Key{Ticket: ticket, Attempt: attempt}, "the human stopped the session with `ctl stop`")
-	}
-	if err := removeDesiredMarker(r.opt.Root, ticket, attempt); err != nil {
-		return res, fmt.Errorf("reconcile: clear desired marker %s/%s: %w", ticket, attempt, err)
-	}
-	return res, nil
+	return res, r.stopHold(ticket, attempt)
 }
 
 // FlushLevel selects how deep restart's teardown reaps before the start cascade
