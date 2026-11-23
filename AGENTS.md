@@ -25,7 +25,7 @@ Rungs (`.test-pyramid.yaml`), bottom-up; bare `draiver test` climbs to `acceptan
 | rung | runs | typical time |
 |---|---|---|
 | `changelog` | `go run ./cmd/changelog check` | seconds |
-| `unit` | `go test ./...` (no browser scenarios since drv-063) | UNIT_TIME |
+| `unit` | `go test ./...` (no browser scenarios since drv-063) | ~10 s (was ~3 min with a browser) |
 | `acceptance` | `go run ./features/acceptance` (needs a browser) | several min |
 | `integration`, `evals` | advisory; run only on request | — |
 
