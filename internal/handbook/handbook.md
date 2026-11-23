@@ -298,22 +298,28 @@ draiver log <TICKET> --type note "Applied resolution #7: CI now reads DATABASE_U
 
 ### The human may also message you mid-session
 
-The human can post a message to you from the board **while your session is
-running**. You will not be re-prompted; instead, every agent-facing `draiver`
-command (`log`, `test`, `review`, `recall`, `brief`, `park`, `escalate`,
-`status`) prints a one-line, count-only notice on stderr:
+The human can post to your attempt from the board **while your session is
+running**: a message addressed to you, or a decision, a resolution, or a
+correction that supersedes an earlier fact. When that happens, the supervisor
+injects a short turn quoting the event, which you receive at your next turn
+boundary. Read it before your next step, because it may retract what you are
+doing. Every agent-facing `draiver` command (`log`, `test`, `review`, `recall`,
+`brief`, `park`, `escalate`, `status`) also prints a count-only notice on stderr.
+`log` and `review` add a line that names the events by seq and kind:
 
 ```
 📬 1 unread message from the human since this session started — run `draiver messages` to read.
+⚠️ 1 new human event since your last read: #15 supersede (retires #14) — run `draiver messages` to read.
 ```
 
-It never shows the content — run `draiver messages` to read the messages in full
-(that marks them read and clears the notice). Read them before you hand off, act
-on them, and log what you did. `draiver review` refuses to record a claim while
-messages are unread; it exits nonzero with a hint. Read them and claim again, or —
-only if you have a reason to claim without reading — re-run with
-`--ignore-unread` (the unread messages are then listed in your next resume note).
-`draiver inbox` is the human's escalation inbox, not yours.
+Run `draiver messages` to read them in full. That marks them read and clears the
+notice; the pushed turn does not. Act on them and log what you did before you
+hand off. While human events are unread, `draiver review` refuses to record a
+claim and exits nonzero with a hint. You can read them and claim again, or use
+`review --ack`, which prints them, marks them read and claims in one step. If you
+have a reason to claim without reading them, use `--ignore-unread`; they are then
+listed in your next resume note. `draiver inbox` is the human's escalation inbox,
+not yours.
 
 ## 7. Verify with the test pyramid before you claim
 
