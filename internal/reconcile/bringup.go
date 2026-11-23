@@ -408,16 +408,33 @@ func ResumeWakeNote(root store.Root, ticket, attempt string) string {
 	// acts on it before handing off, instead of re-claiming review with stale context.
 	var b strings.Builder
 	b.WriteString("You were resumed, but authoritative events landed on your log **after** the point your restored context ends — you have not seen them:\n")
+	// Capped (drvctl-062): a long-parked attempt can pile up many events; the newest
+	// are listed — they are the likeliest to retract or override the older ones — and
+	// the rest are counted.
+	if over := len(unseen) - wakeNoteCap; over > 0 {
+		fmt.Fprintf(&b, "- … %d earlier event(s) not listed — see `draiver brief %s`\n", over, ticket)
+		unseen = unseen[over:]
+	}
 	for _, e := range unseen {
 		msg := ""
-		if agentmsg.IsMessage(e) {
+		switch {
+		case agentmsg.IsMessage(e):
 			msg = " (📬 a message to you from the human, never read)"
+		case agentmsg.IsDeliverable(e):
+			msg = " (from the human, never read)"
 		}
-		fmt.Fprintf(&b, "- `%s` #%d — %s%s\n", e.Type, e.Seq, kb.Headline(e.Body), msg)
+		kind := e.Type
+		if len(e.Supersedes) > 0 {
+			kind = fmt.Sprintf("%s superseding %v", e.Type, e.Supersedes)
+		}
+		fmt.Fprintf(&b, "- `%s` #%d — %s%s\n", kind, e.Seq, kb.Headline(e.Body), msg)
 	}
 	fmt.Fprintf(&b, "\nRead each with `draiver recall %s <seq>` (or re-ground with `draiver brief %s`), act on it, and only then claim `review` or `escalate`. Do not re-claim review with stale context.", ticket, ticket)
 	return b.String()
 }
+
+// wakeNoteCap bounds how many unseen events a resume note lists individually.
+const wakeNoteCap = 10
 
 // logTail returns the attempt's highest log seq — the session-start watermark
 // (drvctl-059). An unreadable log degrades to 0, which only makes the in-session

@@ -2,10 +2,13 @@ package reconcile_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/reconcile"
 	"github.com/Dawil/draiver/internal/ticketlog"
 )
 
@@ -66,5 +69,34 @@ func TestHumanEventsPushedToLiveSession(t *testing.T) {
 	}
 	if n := len(a.prompted()); n != 3 {
 		t.Fatalf("nothing new ⇒ no push: %d", n)
+	}
+}
+
+// TestResumeNoteCarriesHumanDeltaCapped (drvctl-062): the resume note lists the
+// human events the previous session never read — including an unmarked human
+// supersede below the agent's last event — newest first kept, older ones counted.
+func TestResumeNoteCarriesHumanDeltaCapped(t *testing.T) {
+	w := newWorld(t)
+	ticket := "DELTA"
+	att := w.newTicket(t, ticket)
+	evs, _ := ticketlog.Read(w.root, ticket, att)
+	if err := agentmsg.WriteWatermark(w.root, ticket, att, evs[len(evs)-1].Seq); err != nil {
+		t.Fatal(err)
+	}
+	dec, _ := ticketlog.Append(w.root, ticket, att, event.Event{Type: "decision", Actor: "human:david", Body: "Build the CSV export"})
+	sup, _ := ticketlog.Append(w.root, ticket, att, event.Event{Type: "note", Actor: "human:david", Supersedes: []int{dec.Seq}, Body: "ignore that — wrong ticket"})
+	appendEvt(t, w.root, ticket, att, event.Event{Type: "decision", Actor: "agent:claude-code", Body: "agent decision after the supersede"})
+
+	note := reconcile.ResumeWakeNote(w.root, ticket, att)
+	if !strings.Contains(note, fmt.Sprintf("#%d — ignore that", sup.Seq)) || !strings.Contains(note, fmt.Sprintf("superseding [%d]", dec.Seq)) || !strings.Contains(note, "from the human, never read") {
+		t.Fatalf("resume note must carry the unread supersede:\n%s", note)
+	}
+
+	for i := 0; i < 12; i++ {
+		appendEvt(t, w.root, ticket, att, event.Event{Type: "decision", Actor: "human:david", Body: fmt.Sprintf("later decision %02d", i)})
+	}
+	note = reconcile.ResumeWakeNote(w.root, ticket, att)
+	if !strings.Contains(note, "earlier event(s) not listed") || !strings.Contains(note, "later decision 11") || strings.Contains(note, "Build the CSV export") {
+		t.Fatalf("resume note must be capped to the newest events:\n%s", note)
 	}
 }
