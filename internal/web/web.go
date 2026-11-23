@@ -87,6 +87,10 @@ type Server struct {
 	// state without a real repo (drvweb-021 #32). ok is false when there is nothing
 	// to project (no repo, no checkout/branch, no pyramid, or a git error).
 	pyramidGit func(ctx context.Context, a project.Attempt) (pyramidState, bool)
+	// pyCache is the memoizing layer New puts in front of the real gatherer
+	// (drvweb-030); handlers that change git state drop an attempt's entry through
+	// invalidateGit. Nil-safe: a Server built without New has no cache to drop.
+	pyCache *pyramidCache
 	// gitPos gathers the live git position the Git-controls panel shows (drv-022): the
 	// attempt's current local branch and its ahead/behind counts versus the primary
 	// remote. It defaults to gatherGitPosition (the real git reads) and, exactly like
@@ -510,9 +514,12 @@ func New(root store.Root, opts ...Option) (*Server, error) {
 		),
 	)
 	s := &Server{root: root, md: md, alive: pidAlive, actor: "human:webui", supDefault: project.SupervisionPassthrough, now: time.Now}
-	// gatherPyramidState is a method, so bind it once s exists; tests overwrite the
-	// field with a stub, exactly as they do s.alive.
-	s.pyramidGit = s.gatherPyramidState
+	// The real gatherer is a method, so bind it once s exists — behind the
+	// transparent in-memory cache (drvweb-030), which only changes how often git runs,
+	// never what renders. Tests overwrite the field with a stub, exactly as they do
+	// s.alive, which bypasses the cache entirely.
+	s.pyCache = newPyramidCache(s.gatherPyramidStateErr)
+	s.pyramidGit = s.pyCache.get
 	// gatherGitPosition is a method too; bind it once s exists, mirroring pyramidGit.
 	// Tests overwrite the field with a stub returning canned position state.
 	s.gitPos = s.gatherGitPosition
@@ -2217,6 +2224,9 @@ func (s *Server) handleGitVerb(w http.ResponseWriter, r *http.Request, verb stri
 		return
 	}
 	result, err := run(id, att)
+	// The verb may have moved the branch (push records, sync back-merges): drop the
+	// cached git state so the re-render below reflects it (drvweb-030).
+	s.invalidateGit(id, att)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -2973,4 +2983,13 @@ func (s *Server) renderSpec(id string) template.HTML {
 		return template.HTML("<p class=\"muted\">(no spec.md)</p>")
 	}
 	return s.toHTML(data)
+}
+
+// invalidateGit drops an attempt's cached git-derived state (drvweb-030) so the next
+// read — typically the response the calling write handler is about to render — goes
+// back to git. Every handler that changes git state calls it.
+func (s *Server) invalidateGit(ticket, att string) {
+	if s.pyCache != nil {
+		s.pyCache.invalidate(ticket, att)
+	}
 }
