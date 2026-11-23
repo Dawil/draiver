@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/Dawil/draiver/internal/event"
@@ -16,9 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/session"
 	"github.com/Dawil/draiver/internal/webshot"
 )
@@ -145,23 +142,12 @@ func thenForkButtonAbsent(w *World, sr *StepRun) error {
 // shootForkCopy clicks the real copy button in a browser and waits for its status
 // line to fill before capturing the header (button, feedback and command).
 func shootForkCopy(w *World, sr *StepRun, b *board) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/ticket/"+accTicket+"/"+accAtt), webshot.Options{
+	return capture(sr, b.url("/ticket/"+accTicket+"/"+accAtt), "fork-session-copy", webshot.Options{
 		Width: 1280, Height: 900,
 		WaitSelector:           `[data-testid="fork-copy"]`,
 		ClickSelector:          `[data-testid="fork-copy"]`,
 		AfterClickWaitSelector: `.fork-copied:not(:empty)`,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     "fork-session-copy",
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }
 
 // thenForkButtonInAgentLogs pins the placement the reviewer asked for (decision

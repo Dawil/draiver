@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dawil/draiver/internal/cucumber"
 	"github.com/Dawil/draiver/internal/event"
 	"github.com/Dawil/draiver/internal/store"
 	"github.com/Dawil/draiver/internal/systemlog"
@@ -214,22 +212,13 @@ func thenTwoPanels(w *World, sr *StepRun) error {
 		}
 	}
 	// Evidence: both panels expanded, side by side.
-	png, err := captureBothPanels(b)
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png", Name: "system-logs-both-panels", Data: base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
+	return captureBothPanels(sr, b, "system-logs-both-panels")
 }
 
 // captureBothPanels expands both live-log panels and screenshots the full page, so a
 // reviewer sees Agent Logs and System Logs with content, side by side.
-func captureBothPanels(b *sysLogBoard) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	return webshot.Capture(ctx, b.url("/ticket/"+sysTicket+"/"+sysAtt), webshot.Options{
+func captureBothPanels(sr *StepRun, b *sysLogBoard, name string) error {
+	return capture(sr, b.url("/ticket/"+sysTicket+"/"+sysAtt), name, webshot.Options{
 		Width: 1280, Height: 1200, FullPage: true,
 		ClickSelector:          `[data-testid="agent-logs-summary"]`,
 		ClickSelector2:         `[data-testid="system-logs-summary"]`,
@@ -248,20 +237,11 @@ func whenOpenSystemPanel(w *World, sr *StepRun) error {
 	}
 	w.set("systemstream", text)
 	// Evidence: the System Logs panel expanded with events present.
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/ticket/"+sysTicket+"/"+sysAtt), webshot.Options{
+	return capture(sr, b.url("/ticket/"+sysTicket+"/"+sysAtt), "system-logs-panel", webshot.Options{
 		Width: 1280, Height: 1200, FullPage: true,
 		ClickSelector:          `[data-testid="system-logs-summary"]`,
 		AfterClickWaitSelector: `[data-testid="system-logs-stream"]`,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png", Name: "system-logs-panel", Data: base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }
 
 func thenSystemEventsShown(w *World, sr *StepRun) error {
@@ -346,14 +326,7 @@ func thenAgentClean(w *World, sr *StepRun) error {
 		}
 	}
 	// Evidence: the Agent Logs panel expanded, showing the agent prose alone.
-	png, err := capturePanel(b, "agent-logs-summary", "agent-logs-stream")
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png", Name: "agent-logs-panel", Data: base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
+	return capturePanel(sr, b, "agent-logs-panel", "agent-logs-summary", "agent-logs-stream")
 }
 
 func whenDeleteAndRecord(w *World, sr *StepRun) error {
@@ -401,23 +374,14 @@ func thenRefilled(w *World, sr *StepRun) error {
 	}
 	// Evidence: the System Logs panel expanded after the journal was deleted and
 	// refilled — only the fresh event remains.
-	png, err := capturePanel(b, "system-logs-summary", "system-logs-stream")
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png", Name: "system-logs-refilled", Data: base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
+	return capturePanel(sr, b, "system-logs-refilled", "system-logs-summary", "system-logs-stream")
 }
 
 // capturePanel expands one live-log panel (by its summary testid) and screenshots the
 // full attempt page once its stream element is present, so a scenario that asserts a
 // single panel's content carries that panel as rendered evidence.
-func capturePanel(b *sysLogBoard, summaryTestid, streamTestid string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	return webshot.Capture(ctx, b.url("/ticket/"+sysTicket+"/"+sysAtt), webshot.Options{
+func capturePanel(sr *StepRun, b *sysLogBoard, name, summaryTestid, streamTestid string) error {
+	return capture(sr, b.url("/ticket/"+sysTicket+"/"+sysAtt), name, webshot.Options{
 		Width: 1280, Height: 1200, FullPage: true,
 		ClickSelector:          `[data-testid="` + summaryTestid + `"]`,
 		AfterClickWaitSelector: `[data-testid="` + streamTestid + `"]`,

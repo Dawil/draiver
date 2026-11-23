@@ -39,6 +39,68 @@ const (
 type Result struct {
 	Report          cucumber.Report
 	ScenariosFailed int
+	// ScenariosSelected / ScenariosTotal count the scenarios a focused run kept and
+	// the scenarios discovered under featuresDir; equal for an unfocused run.
+	ScenariosSelected int
+	ScenariosTotal    int
+}
+
+// RunOptions focuses a run on a subset of the discovered scenarios (drv-063). The
+// zero value runs everything.
+type RunOptions struct {
+	// Tags keeps a scenario carrying ANY of these tags (OR), counting the tags of
+	// its feature and enclosing Rule as its own. A leading "@" is optional.
+	Tags []string
+	// Name keeps a scenario whose name contains this text (case-insensitive).
+	Name string
+}
+
+// Focused reports whether the options select a subset rather than the whole suite.
+func (o RunOptions) Focused() bool { return len(o.Tags) > 0 || strings.TrimSpace(o.Name) != "" }
+
+// ParseTags splits a `--tags` value ("@drv-046,@ui" or "drv-046 ui") into tags.
+func ParseTags(s string) []string {
+	var out []string
+	for _, t := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		out = append(out, normTag(t))
+	}
+	return out
+}
+
+func normTag(t string) string {
+	t = strings.TrimSpace(t)
+	if !strings.HasPrefix(t, "@") {
+		t = "@" + t
+	}
+	return t
+}
+
+// selects reports whether scenario gs of feature gf passes the focus filter.
+func (o RunOptions) selects(gf GherkinFeature, gs GherkinScenario) bool {
+	if n := strings.TrimSpace(o.Name); n != "" && !strings.Contains(strings.ToLower(gs.Name), strings.ToLower(n)) {
+		return false
+	}
+	if len(o.Tags) == 0 {
+		return true
+	}
+	have := map[string]bool{}
+	for _, t := range gf.Tags {
+		have[t] = true
+	}
+	if gs.Rule != nil {
+		for _, t := range gs.Rule.Tags {
+			have[t] = true
+		}
+	}
+	for _, t := range gs.Tags {
+		have[t] = true
+	}
+	for _, t := range o.Tags {
+		if have[normTag(t)] {
+			return true
+		}
+	}
+	return false
 }
 
 // Run reads featuresDir, executes every scenario against the step registry, writes
@@ -46,6 +108,13 @@ type Result struct {
 // report. A missing step definition fails its scenario (it is reported as a failed
 // step), so the features and the registry cannot silently drift apart.
 func Run(featuresDir, outDir string) (Result, error) {
+	return RunFocused(featuresDir, outDir, RunOptions{})
+}
+
+// RunFocused is Run restricted to the scenarios opts selects (drv-063): features
+// with no selected scenario are left out of the report entirely. Selecting nothing
+// is an error, so a mistyped tag fails loudly instead of passing vacuously.
+func RunFocused(featuresDir, outDir string, opts RunOptions) (Result, error) {
 	features, err := ParseFeaturesDir(featuresDir)
 	if err != nil {
 		return Result{}, fmt.Errorf("parse features: %w", err)
@@ -53,6 +122,26 @@ func Run(featuresDir, outDir string) (Result, error) {
 	if len(features) == 0 {
 		return Result{}, fmt.Errorf("no *.feature files under %s", featuresDir)
 	}
+	total, selected := 0, 0
+	var kept []GherkinFeature
+	for _, gf := range features {
+		total += len(gf.Scenarios)
+		var scs []GherkinScenario
+		for _, gs := range gf.Scenarios {
+			if opts.selects(gf, gs) {
+				scs = append(scs, gs)
+			}
+		}
+		if len(scs) > 0 {
+			gf.Scenarios = scs
+			kept = append(kept, gf)
+			selected += len(scs)
+		}
+	}
+	if selected == 0 {
+		return Result{}, fmt.Errorf("no scenario under %s matches the focus (tags %v, name %q) — of %d discovered", featuresDir, opts.Tags, opts.Name, total)
+	}
+	features = kept
 	shotDir := filepath.Join(outDir, screenshotsDir)
 	if err := os.MkdirAll(shotDir, 0o755); err != nil {
 		return Result{}, err
@@ -83,7 +172,36 @@ func Run(featuresDir, outDir string) (Result, error) {
 	if err := writeJSON(filepath.Join(outDir, cucumberJSONName), report); err != nil {
 		return Result{}, err
 	}
-	return Result{Report: report, ScenariosFailed: failed}, nil
+	return Result{Report: report, ScenariosFailed: failed, ScenariosSelected: selected, ScenariosTotal: total}, nil
+}
+
+// MissingArtefacts lists "<feature>: <scenario>" for every PASSED scenario in r that
+// attached no artefact on any step — the runtime half of the artefact rule, which
+// the acceptance runner enforces on every run (the browser-free static half is
+// TestEveryScenarioCanAttachAnArtefact). A failed scenario is excluded: its later
+// steps were skipped, so a missing artefact there is a symptom, not the fault.
+func MissingArtefacts(r cucumber.Report) []string {
+	var out []string
+	for _, f := range r {
+		for _, el := range f.Elements {
+			if el.Type == "background" {
+				continue
+			}
+			passed, attached := true, false
+			for _, st := range el.Steps {
+				if st.Result.Status != "passed" {
+					passed = false
+				}
+				if len(st.Embeddings) > 0 {
+					attached = true
+				}
+			}
+			if passed && !attached {
+				out = append(out, f.Name+": "+el.Name)
+			}
+		}
+	}
+	return out
 }
 
 // runScenario executes one scenario's steps in order. The first failing or

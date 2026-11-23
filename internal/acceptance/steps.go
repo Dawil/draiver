@@ -305,24 +305,60 @@ func currentBoard(w *World) (*board, error) {
 // (decision #22/#23). clickSel, when set, is clicked before the shot: the drv-021
 // tabbed layout folds the report panel into a hidden BDD tabpanel, so a board
 // screenshot must first select that tab to reveal the report / rerun affordance.
+// It goes through capture, so a failed shot is retried once and then falls back to
+// the page's rendered HTML (drv-063).
 func shoot(w *World, sr *StepRun, path, name string, full bool, waitSel, clickSel string) error {
 	b, err := currentBoard(w)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url(path), webshot.Options{
+	return capture(sr, b.url(path), name, webshot.Options{
 		Width: 1280, Height: 900, FullPage: full, WaitSelector: waitSel, ClickSelector: clickSel,
 	})
-	if err != nil {
-		return err
+}
+
+// webshotAvailable / webshotCapture are capture's seams onto internal/webshot, so a
+// unit test can simulate a flaky or absent browser without one installed.
+var (
+	webshotAvailable = webshot.Available
+	webshotCapture   = webshot.Capture
+)
+
+// captureAttempts is how many times capture tries a screenshot before falling back.
+const captureAttempts = 2
+
+// capture is the ONE screenshot path every step uses (drv-063): it screenshots url
+// with opts and attaches the PNG as name. A failed capture is retried once; if it
+// still fails — or there is no browser at all — it attaches the page's rendered HTML
+// (GET url, as text/plain) instead, so the scenario always carries an artefact and a
+// flaky Playwright run can no longer drop one. Only when the HTML fetch fails too is
+// it an error. The fallback cannot perform opts' clicks, so a step that relies on a
+// click's side effect still fails its later assertion — loudly, as it should.
+func capture(sr *StepRun, url, name string, opts webshot.Options) error {
+	var shotErr error
+	if webshotAvailable() {
+		for try := 0; try < captureAttempts; try++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			png, err := webshotCapture(ctx, url, opts)
+			cancel()
+			if err == nil {
+				sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
+					MimeType: "image/png",
+					Name:     name,
+					Data:     base64.StdEncoding.EncodeToString(png),
+				})
+				return nil
+			}
+			shotErr = err
+		}
+	} else {
+		shotErr = errors.New("no playwright browser available")
 	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png",
-		Name:     name,
-		Data:     base64.StdEncoding.EncodeToString(png),
-	})
+	html, err := getBody(url)
+	if err != nil {
+		return fmt.Errorf("screenshot %q failed (%v) and the HTML fallback failed too: %w", name, shotErr, err)
+	}
+	attachText(sr, name, fmt.Sprintf("screenshot unavailable (%v) — rendered HTML of %s:\n\n%s", shotErr, url, html))
 	return nil
 }
 

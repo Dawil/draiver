@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -137,20 +136,11 @@ func whenOpenRecordedAgentPanel(w *World, sr *StepRun) error {
 		return err
 	}
 	w.set("agentlogtext", text)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	png, err := webshot.Capture(ctx, b.url("/ticket/"+alTicket+"/"+alAtt), webshot.Options{
+	return capture(sr, b.url("/ticket/"+alTicket+"/"+alAtt), "agent-logs-recorded-times", webshot.Options{
 		Width: 1280, Height: 1000, FullPage: true,
 		ClickSelector:          `[data-testid="agent-logs-summary"]`,
 		AfterClickWaitSelector: `[data-testid="agent-logs-stream"]`,
 	})
-	if err != nil {
-		return err
-	}
-	sr.Embeddings = append(sr.Embeddings, cucumber.Embedding{
-		MimeType: "image/png", Name: "agent-logs-recorded-times", Data: base64.StdEncoding.EncodeToString(png),
-	})
-	return nil
 }
 
 func thenAgentLinesRecorded(w *World, sr *StepRun) error {
