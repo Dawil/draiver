@@ -13,3 +13,17 @@ When fulfilling a `drv-*` / `drvctl-*` / `drvweb-*` ticket:
   when there is genuinely nothing to tell. **Don't edit `CHANGELOG.md` directly**: it is
   generated from the fragments (`go run ./cmd/changelog generate`), and the required
   `changelog` test rung fails without your fragment.
+
+## Branches and scope
+
+Your branch was cut from `main`, and `main` keeps moving while you work.
+
+- **Compare your branch with three dots:** `git diff main...HEAD` (and
+  `git log main..HEAD` for your commits). A two-dot `git diff main..HEAD` also shows
+  everything that landed on `main` since your cut — as if your branch had deleted it.
+- To see what `main` has gained since your cut: `git log HEAD..main --oneline`.
+- **Before restoring or reverting files you didn't author**, run
+  `git log --oneline -- <file>` on both sides (`main` and `HEAD`). Don't log a
+  "regression" gotcha, and don't `git checkout main -- <file>`, without that check.
+- **Feedback that goes beyond the spec** — a new control, another ticket's concern —
+  `draiver escalate` to confirm scope before you write any code for it.
