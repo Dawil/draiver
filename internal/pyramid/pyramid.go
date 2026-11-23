@@ -13,6 +13,7 @@
 package pyramid
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -444,6 +445,22 @@ func Parse(data []byte) (*Pyramid, error) {
 		return nil, fmt.Errorf("invalid pyramid: %w", err)
 	}
 	return &p, nil
+}
+
+// Semantics decodes pyramid YAML into a generic tree — every key, not only those
+// Pyramid models — and re-encodes it as indented JSON: the file's meaning with its
+// comments and formatting stripped. drv-061 pins this repo's own pyramid to a golden of
+// it, so its prose can move to docs while the config provably stays the same.
+func Semantics(data []byte) ([]byte, error) {
+	var tree any
+	if err := yaml.Unmarshal(data, &tree); err != nil {
+		return nil, fmt.Errorf("parse pyramid: %w", err)
+	}
+	out, err := json.MarshalIndent(tree, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // validate enforces the invariants: at least one level, every level name unique and

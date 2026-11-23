@@ -1,0 +1,5 @@
+# Keep low-value bytes out of rg / agent Grep results (drv-061).
+# Minified vendored assets: one match returns ~50KB of a single line.
+internal/web/static/*.min.js
+# Generated BDD output (cucumber JSON, screenshots, built binaries).
+features/_artifacts/
