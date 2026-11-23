@@ -1,0 +1,130 @@
+{
+  "environments": [
+    {
+      "healthchecks": [
+        {
+          "name": "go-toolchain",
+          "script": "go version"
+        }
+      ],
+      "name": "local"
+    },
+    {
+      "healthchecks": [
+        {
+          "name": "go-toolchain",
+          "script": "go version"
+        },
+        {
+          "name": "playwright-browser",
+          "script": "NODE_PATH=features/screenshots/node_modules node -e \"require('playwright')\" \u0026\u0026 ls ${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}/chromium-*/chrome-linux/chrome \u003e/dev/null 2\u003e\u00261"
+        }
+      ],
+      "name": "bdd",
+      "up": "npm install --prefix features/screenshots --no-audit --no-fund --silent \u0026\u0026 mkdir -p features/_artifacts/screenshots"
+    },
+    {
+      "down": "sh review-env/down.sh",
+      "healthchecks": [
+        {
+          "name": "http-ready",
+          "script": "sh review-env/healthcheck.sh"
+        }
+      ],
+      "name": "review",
+      "params": [
+        {
+          "default": "review",
+          "name": "ENV_NAME"
+        }
+      ],
+      "up": "sh review-env/up.sh",
+      "url": "http://127.0.0.1:${DRAIVER_REVIEW_PORT}/"
+    },
+    {
+      "down": "sh review-env/ttyd/down.sh",
+      "healthchecks": [
+        {
+          "name": "ttyd-ready",
+          "script": "sh review-env/ttyd/healthcheck.sh"
+        }
+      ],
+      "name": "review-cli",
+      "up": "sh review-env/ttyd/up.sh",
+      "url": "http://127.0.0.1:${DRAIVER_REVIEW_PORT}/"
+    },
+    {
+      "healthchecks": [
+        {
+          "name": "forgejo-reachable",
+          "script": "git ls-remote --heads forgejo \u003e/dev/null 2\u003e\u00261"
+        }
+      ],
+      "name": "forgejo-main"
+    },
+    {
+      "healthchecks": [
+        {
+          "name": "promptfoo",
+          "script": "test -x evals/node_modules/.bin/promptfoo"
+        },
+        {
+          "name": "claude-cli",
+          "script": "command -v claude \u003e/dev/null"
+        },
+        {
+          "name": "claude-credentials",
+          "script": "test -n \"${ANTHROPIC_API_KEY:-}\" || claude auth status 2\u003e/dev/null | grep -q '\"loggedIn\": true'"
+        }
+      ],
+      "name": "agent",
+      "up": "(npm ls --prefix evals --depth=0 \u003e/dev/null 2\u003e\u00261 || npm install --prefix evals --no-audit --no-fund --silent) \u0026\u0026 npm install --prefix features/screenshots --no-audit --no-fund --silent"
+    }
+  ],
+  "levels": [
+    {
+      "name": "changelog",
+      "run": "go run ./cmd/changelog check"
+    },
+    {
+      "name": "unit",
+      "run": "go test ./..."
+    },
+    {
+      "artifacts": [
+        "features/_artifacts/screenshots"
+      ],
+      "cucumber_json": "features/_artifacts/cucumber.json",
+      "environment": "bdd",
+      "name": "acceptance",
+      "run": "go run ./features/acceptance"
+    },
+    {
+      "environment": "local",
+      "name": "integration",
+      "required": false,
+      "run": "go test -tags=integration ./internal/e2e/integration/..."
+    },
+    {
+      "artifacts": [
+        "evals/_artifacts"
+      ],
+      "environment": "agent",
+      "name": "evals",
+      "required": false,
+      "run": "sh evals/run.sh"
+    }
+  ],
+  "promotions": [
+    {
+      "base": "main",
+      "environment": "local",
+      "qa": "test \"$DRAIVER_PROMOTE_ENV\" = local \u0026\u0026 test \"$DRAIVER_PROMOTE_BASE\" = main"
+    },
+    {
+      "base": "main",
+      "environment": "forgejo-main",
+      "qa": "git fetch --quiet forgejo \"$DRAIVER_PROMOTE_BASE\" \u0026\u0026 git merge-base --is-ancestor HEAD FETCH_HEAD"
+    }
+  ]
+}
