@@ -85,7 +85,14 @@ type wireResult struct {
 	TotalCostUSD float64    `json:"total_cost_usd"`
 	SessionID    string     `json:"session_id"`
 	Usage        *wireUsage `json:"usage"`
+	Origin       *struct {
+		Kind string `json:"kind"`
+	} `json:"origin"`
 }
+
+// interruptMarker is the user-role text Claude Code records when a human
+// interrupts the in-flight turn.
+const interruptMarker = "[Request interrupted by user"
 
 // Normalize decodes one recorded stream-json line back into the normalized
 // events it was teed from, so a reader of the raw stream.jsonl (e.g. `ctl logs`)
@@ -184,6 +191,12 @@ func normalizeMessage(env wireEnvelope, raw json.RawMessage) []agent.Event {
 				continue
 			}
 			out = append(out, agent.Event{Kind: agent.EventAssistant, SessionID: env.SessionID, Text: c.Text, Raw: raw})
+			// A human interrupt (drvctl-060) is additionally surfaced as its own kind so
+			// the supervisor can hold the attempt instead of auto-resuming over it. Only
+			// a top-level user line counts — a subagent's own interrupt is not the human's.
+			if msg.Role == "user" && env.ParentToolUseID == "" && strings.HasPrefix(strings.TrimSpace(c.Text), interruptMarker) {
+				out = append(out, agent.Event{Kind: agent.EventInterrupted, SessionID: env.SessionID, Text: c.Text, Raw: raw})
+			}
 		case "thinking":
 			if c.Thinking == "" {
 				continue
@@ -232,6 +245,9 @@ func normalizeResult(line []byte, raw json.RawMessage) []agent.Event {
 		}
 	}
 	ev := agent.Event{Kind: agent.EventTurnEnd, SessionID: res.SessionID, Result: res.Result, Turn: turn, Raw: raw}
+	if res.Origin != nil {
+		ev.Origin = res.Origin.Kind
+	}
 	if res.Usage != nil {
 		u := toUsage(res.Usage, res.TotalCostUSD)
 		// The result line closes a turn and its usage is CUMULATIVE across every

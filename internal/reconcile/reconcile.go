@@ -152,6 +152,11 @@ type Options struct {
 	// justified). Zero value defaults to protocol.Edits().
 	ProtoPolicy protocol.Policy
 
+	// BackgroundCap bounds how long the completion gate defers a session's
+	// hand-off check while it has background tasks in flight (drvctl-060). Zero
+	// means completion.DefaultBackgroundCap.
+	BackgroundCap time.Duration
+
 	// BaseSpec is the session spec template each session is brought up with (model
 	// is taken from the attempt when unset, and WorkDir is always the worktree).
 	// The daemon typically sets PermissionMode here so the agent routes tool use
@@ -254,6 +259,10 @@ type run struct {
 	// carried so retire can reclaim the checkout via the right per-repo Manager
 	// (drvctl-015). Empty only if the repo could not be resolved.
 	repo string
+
+	// completeGate is the session's completion gate, kept on the run so the tick can
+	// fire its background-cap timer (drvctl-060). Nil for an adopted session.
+	completeGate *completion.Gate
 }
 
 // New validates opt, applies defaults, and returns a Reconciler with an empty run
@@ -451,6 +460,11 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 		}
 	}
 
+	// The completion gate's background cap is a timer, not only a turn-end check: a
+	// session idling on hung background tasks emits no frames, so fire it from the
+	// tick (drvctl-060).
+	r.checkBackgroundCaps(ctx, current)
+
 	// Retire: running but no longer desired. The attempt's current state decides
 	// whether the worktree is a candidate for reclamation (terminal) or kept warm
 	// (blocked); retire further gates reclamation on a clean checkout.
@@ -569,6 +583,16 @@ func (r *Reconciler) desired() (map[worktree.Key]project.Attempt, error) {
 	// plainly-working leaf (see async_jobs.go).
 	if err := r.reconcileAsyncJobs(all, out); err != nil {
 		return nil, err
+	}
+
+	// The interrupt hold (drvctl-060) trumps every path above: an attempt the human
+	// interrupted is not re-admitted — by its enable bit, a `wants:` parent, a wake —
+	// until the human acts again (a message, a resolve, `enable`, or `ctl start`).
+	// Applied last so no earlier pass can resurrect it and resume over the human.
+	for _, a := range all {
+		if a.Interrupted() {
+			delete(out, worktree.Key{Ticket: a.Ticket, Attempt: a.ID})
+		}
 	}
 	return out, nil
 }
@@ -697,7 +721,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 
 	stream := w.handle.Stream()
 	ictx, cancel := context.WithCancel(ctx)
-	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo}
+	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo, completeGate: w.completeGate}
 
 	r.mu.Lock()
 	r.runs[key] = rn
@@ -866,6 +890,15 @@ func (r *Reconciler) dispatch(ctx context.Context, key worktree.Key, pg *protoco
 		r.opt.Logf("reconcile: completion suspend %s/%s: success turn with no hand-off but a wake source present — Pending, not escalated", key.Ticket, key.Attempt)
 	} else if out == completion.Nudged {
 		r.opt.Logf("reconcile: completion nudge %s/%s: reminded to claim review, park, or escalate", key.Ticket, key.Attempt)
+	} else if out == completion.Waiting {
+		r.opt.Logf("reconcile: completion wait %s/%s: turn ended with background tasks still running — not nudged", key.Ticket, key.Attempt)
+	}
+
+	// A human interrupt (drvctl-060): record the durable hold so the next tick drops
+	// the attempt from the desired set instead of resuming over the human.
+	if ev.Kind == agent.EventInterrupted {
+		r.recordInterrupt(key, "the human interrupted the session's in-flight turn")
+		return
 	}
 
 	if ev.Kind != agent.EventPermission {
@@ -944,6 +977,14 @@ func (r *Reconciler) retire(ctx context.Context, key worktree.Key, st project.St
 	// Needs-me is parked with its worktree kept warm; only a terminal retire is a
 	// candidate for reclaiming the checkout.
 	if st == project.NeedsMe {
+		return
+	}
+
+	// An attempt held by a human interrupt (drvctl-060) is paused mid-work, not
+	// finished: keep its checkout warm so the human's follow-up resumes exactly where
+	// the session stopped.
+	if a, err := project.LoadAttempt(r.opt.Root, key.Ticket, key.Attempt); err == nil && a.Interrupted() {
+		r.recordRetire(key, st, false, "the human interrupted the session; it is held until they act")
 		return
 	}
 
@@ -1336,4 +1377,26 @@ func (r *Reconciler) Snapshot() ([]Status, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// checkBackgroundCaps fires each live session's completion-gate background cap
+// (drvctl-060): a session that ended its turn waiting on background tasks that never
+// report completion is escalated and halted once the cap elapses, rather than idling
+// in Running forever. Errors are logged, never fatal to the tick.
+func (r *Reconciler) checkBackgroundCaps(ctx context.Context, keys []worktree.Key) {
+	for _, key := range keys {
+		r.mu.Lock()
+		rn := r.runs[key]
+		r.mu.Unlock()
+		if rn == nil || rn.completeGate == nil {
+			continue
+		}
+		out, err := rn.completeGate.CheckCap(ctx)
+		if err != nil {
+			r.opt.Logf("reconcile: background cap %s/%s: %v", key.Ticket, key.Attempt, err)
+		}
+		if out == completion.Escalated {
+			r.opt.Logf("reconcile: background cap %s/%s: background tasks outlived the cap — escalated and halted", key.Ticket, key.Attempt)
+		}
+	}
 }

@@ -1364,9 +1364,15 @@ func (s *Server) board(view boardView) (boardVM, error) {
 			// A codebase ledger is a third case (drv-039): it is log-Pending by its
 			// resting state (drv-037 restingState), not waiting on any gate, so the
 			// "waiting on X" peek would be a lie — label it as the Parked rest instead.
+			//
+			// An interrupt hold (drvctl-060) is a fourth: the human interrupted the
+			// session and the supervisor is holding it until they act, so say so rather
+			// than imply a gate will open on its own.
 			switch {
 			case isLedger:
 				a.WaitingReason = "parked — codebase ledger"
+			case a.Interrupted():
+				a.WaitingReason = project.InterruptedReason
 			case a.EscalatedTo != "":
 				a.WaitingReason = project.EscalatedReason(a.EscalatedTo)
 			default:

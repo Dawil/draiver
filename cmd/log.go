@@ -73,7 +73,11 @@ var logCmd = &cobra.Command{
 			return err
 		}
 		if logByFlag != "" {
-			written, err := repo.New(root, resolveActor()).LogBy(logByFlag, ticket, att, ev)
+			actor, err := resolveWriteActor()
+			if err != nil {
+				return err
+			}
+			written, err := repo.New(root, actor).LogBy(logByFlag, ticket, att, ev)
 			if err != nil {
 				return err
 			}

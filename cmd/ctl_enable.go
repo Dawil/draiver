@@ -83,7 +83,11 @@ func setEnabled(cmd *cobra.Command, arg string, enable bool) error {
 	if err != nil {
 		return err
 	}
-	g := repo.New(root, resolveActor())
+	actor, err := resolveWriteActor()
+	if err != nil {
+		return err
+	}
+	g := repo.New(root, actor)
 	var e event.Event
 	if enable {
 		e, err = g.Enable(ticket, att)

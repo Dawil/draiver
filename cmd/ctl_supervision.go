@@ -57,7 +57,11 @@ func setSupervision(cmd *cobra.Command, arg, modeArg string) error {
 	if err != nil {
 		return err
 	}
-	e, err := repo.New(root, resolveActor()).Supervision(ticket, att, mode)
+	actor, err := resolveWriteActor()
+	if err != nil {
+		return err
+	}
+	e, err := repo.New(root, actor).Supervision(ticket, att, mode)
 	if err != nil {
 		return err
 	}

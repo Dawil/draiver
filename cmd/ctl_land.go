@@ -209,7 +209,11 @@ func (lc *landContext) merge(cmd *cobra.Command) error {
 	if landed.AlreadyUpToDate {
 		body = fmt.Sprintf("`ctl merge`: %s was already contained in %s (nothing to land); recording done.", landed.Branch, landed.Base)
 	}
-	e, err := repo.New(lc.root, resolveActor()).Done(lc.ticket, lc.attempt, body)
+	actor, err := resolveWriteActor()
+	if err != nil {
+		return err
+	}
+	e, err := repo.New(lc.root, actor).Done(lc.ticket, lc.attempt, body)
 	if err != nil {
 		return err
 	}
@@ -307,7 +311,11 @@ func (lc *landContext) fail(cmd *cobra.Command, op string, cause error) error {
 	}
 	// Append to the *resolved* attempt (lc.attempt), not via appendEvent's
 	// latest/env fallback, so an explicit `@attempt` target escalates on itself.
-	e, err := repo.New(lc.root, resolveActor()).AppendTyped(lc.ticket, lc.attempt, event.Event{
+	actor, err := resolveWriteActor()
+	if err != nil {
+		return err
+	}
+	e, err := repo.New(lc.root, actor).AppendTyped(lc.ticket, lc.attempt, event.Event{
 		Type: "escalation", Body: msg,
 	})
 	if err != nil {

@@ -38,14 +38,29 @@
 //     and halts the session, so a stalled "done without handoff" lands on the board
 //     for a human instead of idling. The gate then latches.
 //
-// A Gate drives one attempt's session and is not safe for concurrent use: call
-// Consider from the single goroutine that ranges the adapter's Stream, alongside
-// the watch.Watcher and the other gates.
+// Background work (drvctl-060): a turn that ends while the agent still has
+// background tasks in flight — a `run_in_background` Bash, or an Agent/Task
+// subagent launched async — is not a finished session. The agent is waiting on a
+// completion notice the harness will deliver as a fresh turn. The gate tracks those
+// tasks off the stream (launch = a non-error tool_result for such a call;
+// completion = a turn whose result frame carries origin "task-notification") and
+// neither nudges nor halts while any are outstanding, up to a configurable cap
+// (DefaultBackgroundCap). Past the cap it escalates with that reason. drv-051 is the
+// motivating incident: the gate halted a session waiting on six drafting agents,
+// killing five of them mid-run.
+//
+// Consider is called from the single goroutine that ranges the adapter's Stream,
+// alongside the watch.Watcher and the other gates; CheckCap may be called
+// concurrently from the reconcile tick (the gate's own state is mutex-guarded).
 package completion
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/event"
@@ -59,6 +74,16 @@ import (
 // for a cooperative agent, and more would just burn turns before the human is
 // looped in.
 const defaultMaxNudges = 1
+
+// DefaultBackgroundCap is how long the gate defers a turn-end hand-off check while
+// background tasks are still outstanding before it gives up and escalates. Long
+// enough for a fan-out of research/drafting subagents or a full test climb; short
+// enough that a hung task does not idle a session forever.
+const DefaultBackgroundCap = 2 * time.Hour
+
+// taskNotificationOrigin is the turn-end Origin of a turn a background task's
+// completion notice started.
+const taskNotificationOrigin = "task-notification"
 
 // Gate enforces the hand-off-before-stop obligation on one attempt's session.
 // Construct it with New. It injects the nudge prompt through nudge and, once the
@@ -74,9 +99,17 @@ type Gate struct {
 	nudge func(context.Context, string) error
 	halt  func() error
 
+	mu        sync.Mutex
 	nudges    int  // how many nudges sent so far
 	maxNudges int  // escalate once this many nudges went unheeded
 	fired     bool // latched after escalating, so later frames never re-escalate
+
+	// Background-task tracking (drvctl-060).
+	candidates    map[string]bool // tool_use id → true for an async-Agent call (needs the launch marker), false for run_in_background
+	outstanding   int             // launched background tasks not yet notified complete
+	waitingSince  time.Time       // first turn-end deferred on outstanding tasks; zero when not waiting
+	backgroundCap time.Duration
+	now           func() time.Time
 }
 
 // New returns a Gate guarding ticket/attempt's session. nudge submits the
@@ -106,7 +139,35 @@ func New(root store.Root, ticket, attempt, actor string, nudge func(context.Cont
 		nudge:     nudge,
 		halt:      halt,
 		maxNudges: defaultMaxNudges,
+
+		candidates:    map[string]bool{},
+		backgroundCap: DefaultBackgroundCap,
+		now:           time.Now,
 	}, nil
+}
+
+// SetBackgroundCap overrides how long the gate waits on outstanding background
+// tasks before escalating; a non-positive d keeps the default.
+func (g *Gate) SetBackgroundCap(d time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if d > 0 {
+		g.backgroundCap = d
+	}
+}
+
+// SetClock replaces the gate's time source (tests).
+func (g *Gate) SetClock(now func() time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.now = now
+}
+
+// Outstanding reports how many background tasks the gate believes are in flight.
+func (g *Gate) Outstanding() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.outstanding
 }
 
 // Outcome is what Consider did with an event.
@@ -131,6 +192,11 @@ const (
 	// An explicit `draiver park` hand-off is Ignored (quiet, like review/escalate);
 	// Parked is only the gate's own suppression of an otherwise-manufactured escalation.
 	Parked
+	// Waiting: a successful turn ended without a hand-off while background tasks the
+	// agent launched are still running (drvctl-060). The session is still working —
+	// their completion notices will start fresh turns — so the gate neither nudges
+	// nor escalates, until the background cap elapses.
+	Waiting
 )
 
 // Consider inspects one normalized event. Only a turn ending in success is acted
@@ -141,8 +207,122 @@ const (
 // gate latches, so the remaining in-flight frames before the reap lands do not
 // stack duplicate escalations.
 func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
-	if g.fired || ev.Kind != agent.EventTurnEnd || ev.Turn != "success" {
+	g.mu.Lock()
+	out, halt, err := g.consider(ctx, ev)
+	g.mu.Unlock()
+	return g.finish(out, halt, err)
+}
+
+// finish runs a deferred halt outside the lock (Kill blocks until the process is
+// gone, and the stream goroutine must never be stuck behind the gate's mutex).
+func (g *Gate) finish(out Outcome, halt bool, err error) (Outcome, error) {
+	if halt && g.halt != nil {
+		if herr := g.halt(); herr != nil {
+			// The escalation is already durable; report the halt failure but keep the
+			// Escalated outcome so the caller knows the attempt is now blocked.
+			return Escalated, fmt.Errorf("completion: halt after stall escalation: %w", herr)
+		}
+	}
+	return out, err
+}
+
+// observe folds one event into the background-task tracker.
+func (g *Gate) observe(ev agent.Event) {
+	if ev.ParentToolID != "" {
+		return // a subagent's own frames — its tools are not the session's background work
+	}
+	switch ev.Kind {
+	case agent.EventToolCall:
+		if ev.Tool == nil {
+			return
+		}
+		flag := backgroundFlag(ev.Tool.Input)
+		switch {
+		case flag != nil && *flag:
+			g.candidates[ev.Tool.ID] = false
+		case flag == nil && (ev.Tool.Name == "Agent" || ev.Tool.Name == "Task"):
+			// Agent defaults to async in current Claude Code; confirm off the result.
+			g.candidates[ev.Tool.ID] = true
+		}
+	case agent.EventToolResult:
+		if ev.Tool == nil {
+			return
+		}
+		needsMarker, ok := g.candidates[ev.Tool.ID]
+		if !ok {
+			return
+		}
+		delete(g.candidates, ev.Tool.ID)
+		if ev.Tool.IsError {
+			return // denied or failed to launch — nothing is running
+		}
+		if needsMarker && !asyncLaunched(ev.Tool.Result) {
+			return // a synchronous subagent: it already finished
+		}
+		g.outstanding++
+	case agent.EventTurnEnd:
+		if ev.Origin == taskNotificationOrigin && g.outstanding > 0 {
+			g.outstanding--
+		}
+		if g.outstanding == 0 {
+			g.waitingSince = time.Time{}
+		}
+	}
+}
+
+// backgroundFlag reads a tool call's `run_in_background` input: nil when absent.
+func backgroundFlag(input json.RawMessage) *bool {
+	if len(input) == 0 {
+		return nil
+	}
+	var in struct {
+		RunInBackground *bool `json:"run_in_background"`
+	}
+	if json.Unmarshal(input, &in) != nil {
+		return nil
+	}
+	return in.RunInBackground
+}
+
+// asyncLaunched reports whether a subagent tool's result says it was launched in
+// the background rather than run to completion.
+func asyncLaunched(result string) bool {
+	r := strings.ToLower(result)
+	return strings.Contains(r, "async agent launched") || strings.Contains(r, "running in background")
+}
+
+// CheckCap escalates and halts a session that has been waiting on background
+// tasks for longer than the cap — the timer half of the deferral, for a session
+// whose hung tasks never produce another frame. The reconcile tick calls it for
+// each live run. It returns Escalated when it fired, Ignored otherwise.
+func (g *Gate) CheckCap(ctx context.Context) (Outcome, error) {
+	g.mu.Lock()
+	if g.fired || g.outstanding == 0 || g.waitingSince.IsZero() || g.now().Sub(g.waitingSince) < g.backgroundCap {
+		g.mu.Unlock()
 		return Ignored, nil
+	}
+	out, halt, err := g.escalateBackground()
+	g.mu.Unlock()
+	return g.finish(out, halt, err)
+}
+
+// escalateBackground records the cap-hit escalation and latches. Caller holds mu.
+func (g *Gate) escalateBackground() (Outcome, bool, error) {
+	g.fired = true
+	if _, err := ticketlog.Append(g.root, g.ticket, g.attempt, event.Event{
+		Type:  "escalation",
+		Actor: g.actor,
+		Body:  backgroundCapBody(g.outstanding, g.backgroundCap),
+	}); err != nil {
+		return Ignored, false, fmt.Errorf("completion: record background-cap escalation for %s/%s: %w", g.ticket, g.attempt, err)
+	}
+	return Escalated, true, nil
+}
+
+func (g *Gate) consider(ctx context.Context, ev agent.Event) (Outcome, bool, error) {
+	g.observe(ev)
+	if g.fired || ev.Kind != agent.EventTurnEnd || ev.Turn != "success" {
+		return Ignored, false, nil
 	}
 
 	// A pending wake source makes this a parkable suspend point: a `park` counts as a
@@ -151,16 +331,30 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 	// auto-park below, not only whether any exist.
 	sources, err := wake.Pending(g.root, g.ticket, g.attempt)
 	if err != nil {
-		return Ignored, fmt.Errorf("completion: check wake source for %s/%s: %w", g.ticket, g.attempt, err)
+		return Ignored, false, fmt.Errorf("completion: check wake source for %s/%s: %w", g.ticket, g.attempt, err)
 	}
 	parkable := len(sources) > 0
 
 	met, err := g.handedOff(parkable)
 	if err != nil {
-		return Ignored, fmt.Errorf("completion: check hand-off for %s/%s: %w", g.ticket, g.attempt, err)
+		return Ignored, false, fmt.Errorf("completion: check hand-off for %s/%s: %w", g.ticket, g.attempt, err)
 	}
 	if met {
-		return Ignored, nil
+		return Ignored, false, nil
+	}
+
+	// Background work still running (drvctl-060): the agent is waiting on completion
+	// notices that will start fresh turns, so it is still working — neither nudge nor
+	// halt. Start the cap clock on the first such deferral; past the cap, escalate
+	// with that reason instead of waiting forever on a hung task.
+	if g.outstanding > 0 {
+		if g.waitingSince.IsZero() {
+			g.waitingSince = g.now()
+		}
+		if g.now().Sub(g.waitingSince) >= g.backgroundCap {
+			return g.escalateBackground()
+		}
+		return Waiting, false, nil
 	}
 
 	// A nil nudger has nothing to deliver, so skip straight to the escalate/suspend
@@ -168,9 +362,9 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 	if g.nudge != nil && g.nudges < g.maxNudges {
 		g.nudges++
 		if err := g.nudge(ctx, nudgeMessage(g.ticket, parkable)); err != nil {
-			return Ignored, fmt.Errorf("completion: nudge %s/%s: %w", g.ticket, g.attempt, err)
+			return Ignored, false, fmt.Errorf("completion: nudge %s/%s: %w", g.ticket, g.attempt, err)
 		}
-		return Nudged, nil
+		return Nudged, false, nil
 	}
 
 	// The nudge went unheeded. A still-wakeable attempt that stopped is suspending,
@@ -194,10 +388,10 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 				Actor: g.actor,
 				Body:  autoParkBody(),
 			}); err != nil {
-				return Parked, fmt.Errorf("completion: auto-park %s/%s: %w", g.ticket, g.attempt, err)
+				return Parked, false, fmt.Errorf("completion: auto-park %s/%s: %w", g.ticket, g.attempt, err)
 			}
 		}
-		return Parked, nil
+		return Parked, false, nil
 	}
 
 	// The nudge went unheeded and nothing can wake it; hand the stall to a human. Latch first so even a
@@ -209,16 +403,9 @@ func (g *Gate) Consider(ctx context.Context, ev agent.Event) (Outcome, error) {
 		Actor: g.actor,
 		Body:  escalationBody(),
 	}); err != nil {
-		return Ignored, fmt.Errorf("completion: record stall escalation for %s/%s: %w", g.ticket, g.attempt, err)
+		return Ignored, false, fmt.Errorf("completion: record stall escalation for %s/%s: %w", g.ticket, g.attempt, err)
 	}
-	if g.halt != nil {
-		if err := g.halt(); err != nil {
-			// The escalation is already durable; report the halt failure but keep the
-			// Escalated outcome so the caller knows the attempt is now blocked.
-			return Escalated, fmt.Errorf("completion: halt after stall escalation: %w", err)
-		}
-	}
-	return Escalated, nil
+	return Escalated, true, nil
 }
 
 // handedOff reports whether a hand-off newer than the session baseline is on disk
@@ -291,4 +478,11 @@ func nudgeMessage(ticket string, parkable bool) string {
 func escalationBody() string {
 	return "This session reached a successful stopping point but never filed a `review` or an `escalation`, and did not claim one after being nudged. The supervisor halted it so the stalled attempt lands on the board for a human instead of idling in Running forever.\n\n" +
 		"Resolve this escalation to resume the attempt — it comes back up with its session context restored — after redirecting it as needed, or reopen it for review if the work is in fact complete."
+}
+
+// backgroundCapBody renders the escalation for a session whose background tasks
+// outlived the cap without reporting completion (drvctl-060).
+func backgroundCapBody(outstanding int, cap time.Duration) string {
+	return fmt.Sprintf("This session ended its turn waiting on %d background task(s) (a `run_in_background` command or an async subagent) that had not reported completion after the %s background cap. The supervisor deferred its hand-off check while they ran, but a task that never finishes would idle the session forever, so it halted the session and is handing it to you.\n\n"+
+		"Resolve this escalation to resume the attempt with its session context restored — e.g. telling it to check on or abandon the stuck task — or raise the cap with `ctl up --background-cap`.", outstanding, cap)
 }

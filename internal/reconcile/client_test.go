@@ -744,11 +744,14 @@ func TestStartNewAttemptForksAndLeavesParent(t *testing.T) {
 	}
 }
 
-// TestStopOnEnabledIsTransient pins decision #29's consequence: a bare `ctl stop`
-// on a still-enabled attempt is transient — reap removes no durable desire (the
-// enable bit stays), so the daemon's next tick re-admits the spent run and Resumes
-// it. To durably stop an enabled attempt you `disable`, not `stop`.
-func TestStopOnEnabledIsTransient(t *testing.T) {
+// TestStopOnEnabledHoldsUntilHumanActs replaces decision #29's "a bare stop on an
+// enabled attempt is transient" (drvctl-060): that transience is exactly what
+// resumed drv-044 over the human ~10s after each interrupt. A `ctl stop` on an
+// enabled, Running attempt now records an `interrupt` hold; the daemon retires the
+// run (worktree kept warm) and does not re-admit it, tick after tick, until the
+// human acts — here with `ctl start`, which lifts the hold and Resumes the SAME
+// session id.
+func TestStopOnEnabledHoldsUntilHumanActs(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t)
 	ticket := "PROJ-1"
@@ -776,15 +779,31 @@ func TestStopOnEnabledIsTransient(t *testing.T) {
 	if err := f.at(0).Kill(); err != nil { // the reaped process exits
 		t.Fatalf("kill: %v", err)
 	}
+	a, _ := project.LoadAttempt(w.root, ticket, att)
+	if !a.Interrupted() {
+		t.Fatal("ctl stop on an enabled attempt must record an interrupt hold")
+	}
 
-	waitFor(t, "resume after transient stop", func() bool {
+	for i := 0; i < 5; i++ {
+		if err := r.Tick(ctx); err != nil {
+			t.Fatalf("held tick: %v", err)
+		}
+	}
+	if n := f.count(); n != 1 {
+		t.Fatalf("an interrupted attempt must not be re-admitted, but %d sessions were brought up", n)
+	}
+
+	if _, err := r.Start(ticket, att); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "resume after ctl start", func() bool {
 		if err := r.Tick(ctx); err != nil {
 			t.Fatalf("re-admit tick: %v", err)
 		}
 		return f.count() == 2
 	})
 	if f.at(1).resumedWith() != orig.SessionID {
-		t.Fatalf("a stop on an enabled attempt should be transient (resume the same id), got resume id %q", f.at(1).resumedWith())
+		t.Fatalf("ctl start should resume the same session id, got %q", f.at(1).resumedWith())
 	}
 }
 
