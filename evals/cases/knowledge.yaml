@@ -172,21 +172,25 @@
         altitude ordering).
 
 - description: "knowledge: reading a very large source file cheaply (drv-061)"
-  metadata: {kind: knowledge, ticket: drv-061, weight: light}
+  metadata: {kind: knowledge, ticket: drv-061, weight: light, case: large-file-read}
   vars:
     prompt: >-
       You are a coding agent in this repository and need to change one handler in
       internal/web/web.go, which is about 3,000 lines long. Following this
       repository's agent instructions, how should you read it? Answer briefly.
   assert:
+    # promptfoo's regex is JavaScript: no inline (?i) flags.
     - type: regex
       transform: JSON.parse(output).answer
-      value: "(?i)grep|rg\\b|search"
+      value: "[Gg]rep|\\brg\\b|[Ss]earch"
     - type: regex
       transform: JSON.parse(output).answer
-      value: "(?i)offset|limit|range|line numbers"
+      value: "offset|limit"
     - type: llm-rubric
       transform: JSON.parse(output).answer
       value: >-
-        The answer says to grep/search for the symbol first and then read only the
-        relevant range (offset/limit), rather than reading the whole file.
+        The answer says to grep/search for the symbol first and then Read only the
+        relevant range (offset/limit) rather than the whole file, AND presents this as
+        this repository's own instruction (e.g. AGENTS.md's rule for files over about
+        500 lines). An answer that says the repo's instructions do not cover this
+        FAILS, even if its general advice is sound.
