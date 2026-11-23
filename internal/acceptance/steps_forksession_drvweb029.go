@@ -5,8 +5,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/Dawil/draiver/internal/event"
+	"github.com/Dawil/draiver/internal/store"
+	"github.com/Dawil/draiver/internal/ticketlog"
+	"github.com/Dawil/draiver/internal/web"
+	"github.com/Dawil/draiver/internal/worktree"
 	"html"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,12 +29,16 @@ const forkSessionID = "0f1e2d3c-fork-demo-session"
 
 func init() {
 	drvweb029 := map[string]StepFunc{
-		"a board attempt with a seeded claude-code session.json":                                      givenForkSession,
-		"a board attempt whose session.json has no session id":                                        givenForkNoSessionID,
-		"the attempt page shows the fork-session copy button":                                         thenForkButtonShown,
-		"the rendered fork command cds into the absolute worktree and forks the session in plan mode": thenForkCommandRendered,
-		"the copy button sits inline in the Agent Logs section header":                                thenForkButtonInAgentLogs,
-		"the attempt page shows no fork-session copy button":                                          thenForkButtonAbsent,
+		"a board attempt with a seeded claude-code session.json":                           givenForkSession,
+		"a board attempt whose session.json has no session id":                             givenForkNoSessionID,
+		"the attempt page shows the fork-session copy button":                              thenForkButtonShown,
+		"the rendered fork command is a draiver fork of this attempt":                      thenForkCommandRendered,
+		"a claude-code attempt whose worktree the daemon has reclaimed":                    givenForkReclaimed,
+		"I run the fork command copied from the attempt page":                              whenRunCopiedFork,
+		"the worktree is recreated on the attempt branch":                                  thenForkWorktreeRecreated,
+		"claude is started there with --resume, --fork-session and --permission-mode plan": thenForkArgv,
+		"the copy button sits inline in the Agent Logs section header":                     thenForkButtonInAgentLogs,
+		"the attempt page shows no fork-session copy button":                               thenForkButtonAbsent,
 	}
 	for k, v := range drvweb029 {
 		registry[k] = v
@@ -108,14 +119,11 @@ func thenForkCommandRendered(w *World, sr *StepRun) error {
 	if !ok {
 		return fmt.Errorf("no fork command <code> on the attempt page")
 	}
-	wantCd := "cd '" + forkWorktree(b) + "' && "
-	if !strings.HasPrefix(cmd, wantCd) || !filepath.IsAbs(forkWorktree(b)) {
-		return fmt.Errorf("fork command %q does not start with absolute cd %q", cmd, wantCd)
-	}
-	for _, want := range []string{"claude --resume '" + forkSessionID + "'", "--fork-session", "--permission-mode plan"} {
-		if !strings.Contains(cmd, want) {
-			return fmt.Errorf("fork command %q missing %q", cmd, want)
-		}
+	// The acceptance board's data root is a temp dir, not the CLI default, so the
+	// command must carry it as --data for the paste to find this attempt.
+	want := "draiver --data '" + b.root.Dir + "' fork '" + accTicket + "@" + accAtt + "'"
+	if cmd != want {
+		return fmt.Errorf("fork command = %q, want %q", cmd, want)
 	}
 	// Click the copy button and wait for its status feedback ("Copied", or the
 	// manual-copy hint if headless Chromium refuses both clipboard paths), then shoot.
@@ -182,6 +190,188 @@ func thenForkButtonInAgentLogs(w *World, sr *StepRun) error {
 	}
 	if header, ok := sliceBetween(page, "<header", "</header>"); ok && strings.Contains(header, "fork-copy") {
 		return fmt.Errorf("fork-copy button still rendered in the page header")
+	}
+	return nil
+}
+
+// ---- reclaimed-worktree scenario: run the copied command end to end ----
+
+const forkReclaimedSID = "5e55-reclaimed-demo"
+
+type forkRun struct {
+	b        *board
+	repo     string
+	cacheDir string
+	wtPath   string
+	out      string
+}
+
+func givenForkReclaimed(w *World, sr *StepRun) error {
+	tmp, err := os.MkdirTemp("", "acc-fork-")
+	if err != nil {
+		return err
+	}
+	w.defer_(func() { os.RemoveAll(tmp) })
+	repo := filepath.Join(tmp, "repo")
+	cacheDir := filepath.Join(tmp, "cache")
+	dataDir := filepath.Join(tmp, "data")
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main", repo},
+		{"-C", repo, "-c", "user.email=a@a", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	root := store.Root{Dir: dataDir}
+	if err := root.EnsureAttemptDirs(accTicket, accAtt); err != nil {
+		return err
+	}
+	spec := "---\nid: " + accTicket + "\ntitle: drvweb-029 fork\n---\n\n# drvweb-029 fork\n"
+	if err := os.WriteFile(root.SpecPath(accTicket), []byte(spec), 0o644); err != nil {
+		return err
+	}
+	meta := "---\nid: " + accAtt + "\nticket: " + accTicket + "\nrepo: " + repo + "\nbase: main\n---\n\n"
+	if err := os.WriteFile(root.AttemptMetaPath(accTicket, accAtt), []byte(meta), 0o644); err != nil {
+		return err
+	}
+	if _, err := ticketlog.Append(root, accTicket, accAtt, event.Event{Type: "created", Actor: "agent:acceptance", Body: "start"}); err != nil {
+		return err
+	}
+
+	// Cut the attempt's worktree exactly where the CLI (run with XDG_CACHE_HOME =
+	// cacheDir) will look for it, record it in session.json, then reclaim it the
+	// way the daemon does on retire: remove the checkout, keep the branch.
+	base, err := worktree.DefaultBaseIn(cacheDir, repo)
+	if err != nil {
+		return err
+	}
+	wm, err := worktree.NewManager(repo, worktree.WithBase(base))
+	if err != nil {
+		return err
+	}
+	key := worktree.Key{Ticket: accTicket, Attempt: accAtt}
+	wt, err := wm.Create(context.Background(), worktree.Spec{Key: key})
+	if err != nil {
+		return err
+	}
+	w.defer_(func() { wm.Remove(context.Background(), key, worktree.RemoveOptions{Force: true}) })
+	if err := root.EnsureSessionDir(accTicket, accAtt); err != nil {
+		return err
+	}
+	data, _ := json.Marshal(session.Identity{Adapter: "claude-code", SessionID: forkReclaimedSID, Worktree: wt.Path})
+	if err := os.WriteFile(root.SessionMetaPath(accTicket, accAtt), data, 0o644); err != nil {
+		return err
+	}
+	if err := wm.Remove(context.Background(), key, worktree.RemoveOptions{Force: true}); err != nil {
+		return err
+	}
+	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+		return fmt.Errorf("worktree %s still present after reclaim", wt.Path)
+	}
+
+	srv, err := web.New(root)
+	if err != nil {
+		return err
+	}
+	ts := httptest.NewServer(srv.Handler())
+	w.defer_(ts.Close)
+	b := &board{root: root, wd: repo, srv: ts}
+	w.set("board", b)
+	w.set("forkRun", &forkRun{b: b, repo: repo, cacheDir: cacheDir, wtPath: wt.Path})
+	// Evidence: the page still offers the fork even though the checkout is gone.
+	return shoot(w, sr, "/ticket/"+accTicket+"/"+accAtt, "fork-session-reclaimed", false, `[data-testid="fork-copy"]`, "")
+}
+
+func currentForkRun(w *World) (*forkRun, error) {
+	fr, _ := w.get("forkRun").(*forkRun)
+	if fr == nil {
+		return nil, fmt.Errorf("no reclaimed-fork fixture in scope")
+	}
+	return fr, nil
+}
+
+// whenRunCopiedFork runs the exact text the page renders — through a shell, with
+// the freshly built draiver first on PATH — plus --print, so the verb reports the
+// cwd and claude argv instead of exec'ing a claude that isn't installed here.
+func whenRunCopiedFork(w *World, sr *StepRun) error {
+	fr, err := currentForkRun(w)
+	if err != nil {
+		return err
+	}
+	page, err := getBody(fr.b.url("/ticket/" + accTicket + "/" + accAtt))
+	if err != nil {
+		return err
+	}
+	cmdText, ok := forkCommandText(page)
+	if !ok {
+		return fmt.Errorf("no fork command on the attempt page")
+	}
+	bin, err := overlayBin()
+	if err != nil {
+		return err
+	}
+	binDir := filepath.Join(filepath.Dir(bin), "fork-path")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+	link := filepath.Join(binDir, "draiver")
+	os.Remove(link)
+	if err := os.Symlink(bin, link); err != nil {
+		return err
+	}
+	sh := exec.Command("sh", "-c", cmdText+" --print")
+	var env []string
+	for _, e := range os.Environ() {
+		k := e
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			k = e[:i]
+		}
+		switch k {
+		case "PATH", "XDG_CACHE_HOME", "DRAIVER_DATA", "DRAIVER_ATTEMPT", "DRAIVER_CONFIG":
+			continue
+		}
+		env = append(env, e)
+	}
+	sh.Env = append(env, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_CACHE_HOME="+fr.cacheDir)
+	out, err := sh.CombinedOutput()
+	fr.out = string(out)
+	if err != nil {
+		return fmt.Errorf("copied fork command failed: %v\n%s", err, out)
+	}
+	return nil
+}
+
+func thenForkWorktreeRecreated(w *World, sr *StepRun) error {
+	fr, err := currentForkRun(w)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(fr.out, "recreated "+fr.wtPath) {
+		return fmt.Errorf("fork did not report recreating %s:\n%s", fr.wtPath, fr.out)
+	}
+	head, err := exec.Command("git", "-C", fr.wtPath, "branch", "--show-current").Output()
+	if err != nil {
+		return fmt.Errorf("recreated worktree %s is not a checkout: %v", fr.wtPath, err)
+	}
+	if got, want := strings.TrimSpace(string(head)), "draiver/"+accTicket+"/"+accAtt; got != want {
+		return fmt.Errorf("recreated worktree on branch %q, want %q", got, want)
+	}
+	return nil
+}
+
+func thenForkArgv(w *World, sr *StepRun) error {
+	fr, err := currentForkRun(w)
+	if err != nil {
+		return err
+	}
+	for _, want := range []string{
+		"cwd: " + fr.wtPath + "\n",
+		"argv: claude --resume " + forkReclaimedSID + " --fork-session --permission-mode plan",
+	} {
+		if !strings.Contains(fr.out, want) {
+			return fmt.Errorf("fork --print output missing %q:\n%s", want, fr.out)
+		}
 	}
 	return nil
 }

@@ -13,55 +13,34 @@ import (
 )
 
 func TestForkCommand(t *testing.T) {
+	t.Setenv("HOME", "/home/op")
+	def := "/home/op/.draiver/data"
+	cc := func(sid, wt string) session.Identity {
+		return session.Identity{Adapter: "claude-code", SessionID: sid, Worktree: wt}
+	}
 	cases := []struct {
-		name string
-		id   session.Identity
-		want string
+		name    string
+		id      session.Identity
+		dataDir string
+		want    string
 	}{
-		{
-			name: "absolute path",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "abc-123", Worktree: "/home/me/wt/0001"},
-			want: `cd '/home/me/wt/0001' && claude --resume 'abc-123' --fork-session --permission-mode plan`,
-		},
-		{
-			name: "path with spaces and a single quote",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "s1", Worktree: "/tmp/it's a dir"},
-			want: `cd '/tmp/it'\''s a dir' && claude --resume 's1' --fork-session --permission-mode plan`,
-		},
-		{
-			name: "trailing slash is cleaned",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "s1", Worktree: "/tmp/wt/"},
-			want: `cd '/tmp/wt' && claude --resume 's1' --fork-session --permission-mode plan`,
-		},
-		{
-			name: "empty session id",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "", Worktree: "/tmp/wt"},
-			want: "",
-		},
-		{
-			name: "blank session id",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "   ", Worktree: "/tmp/wt"},
-			want: "",
-		},
-		{
-			name: "relative worktree",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "s1", Worktree: "wt/0001"},
-			want: "",
-		},
-		{
-			name: "empty worktree",
-			id:   session.Identity{Adapter: "claude-code", SessionID: "s1"},
-			want: "",
-		},
-		{
-			name: "other adapter",
-			id:   session.Identity{Adapter: "aider", SessionID: "s1", Worktree: "/tmp/wt"},
-			want: "",
-		},
+		{"absolute worktree, default root", cc("abc-123", "/home/me/wt/0001"), def,
+			`draiver fork 'T-1@0001'`},
+		{"worktree with spaces and a quote", cc("s1", "/tmp/it's a dir"), def,
+			`draiver fork 'T-1@0001'`},
+		{"non-default root carries --data", cc("s1", "/tmp/wt"), "/srv/draiver data",
+			`draiver --data '/srv/draiver data' fork 'T-1@0001'`},
+		{"root with a quote is quoted", cc("s1", "/tmp/wt"), "/srv/it's",
+			`draiver --data '/srv/it'\''s' fork 'T-1@0001'`},
+		{"empty session id", cc("", "/tmp/wt"), def, ""},
+		{"blank session id", cc("   ", "/tmp/wt"), def, ""},
+		{"relative worktree", cc("s1", "wt/0001"), def, ""},
+		{"empty worktree", cc("s1", ""), def, ""},
+		{"other adapter", session.Identity{Adapter: "aider", SessionID: "s1", Worktree: "/tmp/wt"}, def, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := forkCommand(c.id); got != c.want {
+			if got := forkCommand(c.id, "T-1", "0001", c.dataDir); got != c.want {
 				t.Fatalf("forkCommand = %q\nwant          %q", got, c.want)
 			}
 		})
@@ -83,10 +62,6 @@ func TestForkCommandShellRoundTrip(t *testing.T) {
 		if string(out) != v {
 			t.Fatalf("round-trip of %q gave %q", v, out)
 		}
-	}
-	cmd := forkCommand(session.Identity{Adapter: "claude-code", SessionID: "x", Worktree: "/tmp/it's"})
-	if !strings.HasPrefix(cmd, `cd '/tmp/it'\''s' && `) {
-		t.Fatalf("unexpected prefix: %q", cmd)
 	}
 }
 
@@ -120,7 +95,7 @@ func TestDetailForkButton(t *testing.T) {
 	if !strings.Contains(page, `data-testid="fork-copy"`) {
 		t.Fatal("claude-code attempt with a session id: no fork button")
 	}
-	want := html.EscapeString(`cd '/tmp/it'\''s here' && claude --resume 'sess-42' --fork-session --permission-mode plan`)
+	want := html.EscapeString("draiver --data " + shellQuote(root.Dir) + " fork 'FORK@0001'")
 	if !strings.Contains(page, want) {
 		t.Fatalf("rendered page missing escaped command %q", want)
 	}

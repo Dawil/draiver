@@ -96,6 +96,7 @@ func resetForRun(t *testing.T) {
 	configRepoRemote, configRepoBranch, configRepoRung = "", "", ""
 	testLog, testDetach, testOnly = false, false, false
 	parkClear = false
+	forkPrint = false
 	reportJSON, reportRun, reportOut = "", "", ""
 	reportInline, reportDemo = true, false
 	t.Setenv("DRAIVER_ATTEMPT", "")
