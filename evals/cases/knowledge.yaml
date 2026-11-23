@@ -131,3 +131,80 @@
         The answer says to write a changelog.d/<ticket-id>.md fragment and to learn the
         style from changelog.d (its README or recent fragments), and does NOT tell the
         agent to read or edit the generated CHANGELOG.md.
+
+- description: "knowledge: where draiver's version comes from (drv-061)"
+  metadata: {kind: knowledge, ticket: drv-061, weight: light}
+  vars:
+    prompt: >-
+      You are a coding agent in this repository. Where does the version printed by
+      `draiver --version` come from, and does adding a changelog fragment on a ticket
+      branch change it? Name the function responsible. Answer briefly.
+  assert:
+    - type: icontains
+      transform: JSON.parse(output).answer
+      value: FromChangelog
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says the version is the topmost released `## [x.y.z]` section of
+        CHANGELOG.md (embedded in the binary, read by version.FromChangelog), that
+        Unreleased is skipped, and that a fragment alone does not change it — only
+        cutting a release does.
+
+- description: "knowledge: which rungs gate review, and why integration is advisory (drv-061)"
+  metadata: {kind: knowledge, ticket: drv-061, weight: light}
+  vars:
+    prompt: >-
+      You are a coding agent in this repository. Which of this repo's test-pyramid
+      rungs must be green for the review gate, which are advisory, and why is the
+      integration rung advisory rather than required? Answer briefly.
+  assert:
+    - type: icontains-all
+      transform: JSON.parse(output).answer
+      value: ["changelog", "unit", "acceptance", "integration"]
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says changelog, unit and acceptance are required (they gate
+        review), integration and evals are advisory (required: false), and that
+        integration is advisory because it needs a container runtime / skips cleanly
+        without one, so it must not block the gate (enforcement is separate from
+        altitude ordering).
+
+- description: "knowledge: where draiver's version comes from (drv-061)"
+  metadata: {kind: knowledge, ticket: drv-061, weight: light}
+  vars:
+    prompt: >-
+      You are a coding agent in this repository. Where does `draiver --version` get
+      its version, and does adding a changelog fragment on a ticket branch change it?
+      Name the function. Answer briefly.
+  assert:
+    - type: icontains
+      transform: JSON.parse(output).answer
+      value: FromChangelog
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says the version is the topmost released `## [x.y.z]` section of
+        CHANGELOG.md (via version.FromChangelog, with no hand-maintained constant), and
+        that a fragment alone does not change it; only a release does.
+
+- description: "knowledge: reading a very large source file cheaply (drv-061)"
+  metadata: {kind: knowledge, ticket: drv-061, weight: light}
+  vars:
+    prompt: >-
+      You are a coding agent in this repository and need to change one handler in
+      internal/web/web.go, which is about 3,000 lines long. Following this
+      repository's agent instructions, how should you read it? Answer briefly.
+  assert:
+    - type: regex
+      transform: JSON.parse(output).answer
+      value: "(?i)grep|rg\\b|search"
+    - type: regex
+      transform: JSON.parse(output).answer
+      value: "(?i)offset|limit|range|line numbers"
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says to grep/search for the symbol first and then read only the
+        relevant range (offset/limit), rather than reading the whole file.
