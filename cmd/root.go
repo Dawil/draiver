@@ -92,7 +92,7 @@ func init() {
 	// here, not in the literal, to avoid an init cycle through rootCmd.)
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
 		if isNoticeCommand(cmd) {
-			printUnreadNotice(cmd.ErrOrStderr())
+			printUnreadNotice(cmd.ErrOrStderr(), cmd.Name())
 		}
 	}
 	rootCmd.PersistentFlags().StringVar(&dataFlag, "data", "", "data root (default $DRAIVER_DATA or ~/.draiver/data)")
@@ -107,7 +107,7 @@ func Execute() int {
 	// end — after any error line — so a truncated tool transcript cannot drop it.
 	defer func() {
 		if isNoticeCommand(cmd) && noticeRepeatCommands[cmd.Name()] {
-			printUnreadNotice(cmd.ErrOrStderr())
+			printUnreadNotice(cmd.ErrOrStderr(), cmd.Name())
 		}
 	}()
 	if err == nil {

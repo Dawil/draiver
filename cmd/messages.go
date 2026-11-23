@@ -24,12 +24,13 @@ const ExitUnreadMessages = 8
 // It is deliberately a new verb: `draiver inbox` stays the human escalation inbox.
 var messagesCmd = &cobra.Command{
 	Use:   "messages [TICKET]",
-	Short: "Read the human's unread messages to this agent session",
-	Long: "messages prints, in full, the messages the human addressed to the agent\n" +
-		"(board compose entries marked \"Message the agent\", or `draiver log --to agent`)\n" +
-		"since this session started that it has not yet read, then marks them read — so\n" +
-		"the `📬 N unread message(s)` notice other draiver commands print goes away until\n" +
-		"the human posts again.\n\n" +
+	Short: "Read (and acknowledge) the human's unread events for this agent session",
+	Long: "messages prints, in full, the human events this session has not yet read and\n" +
+		"then marks them read — so the `📬 N unread message(s)` notice other draiver\n" +
+		"commands print goes away until the human posts again. Counted: messages the\n" +
+		"human addressed to the agent (board compose entries marked \"Message the agent\",\n" +
+		"or `draiver log --to agent`), plus any human decision, resolution or supersede\n" +
+		"(drvctl-062) logged since this session started.\n\n" +
 		"Inside a supervised session (DRAIVER_SESSION_* set by draiverctld) TICKET is\n" +
 		"optional and defaults to the session's own attempt. Outside one — or for a\n" +
 		"ticket other than the session's — it lists every message addressed to the agent\n" +
@@ -65,7 +66,7 @@ var messagesCmd = &cobra.Command{
 		if !own {
 			msgs := agentmsg.Unread(events, 0, 0)
 			if len(msgs) == 0 {
-				fmt.Fprintf(out, "No messages to the agent on %s/%s.\n", ticket, att)
+				fmt.Fprintf(out, "No human events for the agent on %s/%s.\n", ticket, att)
 				return nil
 			}
 			for _, e := range msgs {
@@ -116,10 +117,10 @@ func isNoticeCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Parent() == rootCmd && noticeCommands[cmd.Name()]
 }
 
-// sessionUnread counts the live session's unread human messages. ok is false
-// outside a session or on any error — the notice must fail silent, never altering
-// a command's behaviour or exit code.
-func sessionUnread() (sess agentmsg.Session, n int, ok bool) {
+// sessionUnread returns the live session's unread human events (agentmsg.Unread).
+// ok is false outside a session or on any error — the notice must fail silent,
+// never altering a command's behaviour or exit code.
+func sessionUnread() (sess agentmsg.Session, unread []event.Event, ok bool) {
 	defer func() {
 		if recover() != nil {
 			ok = false
@@ -127,29 +128,41 @@ func sessionUnread() (sess agentmsg.Session, n int, ok bool) {
 	}()
 	sess, inSession := agentmsg.FromEnv(os.Getenv)
 	if !inSession {
-		return sess, 0, false
+		return sess, nil, false
 	}
 	root, err := resolveRoot()
 	if err != nil || !root.AttemptExists(sess.Ticket, sess.Attempt) {
-		return sess, 0, false
+		return sess, nil, false
 	}
 	events, err := ticketlog.Read(root, sess.Ticket, sess.Attempt)
 	if err != nil {
-		return sess, 0, false
+		return sess, nil, false
 	}
 	cursor, err := agentmsg.ReadCursor(root, sess.Ticket, sess.Attempt)
 	if err != nil {
-		return sess, 0, false
+		return sess, nil, false
 	}
-	return sess, len(agentmsg.Unread(events, sess.Seq, cursor)), true
+	return sess, agentmsg.Unread(events, sess.Seq, cursor), true
 }
 
-// printUnreadNotice writes the count-only notice to stderr when the live session
-// has unread messages. Silent otherwise, and on any error.
-func printUnreadNotice(w io.Writer) {
-	if _, n, ok := sessionUnread(); ok && n > 0 {
-		fmt.Fprintln(w, agentmsg.Notice(n))
+// warnCommands are the writing verbs that name the unread human events instead of
+// only counting them (drvctl-062): a write on a stale view is where drv-044 went
+// wrong (a decision logged after the human had retracted its premise).
+var warnCommands = map[string]bool{"log": true, "review": true}
+
+// printUnreadNotice writes the unread notice to stderr when the live session has
+// unread human events: the itemised Warning for the writing verbs, the count-only
+// Notice for the rest. Silent otherwise, and on any error.
+func printUnreadNotice(w io.Writer, verb string) {
+	_, unread, ok := sessionUnread()
+	if !ok || len(unread) == 0 {
+		return
 	}
+	if warnCommands[verb] {
+		fmt.Fprintln(w, agentmsg.Warning(unread))
+		return
+	}
+	fmt.Fprintln(w, agentmsg.Notice(len(unread)))
 }
 
 func init() {

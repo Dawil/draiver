@@ -20,6 +20,7 @@ var (
 	reviewURLs         []string
 	reviewLinks        []string
 	reviewIgnoreUnread bool
+	reviewAck          bool
 )
 
 var reviewCmd = &cobra.Command{
@@ -68,10 +69,24 @@ var reviewCmd = &cobra.Command{
 		// claim is refused (no event appended) until they are read or deliberately
 		// ignored. It runs before the pyramid gate, and fails open: if the count
 		// cannot be computed the claim proceeds exactly as before.
+		//
+		// --ack (drvctl-062) is the read-and-claim path: it prints the unread events in
+		// full and marks them read — exactly what `draiver messages` does — then lets the
+		// claim proceed. The refusal already named them, so the agent acks knowingly.
 		if !reviewIgnoreUnread {
-			if sess, n, ok := sessionUnread(); ok && n > 0 && sess.Ticket == id && sess.Attempt == att {
-				// The count-only notice itself was already printed by the root pre-run.
-				return &exitError{code: ExitUnreadMessages, msg: agentmsg.ReviewHint}
+			if sess, unread, ok := sessionUnread(); ok && len(unread) > 0 && sess.Ticket == id && sess.Attempt == att {
+				if !reviewAck {
+					// The itemised warning itself was already printed by the root pre-run.
+					return &exitError{code: ExitUnreadMessages, msg: agentmsg.ReviewHint}
+				}
+				out := cmd.OutOrStdout()
+				for _, e := range unread {
+					printMessage(out, e)
+				}
+				if err := agentmsg.AdvanceCursor(root, id, att, unread[len(unread)-1].Seq); err != nil {
+					return fmt.Errorf("review --ack: could not mark human events read: %w", err)
+				}
+				fmt.Fprintf(out, "Acknowledged %d human event(s) (#%d–#%d).\n", len(unread), unread[0].Seq, unread[len(unread)-1].Seq)
 			}
 		}
 
@@ -208,6 +223,7 @@ func quotedRungNames(levels []pyramid.Level) string {
 }
 
 func init() {
+	reviewCmd.Flags().BoolVar(&reviewAck, "ack", false, "acknowledge the human events this session has not read — print them in full, mark them read — then claim")
 	reviewCmd.Flags().BoolVar(&reviewIgnoreUnread, "ignore-unread", false, "claim review even though the human posted messages this session has not read (`draiver messages`)")
 	addLinkFlags(reviewCmd, &reviewURLs, &reviewLinks)
 	rootCmd.AddCommand(reviewCmd)
