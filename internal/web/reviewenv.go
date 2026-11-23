@@ -483,6 +483,7 @@ func (s *Server) handleReviewEnvUp(w http.ResponseWriter, r *http.Request) {
 	// ov (drv-053) pins the overlay revision the env was resolved from, so the launch
 	// cuts its overlay checkout at the very commit the panel showed.
 	go mgr.Launch(context.Background(), a, env, overrides, ov)
+	s.invalidateGit(id, att) // drvweb-030: the launch may cut checkouts
 	s.renderReviewEnvPanel(w, r.Context(), a, envName)
 }
 
@@ -542,6 +543,7 @@ func (s *Server) handleReviewEnvDown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec, err := s.reviewEnvManager().Teardown(r.Context(), a, envName, "button")
+	s.invalidateGit(id, att) // drvweb-030: teardown may remove checkouts
 	if err != nil {
 		s.fail(w, err)
 		return

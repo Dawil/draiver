@@ -75,10 +75,15 @@ Each row reports the agent's turns, tokens and cost (from Claude's JSON output),
 ### Adding or adjusting a case
 
 Each docs ticket owns the knowledge check(s) for what it documents. Add or edit an
-entry in `cases/knowledge.yaml` with `metadata: {kind: knowledge, ticket: <id>}`.
+entry in `cases/knowledge.yaml` with
+`metadata: {kind: knowledge, ticket: <id>, weight: light}`.
 Prefer `icontains`/`regex` on `JSON.parse(output).answer`, and add an `llm-rubric`
 only for judgement calls. A new task case needs a setup and a check in
 `lib/tasks.cjs` and an entry in `cases/tasks.yaml`.
+
+Every case carries a `weight`: `light` (minutes, cents) or `heavy` (E1, about 20 minutes
+and $0.50 a row). promptfoo's metadata filter can't negate, so the tag is positive on
+both sides: `EVALS_FILTER=weight=light` runs everything except the heavy cases.
 
 ## Isolation
 
@@ -115,6 +120,7 @@ would turn every in-flight case into an isolation error.
 draiver test evals --only                       # the whole suite, 5 repeats
 EVALS_REPEAT=1 draiver test evals --only        # quick look
 EVALS_FILTER=kind=knowledge draiver test evals --only
+EVALS_FILTER=weight=light draiver test evals --only   # everything but E1
 EVALS_FILTER=ticket=drv-059 draiver test evals --only
 sh evals/run.sh                                 # the same, without draiver
 ```
@@ -122,6 +128,10 @@ sh evals/run.sh                                 # the same, without draiver
 Other knobs: `EVALS_MODEL` (agent model), `EVALS_GRADER_MODEL` (default `haiku`),
 `EVALS_MAX_BUDGET_USD` (per-case spend cap), `EVALS_E1_UNIT_CMD` (default
 `go test ./...`) and `EVALS_KEEP=1` (keep the clones for debugging).
+
+`run.sh` sets `PROMPTFOO_SCHEDULER_QUEUE_TIMEOUT_MS=0`. promptfoo's default drops any
+request that waits 300s in its queue, so with E1 holding both concurrency slots, every
+task row behind it errored with `timed out after 300000ms in queue` (drv-059).
 
 A full run takes a long time and runs in the foreground: `--only` has no `--detach`.
 From an agent session, start it as a background command and wait for the notification.
@@ -132,11 +142,19 @@ To see whether a change (usually a docs ticket) helped, hold the **questions** f
 and vary only the **context**:
 
 1. Check out the change's commit, with its version of `evals/`, and run
-   `draiver test evals --only`. Keep `evals/_artifacts/summary.md`.
-2. In the same checkout, run `EVALS_REF=<commit>^ draiver test evals --only`. The same
+   `EVALS_FILTER=weight=light draiver test evals --only`. Keep
+   `evals/_artifacts/summary.md`.
+2. In the same checkout, run the same command with `EVALS_REF=<commit>^`. The same
    suite now runs against the parent's agent context. Keep that `summary.md` too.
 3. Compare pass rates per case, along with turns and tokens. Log both tables on the
    parent ticket (drv-055).
+
+**Leave E1 out of a per-ticket comparison** (that's why steps 1 and 2 filter on
+`weight=light`). A before/after with E1 costs two extra hours, and for a docs change E1
+only sees the extra context tokens. Run E1 in the periodic full baseline, or when a
+ticket changes BDD or test ergonomics. To see the context cost itself, run a trivial
+`claude -p "Reply with just: ok" --output-format json` in a clone of each commit and
+compare `usage`. The result is deterministic, so one run per side is enough.
 
 Running the suite *from* the parent's checkout also works once the parent has an
 `evals/` tree, but then a ticket that adds its own knowledge check would be compared
