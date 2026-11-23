@@ -143,9 +143,14 @@ Running the suite *from* the parent's checkout also works once the parent has an
 with a different question set. Use `EVALS_FILTER=ticket=<id>` to rerun just the cases a
 ticket targets. With 5 repeats, a swing of one or two passes is noise.
 
-**Rough cost** (Claude subscription or API, measured on the drv-065 baseline): a
-knowledge row costs about $0.05–0.10 and 15–30 s. An E3 row costs about $0.15 and
-under a minute. An E1 row is the expensive one: an agent writing a scenario, a focused
-run with Playwright and a full `go test ./...` take roughly 15–25 minutes. A full
-default run (6 knowledge + 2 task cases × 5 repeats = 40 rows) is dominated by E1. See
-the baseline logged on drv-055 for measured totals.
+**Rough cost**, measured on the drv-065 baseline (main @ `68d0203`, default model,
+concurrency 2): a full default run (6 knowledge + 2 task cases × 5 repeats = 40 rows)
+takes about **1 hour** and about **$7.40** of agent spend (4.6M tokens, mostly cache
+reads).
+- A knowledge row costs $0.03–0.22 and well under a minute.
+- An E3 row costs about $0.14.
+- An E1 row is the expensive one, at about $0.53 and 15–25 minutes: an agent writes a
+  scenario, then a focused run with Playwright and a full `go test ./...` follow.
+
+E1 dominates both wall-clock time and cost. Use `EVALS_FILTER=kind=knowledge` for a
+quick, cheap pass. The full per-case table is logged on drv-055.
