@@ -59,3 +59,13 @@ Your branch was cut from `main`, and `main` keeps moving while you work.
   "regression" gotcha, and don't `git checkout main -- <file>`, without that check.
 - **Feedback that goes beyond the spec** — a new control, another ticket's concern —
   `draiver escalate` to confirm scope before you write any code for it.
+
+## Reading the repo cheaply
+
+- **Don't read `CHANGELOG.md`**: it is generated (thousands of lines). For house style,
+  read two recent `changelog.d/*.md` fragments.
+- For files over about 500 lines (e.g. `internal/web/web.go`), grep for the symbol, then
+  Read with offset/limit rather than reading the whole file.
+- `.rgignore`/`.ignore` keep minified assets (`internal/web/static/*.min.js`) and
+  `features/_artifacts/` out of `rg`/Grep results; with plain `grep -r`, pass
+  `--exclude='*.min.js' --exclude-dir=_artifacts`.

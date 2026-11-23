@@ -66,6 +66,11 @@ writes `changelog.d/X.Y.Z/_release.md` (`date:` frontmatter), and regenerates. T
 topmost released section is what `draiver --version` reports (drv-006), so commit the
 regenerated `CHANGELOG.md` with the release.
 
+**Where the version comes from.** There is no version constant: the binary embeds
+`CHANGELOG.md` (`version.go`) and `version.FromChangelog` (`internal/version`) returns
+its topmost `## [x.y.z]` header, skipping `## [Unreleased]`. A ticket that only adds a
+fragment therefore does not change `draiver --version`; only a `release` does.
+
 ## Layout and ordering
 
 ```
