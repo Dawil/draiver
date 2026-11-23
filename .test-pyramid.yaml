@@ -142,7 +142,9 @@ environments:
   # require the `claude` CLI and credentials, so a box without them BLOCKS the rung
   # instead of reporting a false green. See docs/evals.md.
   - name: agent
-    up: npm install --prefix evals --no-audit --no-fund --silent && npm install --prefix features/screenshots --no-audit --no-fund --silent
+    # `npm ls` first: a satisfied install of the 1.8 GB tree is ~0.3s to verify but
+    # ~3 min to re-run.
+    up: (npm ls --prefix evals --depth=0 >/dev/null 2>&1 || npm install --prefix evals --no-audit --no-fund --silent) && npm install --prefix features/screenshots --no-audit --no-fund --silent
     healthchecks:
       - name: promptfoo
         script: test -x evals/node_modules/.bin/promptfoo
