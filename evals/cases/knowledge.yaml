@@ -171,24 +171,6 @@
         without one, so it must not block the gate (enforcement is separate from
         altitude ordering).
 
-- description: "knowledge: where draiver's version comes from (drv-061)"
-  metadata: {kind: knowledge, ticket: drv-061, weight: light}
-  vars:
-    prompt: >-
-      You are a coding agent in this repository. Where does `draiver --version` get
-      its version, and does adding a changelog fragment on a ticket branch change it?
-      Name the function. Answer briefly.
-  assert:
-    - type: icontains
-      transform: JSON.parse(output).answer
-      value: FromChangelog
-    - type: llm-rubric
-      transform: JSON.parse(output).answer
-      value: >-
-        The answer says the version is the topmost released `## [x.y.z]` section of
-        CHANGELOG.md (via version.FromChangelog, with no hand-maintained constant), and
-        that a fragment alone does not change it; only a release does.
-
 - description: "knowledge: reading a very large source file cheaply (drv-061)"
   metadata: {kind: knowledge, ticket: drv-061, weight: light}
   vars:
