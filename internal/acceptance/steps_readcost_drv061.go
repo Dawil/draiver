@@ -73,6 +73,7 @@ func drv061ThenGolden(w *World, sr *StepRun) error {
 	if !bytes.Equal(got, want) {
 		return fmt.Errorf("%s no longer decodes to %s (regenerate with UPDATE_GOLDEN=1 go test ./internal/pyramid only if the config change is intended)", pyramid.FileName, drv061Golden)
 	}
+	attachText(sr, "pyramid-semantics", fmt.Sprintf("%s (%d bytes) decodes byte-identically to %s:\n\n%s", pyramid.FileName, len(data), drv061Golden, got))
 	return nil
 }
 
@@ -136,6 +137,7 @@ func drv061ThenIgnores(pattern string) StepFunc {
 			if !found {
 				return fmt.Errorf("%s does not list %q", f, pattern)
 			}
+			attachText(sr, f, string(data))
 		}
 		return nil
 	}
@@ -146,6 +148,7 @@ func drv061ThenIgnores(pattern string) StepFunc {
 // ignore-file assertions above still hold the line.
 func drv061ThenRipgrep(w *World, sr *StepRun) error {
 	if _, err := exec.LookPath("rg"); err != nil {
+		attachText(sr, "ripgrep", "rg not installed on this box; the ignore-file assertions cover it\n")
 		return nil
 	}
 	root, _ := w.get("drv061root").(string)
@@ -157,6 +160,7 @@ func drv061ThenRipgrep(w *World, sr *StepRun) error {
 			return fmt.Errorf("rg matched %s despite .rgignore", f)
 		}
 	}
+	attachText(sr, "ripgrep", "$ rg -l --fixed-strings 'confirm('\n"+string(out))
 	return nil
 }
 
@@ -171,6 +175,7 @@ func drv061ThenContains(rel string, needles ...string) StepFunc {
 				return fmt.Errorf("%s does not contain %q", rel, n)
 			}
 		}
+		attachText(sr, rel, fmt.Sprintf("%s contains: %q\n", rel, needles))
 		return nil
 	}
 }
