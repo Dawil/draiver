@@ -3,7 +3,7 @@
 # lib/tasks.cjs; the single assertion reports every check's verdict.
 
 - description: "task E1: add a BDD scenario for a small web change"
-  metadata: {kind: task, ticket: drv-060}
+  metadata: {kind: task, ticket: drv-060, weight: heavy}
   vars:
     setup: e1
     check: e1
@@ -24,7 +24,7 @@
       value: file://lib/assert.cjs:allChecks
 
 - description: "task E3: main has moved — prepare only the branch's own change"
-  metadata: {kind: task, ticket: drv-059}
+  metadata: {kind: task, ticket: drv-059, weight: light}
   vars:
     setup: e3
     check: e3
