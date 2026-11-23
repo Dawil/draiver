@@ -248,24 +248,6 @@ func Notice(n int) string {
 	return fmt.Sprintf("📬 %d unread %s from the human since this session started — run `draiver messages` to read.", n, noun)
 }
 
-// headlineCap bounds a headline in the one-line warning and the pushed turn.
-const headlineCap = 80
-
-// headline is the event's first non-empty line, length-capped.
-func headline(e event.Event) string {
-	h := ""
-	for _, ln := range strings.Split(e.Body, "\n") {
-		if ln = strings.TrimSpace(ln); ln != "" {
-			h = ln
-			break
-		}
-	}
-	if r := []rune(h); len(r) > headlineCap {
-		h = string(r[:headlineCap-1]) + "…"
-	}
-	return h
-}
-
 // tag renders `#15 supersede (retires #14)`.
 func tag(e event.Event) string {
 	t := fmt.Sprintf("#%d %s", e.Seq, Kind(e))
@@ -279,23 +261,15 @@ func tag(e event.Event) string {
 	return t
 }
 
-// label renders `#15 supersede (retires #14) — headline`.
-func label(e event.Event) string {
-	var b strings.Builder
-	b.WriteString(tag(e))
-	if h := headline(e); h != "" {
-		b.WriteString(" — " + h)
-	}
-	return b.String()
-}
-
 // warnListCap bounds how many events the write warning names inline.
 const warnListCap = 3
 
 // Warning is the line `draiver log` and `draiver review` print from inside a
-// session when it has unread human events (drvctl-062). Unlike the count-only
-// Notice it names them — a write is exactly when acting on a stale view does harm
-// (drv-044: a decision logged after the human had already retracted its premise).
+// session, under the count-only Notice, when it has unread human events
+// (drvctl-062). It names each by seq and kind — `#15 supersede (retires #14)` — so
+// a write on a stale view is caught (drv-044: a decision logged after the human had
+// already retracted its premise). Like Notice it carries no content: the agent
+// pulls that with `draiver messages`, and the pushed turn quotes it.
 func Warning(unread []event.Event) string {
 	n := len(unread)
 	noun := "events"
@@ -308,7 +282,7 @@ func Warning(unread []event.Event) string {
 			parts = append(parts, fmt.Sprintf("+%d more", n-warnListCap))
 			break
 		}
-		parts = append(parts, label(e))
+		parts = append(parts, tag(e))
 	}
 	return fmt.Sprintf("⚠️ %d new human %s since your last read: %s — run `draiver messages` to read.", n, noun, strings.Join(parts, "; "))
 }
@@ -333,7 +307,7 @@ func PushText(ticket string, evs []event.Event) string {
 	fmt.Fprintf(&b, "📬 The human just appended %s to your attempt's log while you were working. Read before your next step — it may change or retract what you are doing:\n", noun)
 	for i, e := range evs {
 		if i >= pushListCap {
-			fmt.Fprintf(&b, "\n- %s\n", label(e))
+			fmt.Fprintf(&b, "\n- %s\n", tag(e))
 			continue
 		}
 		body := strings.TrimSpace(e.Body)

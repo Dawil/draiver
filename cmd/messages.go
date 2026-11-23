@@ -150,19 +150,18 @@ func sessionUnread() (sess agentmsg.Session, unread []event.Event, ok bool) {
 // wrong (a decision logged after the human had retracted its premise).
 var warnCommands = map[string]bool{"log": true, "review": true}
 
-// printUnreadNotice writes the unread notice to stderr when the live session has
-// unread human events: the itemised Warning for the writing verbs, the count-only
-// Notice for the rest. Silent otherwise, and on any error.
+// printUnreadNotice writes the count-only notice to stderr when the live session
+// has unread human events, followed — for the writing verbs — by the Warning line
+// naming them by seq and kind. Silent otherwise, and on any error.
 func printUnreadNotice(w io.Writer, verb string) {
 	_, unread, ok := sessionUnread()
 	if !ok || len(unread) == 0 {
 		return
 	}
+	fmt.Fprintln(w, agentmsg.Notice(len(unread)))
 	if warnCommands[verb] {
 		fmt.Fprintln(w, agentmsg.Warning(unread))
-		return
 	}
-	fmt.Fprintln(w, agentmsg.Notice(len(unread)))
 }
 
 func init() {

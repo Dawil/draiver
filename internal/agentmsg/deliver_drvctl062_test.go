@@ -71,13 +71,13 @@ func TestSeenBaseline(t *testing.T) {
 func TestWarningNamesEventsAndCaps(t *testing.T) {
 	evs := After(drv044Log(), 0)
 	w := Warning(evs)
-	for _, want := range []string{"3 new human events since your last read", "#12 decision — Add a CSV button", "#14 supersede (retires #12) — ignore #12", "draiver messages"} {
+	for _, want := range []string{"3 new human events since your last read: #12 decision; #14 supersede (retires #12); #15 resolution", "draiver messages"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("warning missing %q: %s", want, w)
 		}
 	}
-	if strings.Contains(w, "long detail") {
-		t.Errorf("warning must carry headlines only: %s", w)
+	if strings.Contains(w, "CSV") || strings.Contains(w, "wrong ticket") {
+		t.Errorf("warning must carry no content: %s", w)
 	}
 	many := append(append([]event.Event{}, evs...), evs...)
 	if w := Warning(many); !strings.Contains(w, "+3 more") {
