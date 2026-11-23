@@ -137,6 +137,21 @@ environments:
       - name: forgejo-reachable
         script: git ls-remote --heads forgejo >/dev/null 2>&1
 
+  # agent (drv-065) is where the advisory `evals` rung runs: `up` installs the pinned
+  # promptfoo (and the Playwright package E1's scenarios shoot with); the healthchecks
+  # require the `claude` CLI and credentials, so a box without them BLOCKS the rung
+  # instead of reporting a false green. See docs/evals.md.
+  - name: agent
+    up: npm install --prefix evals --no-audit --no-fund --silent && npm install --prefix features/screenshots --no-audit --no-fund --silent
+    healthchecks:
+      - name: promptfoo
+        script: test -x evals/node_modules/.bin/promptfoo
+      - name: claude-cli
+        script: command -v claude >/dev/null
+      - name: claude-credentials
+        script: >-
+          test -n "${ANTHROPIC_API_KEY:-}" || claude auth status 2>/dev/null | grep -q '"loggedIn": true'
+
 levels:
   # changelog (drv-052) is the base rung — the cheapest check, so it fails fast before
   # the Go suite. It requires changelog.d/<ticket-id>.md for the attempt's ticket (draiver
@@ -169,6 +184,16 @@ levels:
     # cleanly without one, so gating review on it would be a flakiness policy
     # smuggled into altitude ordering — exactly what `required` decouples.
     required: false
+  # evals (drv-065) tests the repo's AGENT CONTEXT (AGENTS.md, docs, test ergonomics)
+  # with a headless agent in throwaway clones. Advisory and top of the ladder, so a bare
+  # `draiver test` never runs it; run it with `draiver test evals --only`. The pass-rate
+  # threshold lives in evals/promptfooconfig.yaml. See docs/evals.md.
+  - name: evals
+    run: sh evals/run.sh
+    environment: agent
+    required: false
+    artifacts:
+      - evals/_artifacts
 
 # promotions (drv-043) are a SEPARATE, non-gating axis from the testing-V levels
 # above: `draiver test` never runs them, and they never gate review or done. draiver

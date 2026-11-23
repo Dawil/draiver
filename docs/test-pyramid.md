@@ -323,6 +323,13 @@ draiver's own gate requires `changelog` + `unit` + `acceptance` and treats `inte
 advisory — altitude keeps it on top of the V, enforcement makes it non-blocking,
 without corrupting the ordering.
 
+It also crowns the ladder with an **advisory `evals` rung** (drv-065). It tests the repo's
+*agent context*: a headless agent works in throwaway clones, and the rung is bound to
+an `agent` environment that blocks without the `claude` CLI. A bare `draiver test` never
+reaches it; run it with `draiver test evals --only`. draiver has no eval-specific
+interface: the rung is just `run:` + `environment:` + `required: false` + `artifacts:`.
+See [`evals.md`](./evals.md), which also covers how to measure a docs change with it.
+
 **Deferred (built only on demand).** *Per-environment opt-in enforcement* ("advisory
 in the file, but the CI box that *can* run it treats it as required") would be an
 explicit **promote-only** operator setting (e.g. `additional_required: [e2e]`) that

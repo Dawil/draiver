@@ -1,0 +1,114 @@
+# Knowledge checks (drv-065): a question this repo's agent context should answer, run
+# read-only in a throwaway clone. Assertions are deterministic where possible; an
+# llm-rubric only where the rule is a judgement ("does not recommend X").
+#
+# Each docs ticket adds or adjusts its own case(s) here — tag it with `ticket:` so a
+# before/after comparison can be filtered with EVALS_FILTER=ticket=<id>.
+#
+# Every assertion reads the agent's answer out of the provider's JSON verdict.
+
+- description: "knowledge: run the test pyramid without blocking (drv-058)"
+  metadata: {kind: knowledge, ticket: drv-058}
+  vars:
+    prompt: >-
+      You are a coding agent working a ticket in this repository. The full test
+      pyramid takes several minutes. Using this repository's own docs and agent
+      instructions, how should you run the full climb without blocking your session
+      or hitting a tool timeout, and what should you avoid doing while it runs? Name
+      the exact commands. Answer briefly.
+  assert:
+    - type: icontains-all
+      transform: JSON.parse(output).answer
+      value: ["--detach", "park"]
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer tells the agent to launch the climb detached and then park (for
+        example `draiver test --detach && draiver park <ticket>`), and it does NOT
+        recommend polling with sleep loops; warning against sleep-polling is good.
+
+- description: "knowledge: what every BDD scenario must attach (drv-058)"
+  metadata: {kind: knowledge, ticket: drv-058}
+  vars:
+    prompt: >-
+      You are a coding agent adding a BDD acceptance scenario in this repository.
+      According to this repository's docs and tests, what must every scenario attach,
+      and which helpers do you use for UI versus non-UI evidence? Answer briefly.
+  assert:
+    - type: icontains-all
+      transform: JSON.parse(output).answer
+      value: ["attachText", "shoot"]
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says EVERY scenario must attach at least one artefact (not only
+        user-visible ones): a screenshot via shoot(...) for UI, or attachText(...) for
+        non-UI evidence.
+
+- description: "knowledge: branch diff when main has moved — three dots (drv-059)"
+  metadata: {kind: knowledge, ticket: drv-059}
+  vars:
+    prompt: >-
+      You are a coding agent on a ticket branch in this repository, and main has gained
+      new commits since your branch was cut. How do you see only what YOUR branch
+      changed versus main? Give the exact git commands. Answer briefly.
+  assert:
+    - type: regex
+      transform: JSON.parse(output).answer
+      value: "main\\.\\.\\.(HEAD|@)|merge-base"
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer compares against the merge base (a three-dot `git diff main...HEAD`
+        or an explicit `git merge-base`) and does not recommend a two-dot
+        `git diff main..HEAD` as the way to see the branch's own changes.
+
+- description: "knowledge: review feedback outside the spec (drv-059)"
+  metadata: {kind: knowledge, ticket: drv-059}
+  vars:
+    prompt: >-
+      You are a coding agent working a draiver ticket in this repository. A reviewer's
+      feedback asks for a new control and a change that belong to a different concern
+      than your ticket's spec. What should you do before writing any code for it?
+      Answer briefly.
+  assert:
+    - type: icontains
+      transform: JSON.parse(output).answer
+      value: escalate
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says to confirm scope with the human (via `draiver escalate`)
+        before implementing feedback that goes beyond the spec, rather than just
+        implementing it.
+
+- description: "knowledge: where the acceptance helpers live and how to register a step (drv-060)"
+  metadata: {kind: knowledge, ticket: drv-060}
+  vars:
+    prompt: >-
+      You are a coding agent about to add a BDD step definition in this repository.
+      Where do the acceptance step definitions and their shared helpers live, and how
+      is a new step registered so the runner finds it? Name files and functions.
+      Answer briefly.
+  assert:
+    - type: icontains-all
+      transform: JSON.parse(output).answer
+      value: ["internal/acceptance", "registry", "init"]
+
+- description: "knowledge: changelog style without reading CHANGELOG.md (drv-061)"
+  metadata: {kind: knowledge, ticket: drv-061}
+  vars:
+    prompt: >-
+      You are a coding agent who needs to write this ticket's changelog entry in this
+      repository, in the house style. Where do you write it, and where should you look
+      to learn the style? Answer briefly.
+  assert:
+    - type: icontains
+      transform: JSON.parse(output).answer
+      value: changelog.d/
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer says to write a changelog.d/<ticket-id>.md fragment and to learn the
+        style from changelog.d (its README or recent fragments), and does NOT tell the
+        agent to read or edit the generated CHANGELOG.md.

@@ -1,0 +1,41 @@
+# Task checks (drv-065): a small task in a throwaway checkout, then deterministic checks
+# on the result (git state, files, a test command). Setup and checks live in
+# lib/tasks.cjs; the single assertion reports every check's verdict.
+
+- description: "task E1: add a BDD scenario for a small web change"
+  metadata: {kind: task, ticket: drv-060}
+  vars:
+    setup: e1
+    check: e1
+    tools: write
+    branch: draiver/evl-001/0001
+    timeout_s: 2400
+    prompt: >-
+      You are working ticket evl-001 in this repository. The web change is already
+      committed on your branch: the board page's top bar now has a "Ledgers →" link
+      (data-testid="board-ledgers-link") that opens the ledgers view (/?view=ledgers).
+      Your task: add a BDD acceptance scenario for this change, tagged @evl-001,
+      following this repository's conventions, and make sure it passes. Do not change
+      the web change itself and do not push. You need not write a changelog fragment
+      or touch the review environment. Leave your work in the working tree (committing
+      is optional), then reply with a one-paragraph summary.
+  assert:
+    - type: javascript
+      value: file://lib/assert.cjs:allChecks
+
+- description: "task E3: main has moved — prepare only the branch's own change"
+  metadata: {kind: task, ticket: drv-059}
+  vars:
+    setup: e3
+    check: e3
+    tools: write
+    timeout_s: 900
+    prompt: >-
+      You are on the branch draiver/evl-003/0001 in this repository, cut from main for
+      ticket evl-003; main has gained other commits since. Summarise what this branch
+      changes and prepare it for review: write a short pull-request description that
+      lists every file this branch changes. Do not push. Give the pull-request
+      description as your final answer.
+  assert:
+    - type: javascript
+      value: file://lib/assert.cjs:allChecks
