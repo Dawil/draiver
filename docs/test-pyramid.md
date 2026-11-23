@@ -644,6 +644,107 @@ are unchanged — a `race`/tournament cost lever); **flaky-rung** detection (a r
 whose verdict flips across re-runs is a watchdog signal, not a clean red); feeding
 recurring harness faults back into the spec template (the flywheel).
 
+## This repo's pyramid
+
+draiver dogfoods its own pyramid (drv-010, dogfooding drv-009). The root
+`.test-pyramid.yaml` keeps only one-line comments; the reasoning behind each entry
+lives here (moved by drv-061 so that reading the config is cheap). Its semantics are
+pinned by `TestRepoPyramidSemantics` (`internal/pyramid/repo_pyramid_test.go`): an
+intended config change must regenerate the golden with
+`UPDATE_GOLDEN=1 go test ./internal/pyramid -run TestRepoPyramidSemantics`.
+
+### Levels: altitude vs enforcement
+
+The `levels:` list order **is** the pyramid: intrinsic altitude on the testing V
+(changelog < unit < acceptance < integration < evals), and only that. `required`
+(drv-025) is orthogonal: per-rung enforcement, driven by flakiness, environment and
+confidence rather than altitude. A rung defaults to `required: true` (it gates review);
+`required: false` makes it advisory — still run when it lies in the climb path, still
+reported, but a red result (a real failure or an unready env) never blocks the review
+gate and never halts the climb. A required rung may legitimately sit above an advisory
+one.
+
+The Review gate (drv-009) folds the whole *required set*: every required rung must be
+green-at-HEAD before a claim is accepted. Here that is **changelog + unit +
+acceptance**. Bare `draiver test` climbs to `acceptance`, the highest required rung, and
+does not run integration or evals.
+
+| Rung | What it runs | Enforcement |
+| --- | --- | --- |
+| `changelog` | drv-052: `go run ./cmd/changelog check`. Requires `changelog.d/<ticket-id>.md` for the attempt's ticket (draiver exports `$DRAIVER_TICKET` to every rung; a hand run falls back to the `draiver/<ticket>/<attempt>` branch) and validates **every** fragment, so a malformed one can't break the generator later. The cheapest check, so it is the base rung and fails fast before the Go suite. The policy is this repo's: draiver itself knows nothing about changelogs. Format: `changelog.d/README.md`. | required |
+| `unit` | `go test ./...` — the fast, container-free suite, in the ambient context. | required |
+| `acceptance` | drv-019's BDD rung: the Gherkin under `features/` via the runner-agnostic Go runner (`internal/acceptance`), which emits standard cucumber-JSON plus PNG screenshots. `cucumber_json` marks it a BDD rung (drv-016) so draiver captures the report; `artifacts` captures the screenshots beside it (drv-017). Binds the `bdd` environment; it is the rung the board's "rerun" regenerates. | required |
+| `integration` | The Testcontainers suite (a real Forgejo forge + a real served webui) behind the `integration` build tag. It needs a container runtime and already skips cleanly when none is present, so gating review on it would smuggle a flakiness policy into altitude ordering — exactly what `required` decouples. Run it with `draiver test integration` (an explicit RUNG climbs into advisory rungs) or `go test -tags=integration ./internal/e2e/integration/...`. See `docs/integration-testing.md`. | advisory |
+| `evals` | drv-065: tests the repo's *agent context* (AGENTS.md, docs, test ergonomics) with a headless agent in throwaway clones. Top of the ladder, so bare `draiver test` never runs it; run it with `draiver test evals --only`. The pass-rate threshold lives in `evals/promptfooconfig.yaml`. See `docs/evals.md`. | advisory |
+
+### Environments
+
+Environments (drv-012) factor *where* a rung runs out of *what* it runs. A rung names
+one with `environment:`; unset means the implicit ambient context (the unit rung). A red
+healthcheck blocks the rung (dependency not ready), a failed `up` is an infra fault
+(escalate), a failed `run` is a code fault.
+
+- **`local`** — the integration rung's env and the first promotion's. `up`/`down` are
+  omitted because the Testcontainers suite stands up and tears down its own containers.
+  The healthcheck (`go version`) is a genuine, always-green precondition, so dogfooding
+  drv-012 did **not** change the gate: the suite still skips cleanly without a container
+  runtime, and that clean skip was deliberately not turned into a block. The realistic
+  production pattern — a `container-runtime` healthcheck (`docker info || podman info`)
+  that blocks the rung on a box with no runtime instead of false-greening — is
+  described under [Environments](#environments-drv-012-named-updownhealthcheck-contexts).
+- **`bdd`** — required by the acceptance rung (drv-019). `up` installs the Playwright
+  npm package (browsers come from the shared `$PLAYWRIGHT_BROWSERS_PATH` cache) and
+  prepares `features/_artifacts/screenshots`. The healthchecks prove every dependency —
+  the Go toolchain, a resolvable `playwright`, a chromium binary on disk — so a box
+  without a browser **blocks** the rung and the board rerun ("pass the ball") rather than
+  emitting bogus or empty screenshots (drv-012, decision #23).
+- **`review`** — this repo's qualifying review environment (drv-020): `up` + `down` + a
+  real healthcheck make it review-ready, so the control plane can guarantee and verify
+  teardown. It is bound to no level, so it never runs during `draiver test`; it is
+  launched on demand from an attempt page in Review. `review-env/up.sh` builds and runs
+  the **real** webui from the reviewed commit (resolution #51) on the injected
+  `DRAIVER_REVIEW_PORT`. So it never clashes with the operator's own draiver, it points
+  `DRAIVER_DATA`/`DRAIVER_CONFIG` at a throwaway `.review-env-run/` inside the worktree
+  and seeds dummy tickets across the board states. `ENV_NAME` — a repo-declared
+  parameterisation var (resolution #45), editable in the launch form, defaulting to
+  `review` — titles those tickets, so the value visibly parameterises the instance.
+  `down.sh` stops the webui; the healthcheck probes the port.
+- **`review-cli`** — a second review environment (drv-032 #12/#22) for CLI changes the
+  webui env can't exercise: a ttyd web terminal in a sandboxed docker container over the
+  reviewed binary and a pre-seeded board. drv-034 offers every review-ready env on the
+  attempt page side by side; the per-repo `reviewEnvironment` setting only highlights a
+  default (and drives the loud-misconfiguration note if it names a missing env).
+  `up.sh` binds `DRAIVER_REVIEW_PORT` and namespaces its container/image by
+  `DRAIVER_REVIEW_INSTANCE`, so concurrent review envs never collide. See
+  `review-env/ttyd/README.md`.
+- **`forgejo-main`** — the env the second promotion targets (drv-043 decision #44): the
+  trunk changes are promoted into. No `up`/`down` (a merge check stands nothing up) and
+  no `url`. Its healthcheck requires the `forgejo` remote to be configured and
+  reachable, so a box without it **blocks** the promotion instead of false-reporting
+  "not merged".
+- **`agent`** — where the advisory `evals` rung runs (drv-065). `up` installs the pinned
+  promptfoo and the Playwright package; `npm ls` runs first because verifying a
+  satisfied 1.8 GB install takes ~0.3s and re-running it ~3 min. The healthchecks
+  require the `claude` CLI and credentials, so a box without them blocks the rung rather
+  than reporting a false green. See `docs/evals.md`.
+
+### Promotions
+
+Promotions (drv-043) are a separate, non-gating axis: `draiver test` never runs them and
+they never gate review or done. draiver does not *perform* a promotion; it *verifies*
+one by running the repo's `qa` over an environment (exit 0 == promoted-and-healthy). A
+promotion is keyed by `environment`, which must name an entry in `environments:`.
+`base` is descriptive in v1 (recorded, shown in the UI, exported as
+`$DRAIVER_PROMOTE_BASE`); draiver does not diff against it.
+
+- **`local`** — dogfoods the format end to end. Its `qa` is trivially green: it asserts
+  the `DRAIVER_PROMOTE_*` contract draiver injects is present, so
+  `draiver promote local --log` records a real promotion-result with no external env.
+- **`forgejo-main`** — the real-world "is this live yet?" check a reviewer asks before
+  ratifying. The `qa` fetches `$DRAIVER_PROMOTE_BASE` from forgejo and asks whether
+  HEAD (the reviewed commit) is an ancestor of it: red until the PR lands, then green.
+  draiver still neither merges nor diffs; the repo's `qa` does.
+
 ---
 
 # Deferred design (beyond v1)

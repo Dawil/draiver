@@ -13,3 +13,13 @@ When fulfilling a `drv-*` / `drvctl-*` / `drvweb-*` ticket:
   when there is genuinely nothing to tell. **Don't edit `CHANGELOG.md` directly**: it is
   generated from the fragments (`go run ./cmd/changelog generate`), and the required
   `changelog` test rung fails without your fragment.
+
+Reading the repo cheaply:
+
+- **Don't read `CHANGELOG.md`**: it is generated (thousands of lines). For house style,
+  read two recent `changelog.d/*.md` fragments.
+- For files over about 500 lines (e.g. `internal/web/web.go`), grep for the symbol, then
+  Read with offset/limit rather than reading the whole file.
+- `.rgignore`/`.ignore` keep minified assets (`internal/web/static/*.min.js`) and
+  `features/_artifacts/` out of `rg`/Grep results; with plain `grep -r`, pass
+  `--exclude='*.min.js' --exclude-dir=_artifacts`.
