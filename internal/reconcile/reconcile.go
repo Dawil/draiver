@@ -54,6 +54,7 @@ import (
 	"time"
 
 	"github.com/Dawil/draiver/internal/agent"
+	"github.com/Dawil/draiver/internal/agentmsg"
 	"github.com/Dawil/draiver/internal/attempt"
 	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/event"
@@ -263,6 +264,13 @@ type run struct {
 	// completeGate is the session's completion gate, kept on the run so the tick can
 	// fire its background-cap timer (drvctl-060). Nil for an adopted session.
 	completeGate *completion.Gate
+
+	// pushed is the push cursor (drvctl-062): the highest log seq whose deliverable
+	// human events (agentmsg.IsDeliverable) have been injected into this session as a
+	// turn. Seeded with the session-start watermark; only the tick goroutine touches
+	// it (pushHumanEvents). In-memory by design — a daemon restart re-admits the
+	// attempt with a fresh watermark, whose resume note carries what was missed.
+	pushed int
 }
 
 // New validates opt, applies defaults, and returns a Reconciler with an empty run
@@ -464,6 +472,11 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	// session idling on hung background tasks emits no frames, so fire it from the
 	// tick (drvctl-060).
 	r.checkBackgroundCaps(ctx, current)
+
+	// Push human events to live sessions (drvctl-062): a decision, resolution,
+	// supersede or message the human appended since the session's last push reaches
+	// it as a turn instead of waiting for it to happen to run a draiver command.
+	r.pushHumanEvents(ctx, current)
 
 	// Retire: running but no longer desired. The attempt's current state decides
 	// whether the worktree is a candidate for reclamation (terminal) or kept warm
@@ -721,7 +734,7 @@ func (r *Reconciler) admit(ctx context.Context, a project.Attempt) error {
 
 	stream := w.handle.Stream()
 	ictx, cancel := context.WithCancel(ctx)
-	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo, completeGate: w.completeGate}
+	rn := &run{handle: w.handle, sess: w.sess, cancel: cancel, done: make(chan struct{}), repo: w.repo, completeGate: w.completeGate, pushed: w.sessionSeq}
 
 	r.mu.Lock()
 	r.runs[key] = rn
@@ -1398,5 +1411,43 @@ func (r *Reconciler) checkBackgroundCaps(ctx context.Context, keys []worktree.Ke
 		if out == completion.Escalated {
 			r.opt.Logf("reconcile: background cap %s/%s: background tasks outlived the cap — escalated and halted", key.Ticket, key.Attempt)
 		}
+	}
+}
+
+// pushHumanEvents injects, into each live session this daemon owns, the deliverable
+// human events (agentmsg.IsDeliverable) appended above its push cursor, as one short
+// turn quoting their text (drvctl-062). Handle.Prompt writes a user turn the agent
+// queues for its next turn boundary, so a mid-turn agent sees it before it carries
+// on, and an idle one is woken by it. The push does not mark anything read: the
+// agent acknowledges with `draiver messages` (or `review --ack`), and review stays
+// soft-stopped until it does. Agent-authored events are never echoed back. A failed
+// prompt leaves the cursor where it was, so the next tick retries.
+func (r *Reconciler) pushHumanEvents(ctx context.Context, keys []worktree.Key) {
+	for _, key := range keys {
+		r.mu.Lock()
+		rn := r.runs[key]
+		r.mu.Unlock()
+		if rn == nil || rn.adopted || rn.handle == nil {
+			continue
+		}
+		select {
+		case <-rn.done:
+			continue // spent: the session process is gone, nothing to prompt
+		default:
+		}
+		evs, err := ticketlog.Read(r.opt.Root, key.Ticket, key.Attempt)
+		if err != nil {
+			r.opt.Logf("reconcile: push human events %s/%s: read log: %v", key.Ticket, key.Attempt, err)
+			continue
+		}
+		pending := agentmsg.After(evs, rn.pushed)
+		if len(pending) == 0 {
+			continue
+		}
+		if err := rn.handle.Prompt(ctx, agentmsg.PushText(key.Ticket, pending)); err != nil {
+			r.opt.Logf("reconcile: push human events %s/%s: %v", key.Ticket, key.Attempt, err)
+			continue
+		}
+		rn.pushed = pending[len(pending)-1].Seq
 	}
 }

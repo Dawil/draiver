@@ -73,6 +73,11 @@ type wired struct {
 	// discarded — i.e. a fresh spawn — so a resume continues its conversation
 	// without being force-fed a brief (drvctl-016).
 	spawned bool
+
+	// sessionSeq is the log tail at bring-up — the session-start watermark
+	// (drvctl-059), and the seed of the run's push cursor (drvctl-062): events at or
+	// below it reached the session through its brief or resume note.
+	sessionSeq int
 }
 
 // bringUp opens an attempt's session store, binds a manage.Handle, brings the
@@ -244,7 +249,7 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 	completeGate.SetBackgroundCap(r.opt.BackgroundCap)
 	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
 
-	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, completeGate: completeGate, watcher: watcher, repo: repo, spawned: spawned}, nil
+	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, completeGate: completeGate, watcher: watcher, repo: repo, spawned: spawned, sessionSeq: sessionSeq}, nil
 }
 
 // confirmOnline waits for a just-Resumed session to come online — to emit its

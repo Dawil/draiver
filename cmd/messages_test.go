@@ -103,14 +103,17 @@ func TestNoticeOnlyForMessagesSinceSessionStart(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "logged note") {
 		t.Fatalf("command behaviour changed: code=%d out=%q", code, stdout)
 	}
-	if strings.Contains(stdout, "📬") {
+	if strings.Contains(stdout, "human event") {
 		t.Fatalf("notice must go to stderr only, stdout=%q", stdout)
 	}
-	if !strings.Contains(stderr, "📬 1 unread message") || !strings.Contains(stderr, "draiver messages") {
+	if !strings.Contains(stderr, "1 new human event since your last read: #") || !strings.Contains(stderr, "draiver messages") {
 		t.Fatalf("missing notice on stderr: %q", stderr)
 	}
-	if strings.Contains(stderr, "SECRET-CONTENT") {
-		t.Fatalf("notice must be count-only: %q", stderr)
+	// Read-only verbs keep the count-only notice; the writing verbs (log, review)
+	// name the events instead (drvctl-062).
+	_, stderr, _ = runSplit(t, "--data", dir, "status", "PROJ-1")
+	if !strings.Contains(stderr, "📬 1 unread message") || strings.Contains(stderr, "SECRET-CONTENT") {
+		t.Fatalf("read-only notice must be count-only: %q", stderr)
 	}
 }
 
@@ -141,7 +144,7 @@ func TestReviewSoftStoppedByUnread(t *testing.T) {
 	if code != ExitUnreadMessages {
 		t.Fatalf("review exit = %d, want %d; %q", code, ExitUnreadMessages, stderr)
 	}
-	if !strings.Contains(stderr, "📬 1 unread message") || !strings.Contains(stderr, "--ignore-unread") || !strings.Contains(stderr, "review not recorded") {
+	if !strings.Contains(stderr, "1 new human event since your last read") || !strings.Contains(stderr, "--ignore-unread") || !strings.Contains(stderr, "review not recorded") {
 		t.Fatalf("review refusal text: %q", stderr)
 	}
 	after, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
@@ -212,5 +215,44 @@ func TestLogToRejectsUnknownRecipient(t *testing.T) {
 	dir := newTicket(t)
 	if _, code := run(t, "--data", dir, "log", "PROJ-1", "--type", "note", "--to", "bob", "x"); code == 0 {
 		t.Fatal("--to other than agent must be rejected")
+	}
+}
+
+// TestHumanDecisionAndSupersedeCountWithoutMarker (drvctl-062): a human decision
+// or a human supersede is a deliverable event even without `to: agent`; an
+// agent-authored supersede never is.
+func TestHumanDecisionAndSupersedeCountWithoutMarker(t *testing.T) {
+	dir, _ := msgWorld(t)
+	run(t, "--data", dir, "--actor", "agent:x", "log", "PROJ-1", "--type", "decision", "my own decision")
+	_, stderr, _ := runSplit(t, "--data", dir, "status", "PROJ-1")
+	if strings.Contains(stderr, "📬") {
+		t.Fatalf("agent-authored events must not notify: %q", stderr)
+	}
+	run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", "--type", "decision", "Build the export feature")
+	evs, _ := ticketlog.Read(store.Root{Dir: dir}, "PROJ-1", "0001")
+	dec := evs[len(evs)-1].Seq
+	run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", "--type", "note", "--supersedes", strconv.Itoa(dec), "ignore that, it was for another ticket")
+	_, stderr, _ = runSplit(t, "--data", dir, "--actor", "agent:x", "log", "PROJ-1", "--type", "note", "x")
+	want := "#" + strconv.Itoa(dec+1) + " supersede (retires #" + strconv.Itoa(dec) + ") — ignore that"
+	if !strings.Contains(stderr, "2 new human events since your last read") || !strings.Contains(stderr, want) {
+		t.Fatalf("log warning must name the supersede: %q", stderr)
+	}
+}
+
+// TestReviewAckReadsAndClaims (drvctl-062): `review --ack` prints the unread events,
+// marks them read, and records the claim; a second review is not soft-stopped.
+func TestReviewAckReadsAndClaims(t *testing.T) {
+	dir, _ := msgWorld(t)
+	run(t, "--data", dir, "--actor", "human:dave", "log", "PROJ-1", "--type", "decision", "ACK-BODY use sqlite")
+	if _, _, code := runSplit(t, "--data", dir, "--actor", "agent:x", "review", "PROJ-1", "done"); code != ExitUnreadMessages {
+		t.Fatalf("review must refuse first: %d", code)
+	}
+	stdout, _, code := runSplit(t, "--data", dir, "--actor", "agent:x", "review", "PROJ-1", "done", "--ack")
+	if code != 0 || !strings.Contains(stdout, "ACK-BODY use sqlite") || !strings.Contains(stdout, "Acknowledged 1 human event") || !strings.Contains(stdout, "review claimed") {
+		t.Fatalf("--ack must print, mark read and claim: code=%d %q", code, stdout)
+	}
+	_, stderr, _ := runSplit(t, "--data", dir, "status", "PROJ-1")
+	if strings.Contains(stderr, "📬") {
+		t.Fatalf("--ack must clear the notice: %q", stderr)
 	}
 }
