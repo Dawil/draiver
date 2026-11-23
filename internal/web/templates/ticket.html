@@ -104,8 +104,9 @@
       {{/* Spec — the default tab, rendered visible (no hidden attr) so the "more"
            cap JS measures overflow correctly on load. */}}
       <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-spec" data-testid="attempt-tabpanel-spec" aria-labelledby="attempt-tab-spec">
+        {{/* drvweb-031: no in-panel "Spec" heading — the tab button already names the
+             section and the tabpanel is labelled by it (aria-labelledby). */}}
         <section class="spec" data-testid="spec">
-          <h2>Spec</h2>
           <div class="prose" data-testid="spec-prose">{{.SpecHTML}}</div>
           {{/* Presentational cap only: a long spec is clipped to a max-height with a
                fade; the button toggles a class to reveal the rest. JS unhides it only
@@ -133,13 +134,14 @@
            without dropping to a terminal. Each button is a same-origin htmx POST to
            /git/<verb> that re-renders the log region (the verb records a note) and
            OOB-swaps the result banner with the land report. Both verbs are git-only
-           and non-terminal: Push sends the branch to the default remote; Sync pulls
+           and non-terminal: Push (confirmed) sends the branch to the default remote;
+           Sync (no confirm since drvweb-031 — a pull is safe, and a dirty checkout is
+           refused with the same banner) pulls
            the remote's <base> into the local <base> and back-merges it into the
            branch (clean checkout required). Shown (tab + panel together) while the
            attempt records both a base and a repo and is not yet Done. */}}
       <div class="tabpanel" role="tabpanel" id="attempt-tabpanel-git" data-testid="attempt-tabpanel-git" aria-labelledby="attempt-tab-git" hidden>
         <section class="git-controls" data-testid="git-controls">
-          <h2 class="git-controls-title">Git</h2>
           <p class="git-controls-hint">Drive this attempt's local git folder. Default branch <code>{{.Attempt.Base}}</code>.</p>
           {{/* drv-022 position indicator: the branch actually checked out in the
                attempt's worktree/repo (distinct from the attempt base above), and how
@@ -159,7 +161,7 @@
               hx-target="[data-testid=log-region]" hx-swap="innerHTML">Push to remote</button>
             <button type="button" class="action-git-sync" data-testid="action-git-sync"
               hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/git/sync"
-              hx-confirm="Sync: pull the remote's {{.Attempt.Base}} into your local {{.Attempt.Base}} and back-merge it into this attempt's branch? Needs a clean checkout."
+              title="Pull the remote's {{.Attempt.Base}} into your local {{.Attempt.Base}} and back-merge it into this attempt's branch. Needs a clean checkout."
               hx-target="[data-testid=log-region]" hx-swap="innerHTML">Sync — pull remote {{.Attempt.Base}} in</button>
           </div>
           <div id="git-result" class="git-result" data-testid="git-result" hidden></div>
@@ -284,7 +286,7 @@
       <form class="log-compose" data-testid="log-compose"
         hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
         hx-target="[data-testid=log-region]" hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) this.reset()">
+        hx-on::after-request="if(event.detail.successful) draiverClearCompose()">
         <div class="compose-row">
           <select name="type" class="compose-type" data-testid="compose-type" aria-label="Entry type">
             <option value="note">note</option>
@@ -314,21 +316,39 @@
           </label>
         </div>
       </form>
+      {{/* drvweb-031: after a successful post (the compose form's own submit, or a
+           Review Decision/Done that pulled the compose body in), empty the text
+           inputs so the box no longer looks unsent. Deliberately NOT form.reset():
+           that would also snap the type <select> back to "note" and re-tick the 📬
+           checkbox. A failed post (non-2xx) leaves every field as typed. */}}
+      <script>
+        function draiverClearCompose() {
+          var f = document.querySelector('[data-testid="log-compose"]');
+          if (!f) return;
+          ['body', 'tags', 'supersedes'].forEach(function (n) {
+            var el = f.elements.namedItem(n);
+            if (el) el.value = '';
+          });
+        }
+      </script>
 
       {{if eq .Attempt.State "Review"}}
       {{/* Review actions. Decision reopens the attempt to Running (reversible, so
            it fires directly); Done is terminal and immutable, so it confirms
            first. Both post a fixed type and pull the compose textarea as the
-           recorded reason (empty falls back to a server default). */}}
+           recorded reason (empty falls back to a server default), and clear it on
+           success (drvweb-031). */}}
       <div class="review-actions" data-testid="review-actions">
         <button type="button" class="action-decision" data-testid="action-decision"
           hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
           hx-vals='{"type":"decision","to":"agent"}' hx-include="[data-testid=compose-body]"
+          hx-on::after-request="if(event.detail.successful) draiverClearCompose()"
           hx-target="[data-testid=log-region]" hx-swap="innerHTML">Decision — reopen to Running</button>
         <button type="button" class="action-done" data-testid="action-done"
           hx-post="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/log"
           hx-vals='{"type":"done"}' hx-include="[data-testid=compose-body]"
           hx-confirm="Mark this attempt Done? This is terminal and cannot be undone."
+          hx-on::after-request="if(event.detail.successful) draiverClearCompose()"
           hx-target="[data-testid=log-region]" hx-swap="innerHTML">Done — close</button>
       </div>
       {{end}}
@@ -755,6 +775,7 @@
               <p class="link-note unresolved" data-testid="unresolved-{{.Seq}}">→ unresolved — needs a human</p>
               <form class="resolve-form" data-testid="resolve-form-{{.Seq}}"
                 hx-post="/ticket/{{$.Attempt.Ticket}}/{{$.Attempt.ID}}/resolve"
+                hx-on::after-request="if(event.detail.successful) this.reset()"
                 hx-target="[data-testid=log-region]" hx-swap="innerHTML">
                 <input type="hidden" name="seq" value="{{.Seq}}">
                 <textarea id="resolve-input-{{.Seq}}" name="answer"
@@ -815,7 +836,6 @@
 {{define "review-env-panel"}}{{if .}}{{if .Missing}}<section id="review-env-{{.EnvSlug}}" data-testid="review-env" hidden></section>{{else}}<section class="review-env review-env-{{if .Misconfigured}}misconfigured{{else}}{{.State}}{{end}}{{if .IsDefault}} review-env-is-default{{end}}" id="review-env-{{.EnvSlug}}" data-testid="review-env" data-review-env-slug="{{.EnvSlug}}"
   {{- if .Poll}} hx-get="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/review-env/{{.EnvName}}/status" hx-trigger="every 2s" hx-target="#review-env-{{.EnvSlug}}" hx-swap="outerHTML"{{end}}>
   <div class="review-env-head">
-    <h2 class="review-env-title">Review environment</h2>
     {{template "info-bubble" "A real, running instance of the feature under review, seeded with test data. Launch it, wait for the healthcheck to go green, then click the URL to drive it. Torn down on the button, when the ticket is marked Done, or by the idle reaper."}}
   </div>
   <p class="review-env-env">Environment <code data-testid="review-env-name">{{.EnvName}}</code>{{if .IsDefault}} <span class="review-env-default-badge" data-testid="review-env-default">· repo default</span>{{end}}</p>
@@ -860,7 +880,6 @@
 {{define "bdd-report-body"}}{{if .HasRuns}}
 <section class="bdd-report" data-testid="bdd-report">
   <div class="bdd-report-head">
-    <h2 class="bdd-report-title">BDD report</h2>
     <label class="bdd-run-select">Run
       <select data-testid="bdd-run-select" onchange="var o=this.selectedOptions[0];var f=document.getElementById('bdd-report-frame');if(f)f.src=o.value;var a=document.getElementById('bdd-report-open');if(a)a.href=o.dataset.standalone;var d=document.getElementById('bdd-report-download');if(d)d.href=o.dataset.download;">
         {{range .Groups}}
@@ -904,7 +923,6 @@
      in place without a reload. */}}
 {{define "promote-surface"}}<section class="promote" id="promote-surface" data-testid="promote-surface">
   <div class="promote-head">
-    <h2 class="promote-title">Promotions</h2>
     {{template "info-bubble" "Verify (never perform) that the reviewed code is promoted-and-healthy in an environment. draiver does not deploy, merge, or push — it only runs the repo-declared qa check. Promotions are informational: a green chip tells a reviewer the ticket is ready to ratify; they never gate review or done."}}
   </div>
   {{range .Panels}}{{template "promote-panel" .}}{{end}}
@@ -914,7 +932,6 @@
      surface in place (same #promote-surface id, hx-swap-oob). */}}
 {{define "promote-surface-slot"}}{{if .}}<section class="promote" id="promote-surface" data-testid="promote-surface" hx-swap-oob="true">
   <div class="promote-head">
-    <h2 class="promote-title">Promotions</h2>
     {{template "info-bubble" "Verify (never perform) that the reviewed code is promoted-and-healthy in an environment. draiver does not deploy, merge, or push — it only runs the repo-declared qa check. Promotions are informational: a green chip tells a reviewer the ticket is ready to ratify; they never gate review or done."}}
   </div>
   {{range .Panels}}{{template "promote-panel" .}}{{end}}

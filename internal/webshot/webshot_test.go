@@ -35,3 +35,36 @@ func TestCaptureProducesPNG(t *testing.T) {
 		t.Fatalf("output is not a PNG (first bytes %v)", png[:min(8, len(png))])
 	}
 }
+
+// TestCaptureProbeRunsScriptThenProbes proves the drvweb-031 Probe hook: the click
+// lands, then an async probe drives the page further, is awaited, and its JSON result
+// comes back — so a scenario can assert live browser state, not only server HTML.
+func TestCaptureProbeRunsScriptThenProbes(t *testing.T) {
+	if !Available() {
+		t.Skip("webshot: node/playwright/chromium not available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	const page = "data:text/html,<html><body><textarea id=t></textarea>" +
+		"<button id=b onclick=\"document.getElementById('t').value+='!'\">go</button></body></html>"
+	png, probe, err := CaptureProbe(ctx, page, Options{
+		Width: 400, Height: 240,
+		ClickSelector: "#b",
+		Probe: `(async () => {
+			const t = document.getElementById('t');
+			await new Promise((r) => setTimeout(r, 10));
+			t.value += 'hi';
+			return { value: t.value };
+		})()`,
+	})
+	if err != nil {
+		t.Fatalf("CaptureProbe: %v", err)
+	}
+	if !bytes.HasPrefix(png, pngMagic) {
+		t.Fatalf("output is not a PNG")
+	}
+	if probe != `{"value":"!hi"}` {
+		t.Fatalf("probe = %s, want {\"value\":\"!hi\"}", probe)
+	}
+}

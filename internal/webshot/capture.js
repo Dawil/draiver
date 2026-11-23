@@ -17,6 +17,9 @@
 //   WEBSHOT_CLICK_SELECTOR2 click this selector after the first (two-step affordance)
 //   WEBSHOT_AFTER_CLICK_WAIT_SELECTOR wait for this selector AFTER the clicks (an htmx swap)
 //   WEBSHOT_ACCEPT_DIALOGS "1" → auto-accept window.confirm/alert (drive an hx-confirm)
+//   WEBSHOT_HOVER_SELECTOR hover this selector after the clicks, before probe + shot
+//   WEBSHOT_PROBE          JS expression evaluated (and awaited) last; JSON to WEBSHOT_PROBE_OUT
+//   WEBSHOT_PROBE_OUT      where the probe's JSON result is written
 //   WEBSHOT_SETTLE_MS      extra settle after load/selector (default 600)
 //   PLAYWRIGHT_EXECUTABLE  chromium binary to launch
 const { chromium } = require('playwright');
@@ -36,6 +39,9 @@ const { chromium } = require('playwright');
   const clickSel2 = process.env.WEBSHOT_CLICK_SELECTOR2 || '';
   const afterClickWaitSel = process.env.WEBSHOT_AFTER_CLICK_WAIT_SELECTOR || '';
   const acceptDialogs = process.env.WEBSHOT_ACCEPT_DIALOGS === '1';
+  const hoverSel = process.env.WEBSHOT_HOVER_SELECTOR || '';
+  const probe = process.env.WEBSHOT_PROBE || '';
+  const probeOut = process.env.WEBSHOT_PROBE_OUT || '';
   const settle = parseInt(process.env.WEBSHOT_SETTLE_MS || '600', 10);
   const exe = process.env.PLAYWRIGHT_EXECUTABLE || undefined;
 
@@ -89,8 +95,17 @@ const { chromium } = require('playwright');
         await fr.waitForLoadState('load', { timeout: 8000 });
       } catch (_) {}
     }
+    if (hoverSel) {
+      try {
+        await page.hover(hoverSel, { timeout: 5000 });
+      } catch (_) {}
+    }
     if (settle > 0) {
       await page.waitForTimeout(settle);
+    }
+    if (probe && probeOut) {
+      const result = await page.evaluate(probe);
+      require('fs').writeFileSync(probeOut, JSON.stringify(result === undefined ? null : result));
     }
     await page.screenshot({ path: out, fullPage: full });
     console.log('webshot: wrote', out);

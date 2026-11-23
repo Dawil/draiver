@@ -4,8 +4,8 @@ Feature: Git controls Sync always reports an outcome and shows branch position
   These scenarios are the executable statement of drv-022's acceptance criteria.
   They run under `go run ./features/acceptance` (internal/acceptance): each drives a
   real internal/web server over a seeded attempt backed by a real git repo + worktree
-  + origin remote, performs the actual Sync button click in a live browser (accepting
-  its hx-confirm), and attaches a Playwright screenshot of the resulting panel as its
+  + origin remote, performs the actual Sync button click in a live browser (no confirm since
+  drvweb-031), and attaches a Playwright screenshot of the resulting panel as its
   artefact — so draiver captures genuine before/after evidence of all three Sync
   outcomes and the position line.
 

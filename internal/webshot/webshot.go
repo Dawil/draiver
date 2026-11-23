@@ -57,35 +57,54 @@ type Options struct {
 	// — needed to drive a control guarded by an hx-confirm, which Playwright otherwise
 	// auto-dismisses (cancelling the action).
 	AcceptDialogs bool
+	// HoverSelector, when set, is hovered after the clicks and before Probe and the
+	// screenshot — to capture (and measure) a hover-revealed state. Best-effort.
+	HoverSelector string
+	// Probe, when set, is a JavaScript expression evaluated in the page last, just
+	// before the screenshot; its (awaited) JSON-serialised value is returned by
+	// CaptureProbe. It lets a caller assert real browser state (an input's value,
+	// element geometry) rather than only the server-rendered HTML — and, being
+	// awaited, an async probe can itself drive a flow (fill a form, click, await the
+	// htmx response) before reporting. Not best-effort: a throwing probe fails.
+	Probe string
 }
 
 // Capture screenshots url and returns the PNG bytes. It is an error — not an empty
 // image — when node, the chromium binary, or the playwright module is missing, so a
 // caller that cannot screenshot fails loudly rather than silently producing nothing.
 func Capture(ctx context.Context, url string, opts Options) ([]byte, error) {
+	png, _, err := CaptureProbe(ctx, url, opts)
+	return png, err
+}
+
+// CaptureProbe is Capture that also returns opts.Probe's JSON-serialised result
+// ("" when no Probe is set), so one browser run both drives the page and reports
+// what it measured there.
+func CaptureProbe(ctx context.Context, url string, opts Options) ([]byte, string, error) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		return nil, fmt.Errorf("webshot: node not found on PATH: %w", err)
+		return nil, "", fmt.Errorf("webshot: node not found on PATH: %w", err)
 	}
 	chrome, ok := resolveChromium()
 	if !ok {
-		return nil, fmt.Errorf("webshot: no chromium browser found (set PLAYWRIGHT_EXECUTABLE or install the playwright chromium under $PLAYWRIGHT_BROWSERS_PATH)")
+		return nil, "", fmt.Errorf("webshot: no chromium browser found (set PLAYWRIGHT_EXECUTABLE or install the playwright chromium under $PLAYWRIGHT_BROWSERS_PATH)")
 	}
 	nodeModules, ok := resolveNodeModules()
 	if !ok {
-		return nil, fmt.Errorf("webshot: playwright node module not found (run `npm install playwright`)")
+		return nil, "", fmt.Errorf("webshot: playwright node module not found (run `npm install playwright`)")
 	}
 
 	tmp, err := os.MkdirTemp("", "webshot-")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer os.RemoveAll(tmp)
 	script := filepath.Join(tmp, "capture.js")
 	if err := os.WriteFile(script, captureJS, 0o644); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := filepath.Join(tmp, "shot.png")
+	probeOut := filepath.Join(tmp, "probe.json")
 
 	width := opts.Width
 	if width == 0 {
@@ -112,6 +131,9 @@ func Capture(ctx context.Context, url string, opts Options) ([]byte, error) {
 		"WEBSHOT_CLICK_SELECTOR2="+opts.ClickSelector2,
 		"WEBSHOT_AFTER_CLICK_WAIT_SELECTOR="+opts.AfterClickWaitSelector,
 		"WEBSHOT_ACCEPT_DIALOGS="+boolEnv(opts.AcceptDialogs),
+		"WEBSHOT_HOVER_SELECTOR="+opts.HoverSelector,
+		"WEBSHOT_PROBE="+opts.Probe,
+		"WEBSHOT_PROBE_OUT="+probeOut,
 		"PLAYWRIGHT_EXECUTABLE="+chrome,
 		// capture.js is in a temp dir, so `require('playwright')` can only resolve via
 		// NODE_PATH (verified: a temp-located script finds the dep this way).
@@ -120,9 +142,20 @@ func Capture(ctx context.Context, url string, opts Options) ([]byte, error) {
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("webshot: capture of %s failed: %w\n%s", url, err, strings.TrimSpace(stderr.String()))
+		return nil, "", fmt.Errorf("webshot: capture of %s failed: %w\n%s", url, err, strings.TrimSpace(stderr.String()))
 	}
-	return os.ReadFile(out)
+	png, err := os.ReadFile(out)
+	if err != nil {
+		return nil, "", err
+	}
+	if opts.Probe == "" {
+		return png, "", nil
+	}
+	probe, err := os.ReadFile(probeOut)
+	if err != nil {
+		return nil, "", fmt.Errorf("webshot: probe result missing: %w", err)
+	}
+	return png, string(probe), nil
 }
 
 // boolEnv renders a bool as the "1"/"" env flag capture.js reads.

@@ -24,7 +24,7 @@ import (
 // steps_git.go realises drv-022's acceptance criteria
 // (features/attempt-page/git-controls.feature) against a live internal/web server backed by
 // a real git repo + managed worktree + origin remote. Each Sync scenario performs
-// the actual button click in a browser — accepting the hx-confirm — so the captured
+// the actual button click in a browser — no confirm since drvweb-031 — so the captured
 // screenshot shows the genuine outcome banner the user sees; the position scenario
 // renders the panel for real so the branch + ahead/behind line is live git output,
 // not a fixture. The drv-022 steps register themselves into the shared registry from
@@ -239,7 +239,7 @@ func currentGitBoard(w *World) (*gitBoard, error) {
 }
 
 // whenSyncFromPanel drives the real Sync: in a live browser it selects the Git
-// controls tab, clicks the Sync button, accepts the hx-confirm, waits for the result
+// controls tab, clicks the Sync button (unguarded since drvweb-031; AcceptDialogs is harmless), waits for the result
 // banner to swap in, and screenshots the panel. The banner carries data-kind only
 // after the swap, so waiting on it both lets the POST finish (its durable effect is
 // then on disk for the Then step) and guarantees the shot shows the outcome.
