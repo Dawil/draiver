@@ -39,3 +39,4 @@ node_modules/
 *.log
 /review-env/ttyd/.build/
 /evals/_artifacts/
+/acceptance
