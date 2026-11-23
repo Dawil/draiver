@@ -53,22 +53,6 @@
     {{if .Attempt.Overlay}}
     <p class="tagline overlay-provenance" data-testid="attempt-overlay">overlay: <code>{{.Attempt.Overlay}}</code>{{if .Attempt.OverlayCommit}} @ <code data-testid="attempt-overlay-commit">{{shortSHA .Attempt.OverlayCommit}}</code>{{end}}</p>
     {{end}}
-    {{/* Fork this session (drvweb-029): a ready-to-paste command that opens an
-         interactive, read-only (plan-mode) fork of the attempt's claude-code session
-         under a NEW session id, so the operator can question the agent without the
-         exchange reaching the draiver log or the transcript draiver resumes. Built
-         server-side (forkCommand); absent when there is no claude-code session id or
-         no absolute worktree. The <code> is selectable as a manual fallback. */}}
-    {{if .ForkCommand}}
-    <div class="fork-session" data-testid="fork-session">
-      <button type="button" class="fork-copy" data-testid="fork-copy"
-        data-command="{{.ForkCommand}}"
-        title="Copy a command that opens a private fork of this agent's Claude Code session to ask it questions. The fork gets a new session id, so nothing reaches the draiver log or the session draiver resumes. It runs in plan mode (read-only) because it shares this attempt's worktree with the live agent. Run it on the host and as the user that runs claude."
-        aria-label="Copy fork-this-session command">Copy fork command</button>
-      <span class="fork-copied" data-testid="fork-copied" role="status" aria-live="polite"></span>
-      <code class="fork-command" data-testid="fork-command">{{.ForkCommand}}</code>
-    </div>
-    {{end}}
   </header>
 
   <main class="detail" data-testid="ticket-detail">
@@ -249,7 +233,22 @@
     <section class="agent-logs" data-testid="agent-logs">
       <details class="agent-logs-details" data-testid="agent-logs-details"
         data-stream-url="/ticket/{{.Attempt.Ticket}}/{{.Attempt.ID}}/agent-logs">
-        <summary class="agent-logs-summary" data-testid="agent-logs-summary">Agent Logs <span class="hint">live session stream</span></summary>
+        <summary class="agent-logs-summary" data-testid="agent-logs-summary"><span class="agent-logs-title">Agent Logs <span class="hint">live session stream</span></span>
+          {{/* Fork this session (drvweb-029): copies a command that opens an
+               interactive, read-only (plan-mode) fork of this attempt's claude-code
+               session under a NEW session id, so the operator can question the agent
+               without the exchange reaching the draiver log or the transcript draiver
+               resumes. Built server-side (forkCommand); absent without a claude-code
+               session id and an absolute worktree. The click is kept from toggling the
+               <details> (forkcopy.js). */}}
+          {{if .ForkCommand}}<span class="fork-session" data-testid="fork-session">
+            <span class="fork-copied" data-testid="fork-copied" role="status" aria-live="polite"></span>
+            <button type="button" class="compose-submit fork-copy" data-testid="fork-copy"
+              data-command="{{.ForkCommand}}"
+              title="Copy a command that opens a private fork of this agent's Claude Code session to ask it questions. The fork gets a new session id, so nothing reaches the draiver log or the session draiver resumes. It runs in plan mode (read-only) because it shares this attempt's worktree with the live agent. Run it on the host and as the user that runs claude."
+              aria-label="Copy fork-this-session command">Copy fork command</button>
+          </span>{{end}}</summary>
+        {{if .ForkCommand}}<div class="fork-command-row">fork command <span class="hint">(plan mode, same host)</span>: <code class="fork-command" data-testid="fork-command">{{.ForkCommand}}</code></div>{{end}}
         <pre class="agent-logs-stream" data-testid="agent-logs-stream" aria-live="polite"></pre>
       </details>
     </section>

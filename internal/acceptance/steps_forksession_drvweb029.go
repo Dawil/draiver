@@ -26,6 +26,7 @@ func init() {
 		"a board attempt whose session.json has no session id":                                        givenForkNoSessionID,
 		"the attempt page shows the fork-session copy button":                                         thenForkButtonShown,
 		"the rendered fork command cds into the absolute worktree and forks the session in plan mode": thenForkCommandRendered,
+		"the copy button sits inline in the Agent Logs section header":                                thenForkButtonInAgentLogs,
 		"the attempt page shows no fork-session copy button":                                          thenForkButtonAbsent,
 	}
 	for k, v := range drvweb029 {
@@ -152,5 +153,35 @@ func shootForkCopy(w *World, sr *StepRun, b *board) error {
 		Name:     "fork-session-copy",
 		Data:     base64.StdEncoding.EncodeToString(png),
 	})
+	return nil
+}
+
+// thenForkButtonInAgentLogs pins the placement the reviewer asked for (decision
+// #18): the button is inside the Agent Logs <summary> row, styled as the "Add
+// entry" pill (compose-submit), not in the page header.
+func thenForkButtonInAgentLogs(w *World, sr *StepRun) error {
+	page, _, err := forkPage(w)
+	if err != nil {
+		return err
+	}
+	const open = `data-testid="agent-logs-summary"`
+	i := strings.Index(page, open)
+	if i < 0 {
+		return fmt.Errorf("no Agent Logs summary on the attempt page")
+	}
+	j := strings.Index(page[i:], "</summary>")
+	if j < 0 {
+		return fmt.Errorf("unterminated Agent Logs summary")
+	}
+	summary := page[i : i+j]
+	if !strings.Contains(summary, `data-testid="fork-copy"`) {
+		return fmt.Errorf("fork-copy button is not inside the Agent Logs summary")
+	}
+	if !strings.Contains(summary, `class="compose-submit fork-copy"`) {
+		return fmt.Errorf("fork-copy button does not use the Add entry (compose-submit) style")
+	}
+	if header, ok := sliceBetween(page, "<header", "</header>"); ok && strings.Contains(header, "fork-copy") {
+		return fmt.Errorf("fork-copy button still rendered in the page header")
+	}
 	return nil
 }

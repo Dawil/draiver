@@ -17,6 +17,7 @@ Feature: Copy a "fork this session" command from an attempt
   Scenario: A claude-code attempt with a session shows the copy button and command
     Given a board attempt with a seeded claude-code session.json
     Then the attempt page shows the fork-session copy button
+    And the copy button sits inline in the Agent Logs section header
     And the rendered fork command cds into the absolute worktree and forks the session in plan mode
 
   Scenario: An attempt with no session id shows no copy button

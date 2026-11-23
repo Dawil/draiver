@@ -1,4 +1,5 @@
-// drvweb-029: copy the "fork this session" command to the clipboard.
+// drvweb-029: copy the "fork this session" command to the clipboard. The button sits
+// in the Agent Logs <summary> row; the <code> fallback sits inside that panel.
 //
 // navigator.clipboard needs a secure context (https or localhost); the board is
 // often served over plain http on a LAN address, where it is undefined or rejects.
@@ -34,6 +35,9 @@
     var status = box && box.querySelector('.fork-copied');
     if (!status) return;
     status.textContent = ok ? 'Copied' : 'Copy failed — select the command below';
+    // On failure, open the Agent Logs panel so the selectable command is visible.
+    var details = btn.closest('details');
+    if (!ok && details) details.open = true;
     status.classList.toggle('fork-copied-failed', !ok);
     clearTimeout(btn._forkTimer);
     btn._forkTimer = setTimeout(function () { status.textContent = ''; }, 2000);
@@ -42,6 +46,10 @@
   document.addEventListener('click', function (ev) {
     var btn = ev.target.closest && ev.target.closest('.fork-copy');
     if (!btn) return;
+    // The button lives inside the Agent Logs <summary>: keep the click from
+    // toggling the panel open/closed.
+    ev.preventDefault();
+    ev.stopPropagation();
     copy(btn.getAttribute('data-command') || '').then(function (ok) { feedback(btn, ok); });
   });
 })();
