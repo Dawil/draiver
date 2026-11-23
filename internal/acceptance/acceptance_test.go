@@ -1,8 +1,10 @@
 package acceptance
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/Dawil/draiver/internal/cucumber"
@@ -35,14 +37,33 @@ func requireBrowser(t *testing.T) {
 }
 
 // runSuite runs the real features into a temp outDir and returns the result.
+//
+// The run is memoised for the package: each call used to re-run every scenario in a
+// real browser (~2.5 min apiece), so the three callers together hit `go test`'s
+// default 10m timeout on the unit rung as the suite grew (drvweb-029). The callers
+// only read the Result, so one shared run is equivalent. Its outDir is a package
+// temp dir (t.TempDir would be removed when the first caller finishes).
 func runSuite(t *testing.T) Result {
 	t.Helper()
-	res, err := Run(repoFeaturesDir(t), t.TempDir())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	suiteOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "acc-suite-")
+		if err != nil {
+			suiteErr = err
+			return
+		}
+		suiteRes, suiteErr = Run(repoFeaturesDir(t), dir)
+	})
+	if suiteErr != nil {
+		t.Fatalf("Run: %v", suiteErr)
 	}
-	return res
+	return suiteRes
 }
+
+var (
+	suiteOnce sync.Once
+	suiteRes  Result
+	suiteErr  error
+)
 
 // TestFeaturesHaveStepDefinitions is the browser-free drift guard: every step in
 // every shipped feature must resolve to a registry definition. It runs always (no
