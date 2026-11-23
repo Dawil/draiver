@@ -101,6 +101,13 @@ func Build(root store.Root, ticket, id string) (string, error) {
 		b.WriteString(ledgerSection(ledgers))
 	}
 
+	// Branch state (drv-064): facts from git, not the log — what the branch already
+	// holds, what is uncommitted, and how far the base has moved — so a resumed agent
+	// need not re-derive them from diffs. Bounded; skipped when there is no worktree.
+	if st, ok := gatherBranchState(a); ok {
+		b.WriteString(renderBranchState(st))
+	}
+
 	// ## Current understanding — the index: one line per live fact, in seq order.
 	// Superseded bodies, resolved escalations, and historical events are absent; the
 	// index scales with the live-fact count, not the total event count.
