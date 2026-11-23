@@ -8,7 +8,7 @@
 # Every assertion reads the agent's answer out of the provider's JSON verdict.
 
 - description: "knowledge: run the test pyramid without blocking (drv-058)"
-  metadata: {kind: knowledge, ticket: drv-058}
+  metadata: {kind: knowledge, ticket: drv-058, weight: light}
   vars:
     prompt: >-
       You are a coding agent working a ticket in this repository. The full test
@@ -28,7 +28,7 @@
         recommend polling with sleep loops; warning against sleep-polling is good.
 
 - description: "knowledge: what every BDD scenario must attach (drv-058)"
-  metadata: {kind: knowledge, ticket: drv-058}
+  metadata: {kind: knowledge, ticket: drv-058, weight: light}
   vars:
     prompt: >-
       You are a coding agent adding a BDD acceptance scenario in this repository.
@@ -46,7 +46,7 @@
         non-UI evidence.
 
 - description: "knowledge: branch diff when main has moved — three dots (drv-059)"
-  metadata: {kind: knowledge, ticket: drv-059}
+  metadata: {kind: knowledge, ticket: drv-059, weight: light}
   vars:
     prompt: >-
       You are a coding agent on a ticket branch in this repository, and main has gained
@@ -64,7 +64,7 @@
         `git diff main..HEAD` as the way to see the branch's own changes.
 
 - description: "knowledge: review feedback outside the spec (drv-059)"
-  metadata: {kind: knowledge, ticket: drv-059}
+  metadata: {kind: knowledge, ticket: drv-059, weight: light}
   vars:
     prompt: >-
       You are a coding agent working a draiver ticket in this repository. A reviewer's
@@ -83,7 +83,7 @@
         implementing it.
 
 - description: "knowledge: where the acceptance helpers live and how to register a step (drv-060)"
-  metadata: {kind: knowledge, ticket: drv-060}
+  metadata: {kind: knowledge, ticket: drv-060, weight: light}
   vars:
     prompt: >-
       You are a coding agent about to add a BDD step definition in this repository.
@@ -95,8 +95,27 @@
       transform: JSON.parse(output).answer
       value: ["internal/acceptance", "registry", "init"]
 
+- description: "knowledge: which acceptance helpers to reuse for a board and the CLI (drv-060)"
+  metadata: {kind: knowledge, ticket: drv-060, weight: light}
+  vars:
+    prompt: >-
+      You are a coding agent writing BDD steps in this repository. One scenario needs
+      a live web board over a seeded data root; another needs to run the real draiver
+      CLI. Which existing helper functions should your steps reuse for each, and
+      where are they defined? Answer briefly.
+  assert:
+    - type: icontains-all
+      transform: JSON.parse(output).answer
+      value: ["seedBoard", "overlayBin"]
+    - type: llm-rubric
+      transform: JSON.parse(output).answer
+      value: >-
+        The answer names existing helpers (such as seedBoard/currentBoard for the board
+        and overlayBin for the built draiver binary) rather than proposing to write new
+        fixtures from scratch, and it does not invent helper names that do not exist.
+
 - description: "knowledge: changelog style without reading CHANGELOG.md (drv-061)"
-  metadata: {kind: knowledge, ticket: drv-061}
+  metadata: {kind: knowledge, ticket: drv-061, weight: light}
   vars:
     prompt: >-
       You are a coding agent who needs to write this ticket's changelog entry in this

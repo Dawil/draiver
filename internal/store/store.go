@@ -25,17 +25,28 @@ func Resolve(flagVal string) (Root, error) {
 		dir = os.Getenv("DRAIVER_DATA")
 	}
 	if dir == "" {
-		home, err := os.UserHomeDir()
+		def, err := DefaultDir()
 		if err != nil {
-			return Root{}, fmt.Errorf("resolve data root: %w", err)
+			return Root{}, err
 		}
-		dir = filepath.Join(home, ".draiver", "data")
+		dir = def
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return Root{}, fmt.Errorf("resolve data root: %w", err)
 	}
 	return Root{Dir: abs}, nil
+}
+
+// DefaultDir is the data root Resolve falls back to with no --data flag and no
+// $DRAIVER_DATA: ~/.draiver/data. The board compares against it to decide whether
+// a CLI command it hands the operator must carry an explicit --data (drvweb-029).
+func DefaultDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve data root: %w", err)
+	}
+	return filepath.Join(home, ".draiver", "data"), nil
 }
 
 // --- root-level runtime paths (draiverctld; rebuildable, out of the hash chain) ---

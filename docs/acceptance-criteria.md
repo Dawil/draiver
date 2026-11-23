@@ -36,7 +36,9 @@ agent sees the criteria with no new machinery.
    code repo**, on its branch, committed alongside the code they cover. The
    onboarding protocol directs the agent to do this (see
    [`../internal/handbook/handbook.md`](../internal/handbook/handbook.md) §2, kept
-   byte-identical with the onboarding skill).
+   byte-identical with the onboarding skill). **How to write a step**, which
+   shared helpers to reuse and how to attach artefacts:
+   [`../internal/acceptance/README.md`](../internal/acceptance/README.md).
 3. Those features **run under the repo's BDD rung** of the
    [test pyramid](./test-pyramid.md), so `draiver test` can prove them green before
    the attempt claims Review.

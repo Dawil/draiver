@@ -53,6 +53,19 @@ export DRAIVER_CONFIG="$CONFIG"
 "$BIN" log DUMMY-1 --type decision --to agent --actor human:review \
   "If possible, push directly to main on the forgejo remote once done." >/dev/null 2>&1 || true
 
+# drvweb-029: a claude-code session.json on the Running DUMMY-1, so its attempt page
+# shows the "Copy fork command" button in the Agent Logs header, rendering
+# `draiver --data '<this data root>' fork 'DUMMY-1@0001'`. The worktree is this review
+# worktree (absolute and present). The session id is a dummy, so a real run has claude
+# report it can't find the session. To see what the verb would do without claude,
+# paste the command with the built binary and --print, e.g.
+#   .review-env-run/draiver --data "$DATA" fork DUMMY-1@0001 --print
+# pid 0 = no live process. Best-effort like every seed here.
+DUMMY1_SESSION="$DATA/DUMMY-1/attempts/0001/session"
+mkdir -p "$DUMMY1_SESSION" 2>/dev/null && cat >"$DUMMY1_SESSION/session.json" <<JSON 2>/dev/null || true
+{"adapter":"claude-code","session_id":"5e55a0d1-fork-demo-0000-$ENV_NAME","worktree":"$PWD","started":"2026-11-23T09:00:00Z"}
+JSON
+
 # drv-045: seed the in-review DUMMY-2 attempt's per-attempt system-event journal
 # (session/system.jsonl) so the reviewer sees a POPULATED System Logs panel live — the
 # new second streaming panel, separate from Agent Logs — not just a green unit test.

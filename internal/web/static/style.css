@@ -752,3 +752,15 @@ body {
   border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
 }
 .link-chip:hover { border-color: var(--accent); }
+
+/* Fork-this-session copy control (drvweb-029): sits on the right of the Agent Logs
+   summary row in the "Add entry" pill style, with a transient "Copied" status to its
+   left. The command itself shows in a selectable <code> at the top of the expanded
+   panel as the manual fallback when neither clipboard path works. */
+.agent-logs-summary:has(.agent-logs-title) { display: flex; align-items: center; gap: 8px; }
+.agent-logs-title { flex: 1; }
+.fork-session { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; }
+.fork-copied { color: var(--muted); font-size: 12px; }
+.fork-copied-failed { color: var(--review); }
+.fork-command-row { padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.fork-command { user-select: all; overflow-wrap: anywhere; color: var(--ink); }

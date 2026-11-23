@@ -161,18 +161,52 @@ func defaultBase(commonDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("worktree: locate user cache dir: %w", err)
 	}
+	return baseIn(cache, commonDir), nil
+}
+
+// DefaultBaseIn is the managed base NewManager would default to for repo if the
+// user cache dir were cacheDir. A test that runs the CLI in a child process with
+// its own XDG_CACHE_HOME uses it to cut, in-process, the same checkout path the
+// child will look for (drvweb-029).
+func DefaultBaseIn(cacheDir, repo string) (string, error) {
+	m := &Manager{repo: repo}
+	commonDir, err := m.git(context.Background(), "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("worktree: %s is not a git repository: %w", repo, err)
+	}
+	return baseIn(cacheDir, strings.TrimSpace(commonDir)), nil
+}
+
+func baseIn(cache, commonDir string) string {
 	sum := sha256.Sum256([]byte(commonDir))
 	// filepath.Dir of a standard ".../<repo>/.git" is the repo root; its base is a
 	// friendly label. It is only cosmetic — the hash disambiguates.
 	label := filepath.Base(filepath.Dir(commonDir))
 	id := label + "-" + hex.EncodeToString(sum[:])[:12]
-	return filepath.Join(cache, "draiver", "worktrees", id), nil
+	return filepath.Join(cache, "draiver", "worktrees", id)
 }
 
 // Base is the managed base directory under which every checkout lives.
 func (m *Manager) Base() string { return m.base }
 
 func (m *Manager) pathFor(k Key) string { return filepath.Join(m.base, k.Ticket, k.Attempt) }
+
+// PathFor is the absolute checkout path Create uses for k under this manager's base.
+func (m *Manager) PathFor(k Key) string { return m.pathFor(k) }
+
+// BranchExists reports whether k's attempt branch (draiver/<ticket>/<attempt>)
+// still exists. Create would silently cut a fresh branch from HEAD when it is
+// gone, so a caller that must re-attach to the attempt's own work (draiver fork,
+// drvweb-029) checks this first.
+func (m *Manager) BranchExists(ctx context.Context, k Key) (bool, error) {
+	if err := k.valid(); err != nil {
+		return false, err
+	}
+	return m.branchExists(ctx, k.branch())
+}
+
+// Branch is k's attempt branch name, draiver/<ticket>/<attempt>.
+func (k Key) Branch() string { return k.branch() }
 
 // Create returns the worktree for spec's attempt, creating it if absent. It is
 // idempotent and crash-safe:

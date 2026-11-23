@@ -204,23 +204,42 @@ func (s *Server) pyramidBadge(a project.Attempt) *pyramidVM {
 	return projectPyramid(st.Pyramid, a.Events, st.Head, st.Dirty)
 }
 
-// gatherPyramidState is the default pyramidGit: it reads the pyramid, HEAD, and
+// gatherPyramidState is the uncached pyramidGit: it reads the pyramid, HEAD, and
 // dirtiness from the attempt's live checkout, falling back to its branch ref once
 // the worktree is reclaimed. ok is false — render nothing — on no recorded repo, a
 // non-git base, no checkout and no branch, or any git/parse error, the same
-// best-effort degradation the badge has always had.
+// best-effort degradation the badge has always had. web.New binds s.pyramidGit to
+// the caching layer in front of it (pyramidcache.go, drvweb-030).
 func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyramidState, bool) {
+	st, ok, _ := s.gatherPyramidStateErr(ctx, a)
+	return st, ok
+}
+
+// errPyramidRead marks an outcome of gatherPyramidStateErr that came from a
+// git/IO/parse failure rather than a benign "nothing to show" (no branch, no pyramid,
+// no overlay). The cache keeps the former only briefly, so a transient failure
+// recovers on the next poll, while the latter is cached under its fingerprint.
+type errPyramidRead struct{ err error }
+
+func (e errPyramidRead) Error() string { return "pyramid read: " + e.err.Error() }
+func (e errPyramidRead) Unwrap() error { return e.err }
+
+func readErr(err error) error { return errPyramidRead{err} }
+
+// gatherPyramidStateErr is gatherPyramidState with the failure cause kept: err is
+// non-nil exactly when ok=false came from a failed read (see errPyramidRead).
+func (s *Server) gatherPyramidStateErr(ctx context.Context, a project.Attempt) (pyramidState, bool, error) {
 	if a.Repo == "" {
-		return pyramidState{}, false
+		return pyramidState{}, false, nil
 	}
 	wm, err := worktree.NewManager(a.Repo)
 	if err != nil {
-		return pyramidState{}, false
+		return pyramidState{}, false, readErr(err)
 	}
 	key := worktree.Key{Ticket: a.Ticket, Attempt: a.ID}
 	wt, ok, err := wm.Locate(ctx, key)
 	if err != nil {
-		return pyramidState{}, false
+		return pyramidState{}, false, readErr(err)
 	}
 	if ok {
 		// Live checkout: read the pyramid, HEAD, and cleanliness straight from the
@@ -229,24 +248,26 @@ func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyr
 		// `draiver test` would still pass (drvweb-021 #27).
 		p, err := pyramid.Load(wt.Path)
 		if err != nil {
-			return pyramidState{}, false
+			return pyramidState{}, false, readErr(err)
 		}
 		head, err := worktree.HeadSHA(ctx, wt.Path)
 		if err != nil {
-			return pyramidState{}, false
+			return pyramidState{}, false, readErr(err)
 		}
 		dirty, err := worktree.DirtyAt(ctx, wt.Path)
 		if err != nil {
-			return pyramidState{}, false
+			return pyramidState{}, false, readErr(err)
 		}
 		if p == nil {
 			// No in-repo pyramid: the badge's rungs come from the overlay (drv-041), while
 			// HEAD and dirtiness stay the CODEBASE's — a `draiver test` run logs its
 			// test-result at the codebase HEAD, so the green-at-HEAD fold is unchanged.
-			op, rev := s.overlayPyramid(ctx, a)
-			return pyramidState{Pyramid: op, Head: head, Dirty: dirty, Overlay: rev}, true
+			// An overlay read failure still renders (no rungs, as it always has), but
+			// the err travels with it so the cache keeps this result only briefly.
+			op, rev, err := s.overlayPyramidErr(ctx, a)
+			return pyramidState{Pyramid: op, Head: head, Dirty: dirty, Overlay: rev}, true, err
 		}
-		return pyramidState{Pyramid: p, Head: head, Dirty: dirty}, true
+		return pyramidState{Pyramid: p, Head: head, Dirty: dirty}, true, nil
 	}
 	// No live checkout — the attempt retired into Review and the daemon reclaimed
 	// its worktree, but the branch survives. Read the same two facts from the base
@@ -255,7 +276,7 @@ func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyr
 	return s.branchPyramidState(ctx, wm, key, a)
 }
 
-// overlayPyramid resolves a codebase's test-pyramid overlay (drv-041) for an attempt
+// overlayPyramidErr resolves a codebase's test-pyramid overlay (drv-041) for an attempt
 // whose codebase carries no in-repo .test-pyramid.yaml, and loads the overlay pyramid
 // COMMITTED at the attempt's overlay revision (drv-053): the tip of the overlay branch
 // draiver/<ticket>/<attempt> when the agent has one, else the overlay repo's HEAD. It
@@ -264,64 +285,80 @@ func (s *Server) gatherPyramidState(ctx context.Context, a project.Attempt) (pyr
 // edits are what the reviewer sees — and launches, since the returned revision is
 // threaded into the review-env Launch. It is best-effort like the rest of the badge: no
 // overlay configured, an unresolvable overlay, or a missing/malformed overlay pyramid
-// all yield (nil, nil) — the caller renders nothing.
-func (s *Server) overlayPyramid(ctx context.Context, a project.Attempt) (*pyramid.Pyramid, *overlay.Revision) {
+// all yield no pyramid — the caller renders nothing. A read failure (as opposed to
+// "no overlay" or "no pyramid at that revision") is returned as an errPyramidRead so
+// the cache keeps it only briefly.
+func (s *Server) overlayPyramidErr(ctx context.Context, a project.Attempt) (*pyramid.Pyramid, *overlay.Revision, error) {
 	if a.Repo == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	cfg, err := config.Load("")
 	if err != nil {
-		return nil, nil
+		return nil, nil, readErr(err)
 	}
 	loc, ok, err := overlay.Resolve(a.Repo, cfg.RepoSettings(a.Repo).Overlay, cfg.OverlayDir)
-	if err != nil || !ok {
-		return nil, nil
+	if err != nil {
+		return nil, nil, readErr(err)
+	}
+	if !ok {
+		return nil, nil, nil
 	}
 	rev, err := overlay.ReviewRevision(ctx, loc, worktree.Key{Ticket: a.Ticket, Attempt: a.ID})
 	if err != nil {
-		return nil, nil
+		return nil, nil, readErr(err)
 	}
 	p, err := overlay.PyramidAt(ctx, rev)
-	if err != nil || p == nil {
-		return nil, nil
+	if err != nil {
+		return nil, nil, readErr(err)
 	}
-	return p, &rev
+	if p == nil {
+		return nil, nil, nil
+	}
+	return p, &rev, nil
 }
 
 // branchPyramidState is gatherPyramidState's fallback when no live worktree exists:
 // it reads the attempt's branch tip and the .test-pyramid.yaml committed on that
-// branch, from the base repo without a checkout. A missing branch, a missing
-// .test-pyramid.yaml, or any git/parse error yields ok=false (render nothing) — the
-// same best-effort degradation as the live path.
+// branch, from the base repo without a checkout. A missing branch or a missing
+// .test-pyramid.yaml yields ok=false (render nothing); a git/parse error yields
+// ok=false with an errPyramidRead — the same best-effort degradation as the live path.
 //
 // It reports Dirty=false: a committed branch tip has no working tree to be dirty. A
 // checkout the daemon keeps warm while dirty is still found by Locate, so it takes
 // the live path above where DirtyAt observes it — this fallback is only reached once
 // the worktree is gone.
-func (s *Server) branchPyramidState(ctx context.Context, wm *worktree.Manager, key worktree.Key, a project.Attempt) (pyramidState, bool) {
+func (s *Server) branchPyramidState(ctx context.Context, wm *worktree.Manager, key worktree.Key, a project.Attempt) (pyramidState, bool, error) {
 	head, ok, err := wm.BranchSHA(ctx, key)
-	if err != nil || !ok {
-		return pyramidState{}, false
+	if err != nil {
+		return pyramidState{}, false, readErr(err)
+	}
+	if !ok {
+		return pyramidState{}, false, nil
 	}
 	var p *pyramid.Pyramid
 	data, ok, err := wm.FileAtBranch(ctx, key, pyramid.FileName)
 	if err != nil {
-		return pyramidState{}, false
+		return pyramidState{}, false, readErr(err)
 	}
 	if ok {
+		// A malformed pyramid committed at a fixed SHA is deterministic, so it is a
+		// benign "nothing to show" for this tip, not a transient read failure.
 		if p, err = pyramid.Parse(data); err != nil {
-			return pyramidState{}, false
+			return pyramidState{}, false, nil
 		}
 	}
 	if p == nil {
 		// No .test-pyramid.yaml committed on the branch: fall back to the overlay's
 		// pyramid (drv-041), keeping HEAD the codebase branch tip. No overlay → nil → the
 		// caller renders nothing, exactly the old behaviour for a repo with no pyramid.
-		op, rev := s.overlayPyramid(ctx, a)
-		if op == nil {
-			return pyramidState{}, false
+		op, rev, err := s.overlayPyramidErr(ctx, a)
+		if err != nil {
+			return pyramidState{}, false, err
 		}
-		return pyramidState{Pyramid: op, Head: head, Dirty: false, Overlay: rev}, true
+		if op == nil {
+			return pyramidState{}, false, nil
+		}
+		return pyramidState{Pyramid: op, Head: head, Dirty: false, Overlay: rev}, true, nil
 	}
-	return pyramidState{Pyramid: p, Head: head, Dirty: false}, true
+	return pyramidState{Pyramid: p, Head: head, Dirty: false}, true, nil
 }
