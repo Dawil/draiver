@@ -369,6 +369,8 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	outcome, err := promote.Run(r.Context(), s.root, a.Repo, id, att, envName, relayOut, relayErr)
 	relayOut.flush()
 	relayErr.flush()
+	// A promotion may cut/touch checkouts: re-read git for the re-render (drvweb-030).
+	s.invalidateGit(id, att)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -575,6 +577,9 @@ func (s *Server) handleMarkDone(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// Done may let the daemon reclaim the checkout: drop the cached git state so the
+	// re-rendered board reads it afresh (drvweb-030).
+	s.invalidateGit(id, att)
 	// Re-render the whole board region so the card relocates Review → Done in one swap,
 	// and keep the favicon in sync like handleArchive. Render in the operator's CURRENT
 	// view (HX-Current-URL), since the done POST carries no view of its own.
