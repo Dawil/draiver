@@ -563,3 +563,56 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// TestStreamRendererRecordedTimestamps locks drv-066: the agent stream's time
+// column is each record's recorded "timestamp" (shown local), regardless of the
+// injected now; an untimestamped record (result → turn end) inherits the preceding
+// recorded time; and a stream whose first record has no timestamp (system/init)
+// falls back to now until a recorded time is seen.
+func TestStreamRendererRecordedTimestamps(t *testing.T) {
+	var buf bytes.Buffer
+	sr := newStreamRenderer(&buf)
+	now := time.Date(2099, 1, 2, 3, 4, 5, 0, time.Local)
+	sr.now = func() time.Time { return now }
+
+	t1 := "2026-03-04T10:11:12.345Z"
+	t2 := "2026-03-04T10:15:00.000Z"
+	for _, line := range []string{
+		`{"type":"system","subtype":"init","session_id":"s","cwd":"/x","model":"opus"}`,
+		`{"type":"assistant","timestamp":"` + t1 + `","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}`,
+		`{"type":"assistant","timestamp":"` + t2 + `","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}`,
+		`{"type":"user","timestamp":"` + t2 + `","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"boom","is_error":true}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"DONE.","total_cost_usd":0.01,"session_id":"s"}`,
+	} {
+		sr.renderLine(line)
+	}
+
+	local := func(s string) string {
+		tm, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return "[" + tm.Local().Format(tsLayout)
+	}
+	nowStamp := "[" + now.Format(tsLayout)
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	want := []struct{ prefix, body string }{
+		{nowStamp, "session online"},      // no TS seen yet → now
+		{local(t1), "first"},              // recorded time
+		{local(t2), "Bash: ls"},           // recorded time
+		{local(t2), "failed"},             // user tool_result recorded time
+		{local(t2), "turn end (success)"}, // untimestamped → inherits last recorded
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines, want %d:\n%s", len(lines), len(want), buf.String())
+	}
+	for i, w := range want {
+		if !strings.HasPrefix(lines[i], w.prefix) || !strings.Contains(lines[i], w.body) {
+			t.Errorf("line %d = %q, want prefix %q and body %q", i, lines[i], w.prefix, w.body)
+		}
+	}
+	if strings.Contains(strings.Join(lines[1:], "\n"), nowStamp) {
+		t.Errorf("render-time now leaked past the first recorded timestamp:\n%s", buf.String())
+	}
+}
