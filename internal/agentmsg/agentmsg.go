@@ -73,6 +73,29 @@ func SessionEnv(ticket, attempt string, seq int) []string {
 	}
 }
 
+// Identity variables the CLI resolves its actor and target attempt from. The
+// daemon sets both on a supervised session (drvctl-060) so an agent never has to
+// prefix its own `draiver` calls with an export — and a write that forgets one can
+// no longer fall back to `human:$USER`.
+const (
+	EnvActor        = "DRAIVER_ACTOR"
+	EnvAgentAttempt = "DRAIVER_ATTEMPT"
+)
+
+// AgentActor is the actor a supervised session's writes are attributed to:
+// `agent:<adapter>` (e.g. agent:claude-code).
+func AgentActor(adapter string) string { return "agent:" + adapter }
+
+// IdentityEnv builds the KEY=VALUE identity entries a supervised session is spawned
+// with: DRAIVER_ACTOR=agent:<adapter> and DRAIVER_ATTEMPT=<attempt>. Layered after
+// the parent environment, they override any value the daemon itself inherited.
+func IdentityEnv(adapter, attempt string) []string {
+	return []string{
+		EnvActor + "=" + AgentActor(adapter),
+		EnvAgentAttempt + "=" + attempt,
+	}
+}
+
 // FromEnv reads the session context from getenv. ok is false outside a supervised
 // session (any var missing or the seq malformed) — human CLI use.
 func FromEnv(getenv func(string) string) (Session, bool) {

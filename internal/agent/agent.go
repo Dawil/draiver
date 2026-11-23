@@ -165,6 +165,10 @@ const (
 	// Permission carries the ask; the supervisor's gate answers it (allow, or
 	// escalate-and-halt) via Permissioner.Decide, correlating by Permission.ID.
 	EventPermission EventKind = "permission"
+	// EventInterrupted marks a human interrupting the in-flight turn (drvctl-060):
+	// Claude Code records it as a user-role "[Request interrupted by user]" line.
+	// The supervisor treats it as "hold — do not auto-resume over the human".
+	EventInterrupted EventKind = "interrupted"
 )
 
 // Event is one normalized item on a session's stream. It is a tagged union:
@@ -194,6 +198,10 @@ type Event struct {
 	// terminal status ("success", "error", "interrupted", ...).
 	Result string `json:"result,omitempty"`
 	Turn   string `json:"turn,omitempty"`
+	// Origin (EventTurnEnd) is what triggered the turn when it was not an ordinary
+	// prompt, e.g. "task-notification" for a turn a background task's completion
+	// notice started (drvctl-060). Empty for a normal turn.
+	Origin string `json:"origin,omitempty"`
 
 	// Err (EventError).
 	Err string `json:"err,omitempty"`

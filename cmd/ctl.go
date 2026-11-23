@@ -14,6 +14,7 @@ import (
 
 	"github.com/Dawil/draiver/internal/agent"
 	"github.com/Dawil/draiver/internal/agent/claudecode"
+	"github.com/Dawil/draiver/internal/completion"
 	"github.com/Dawil/draiver/internal/config"
 	"github.com/Dawil/draiver/internal/gate"
 	"github.com/Dawil/draiver/internal/handbook"
@@ -31,6 +32,7 @@ var (
 	ctlConfigPath    string
 	ctlContextWindow int // -1 sentinel: resolve from config
 	ctlContextLimit  int // -1 sentinel: resolve from config
+	ctlBackgroundCap time.Duration
 	ctlLogsFollow    bool
 	ctlLogsJSON      bool
 	ctlLogsTail      int               // -f backlog window: last N stream records before following
@@ -474,6 +476,7 @@ func newReconciler() (*reconcile.Reconciler, error) {
 		DraiverVersion:     version,
 		Actor:              resolveActor(),
 		ContextLimit:       contextLimit,
+		BackgroundCap:      ctlBackgroundCap,
 		DefaultSupervision: defaultSupervision,
 		ReviewEnvMaxAge:    time.Duration(cfg.ReviewEnvMaxAgeMinutes) * time.Minute,
 		AsyncJobReapMaxAge: time.Duration(cfg.AsyncJobReapMinutes) * time.Minute,
@@ -599,6 +602,7 @@ func init() {
 	// their own (drvctl-016 C2), these flags would be dead on them.
 	ctlDefaultPermMode := "acceptEdits"
 	ctlUpCmd.Flags().StringVar(&ctlPermMode, "permission-mode", ctlDefaultPermMode, "agent permission mode (routes tool use through the gates)")
+	ctlUpCmd.Flags().DurationVar(&ctlBackgroundCap, "background-cap", completion.DefaultBackgroundCap, "how long a session may wait on its own background tasks (run_in_background commands, async subagents) before the completion gate escalates")
 	ctlUpCmd.Flags().IntVar(&ctlContextLimit, "context-limit", -1, "context-window auto-stop threshold (tokens); 0 disables (default from config, 150000)")
 	ctlUpCmd.Flags().StringToStringVar(&ctlPermRules, "permission", nil, "per-tool permission-gate override, e.g. --permission Bash=escalate (allow|escalate); layers over config")
 	// restart depth flags — the cumulative degree axis (drvctl-016); the deepest

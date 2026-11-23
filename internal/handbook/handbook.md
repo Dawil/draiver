@@ -8,8 +8,18 @@ durable log is. Another agent (or you, freshly respawned) must be able to resume
 your attempt from disk alone. Your job is to keep that log good enough that they
 can.
 
-The task names your **ticket id** and **attempt id**, plus the data root. Export
-both so every command targets your attempt and attributes your writes:
+The task names your **ticket id** and **attempt id**, plus the data root.
+
+**In a supervised session you need no exports.** The supervisor already sets
+`DRAIVER_ACTOR=agent:<adapter>` and `DRAIVER_ATTEMPT=<attempt-id>` in your
+environment, so every `draiver` command targets your attempt and attributes your
+writes to you. Do not prefix calls with `export …`, and do not override
+`DRAIVER_ACTOR` with a `human:` value — inside a supervised session the CLI refuses
+a write that would be attributed to a human unless an explicit `--actor` asks for
+it.
+
+Only when you work a ticket **by hand, outside supervision** (no `DRAIVER_SESSION_*`
+in your environment), set them yourself:
 
 ```
 export DRAIVER_ACTOR=agent:<your-name>    # e.g. agent:claude-code
@@ -17,8 +27,8 @@ export DRAIVER_ATTEMPT=<attempt-id>        # e.g. 0001 — the attempt you were 
 ```
 
 Without `DRAIVER_ATTEMPT` (or a `--attempt <id>` flag), commands fall back to the
-ticket's *latest* attempt — which may not be yours, so set it. If the data root
-isn't the default, pass `--data <dir>` or export `DRAIVER_DATA`.
+ticket's *latest* attempt — which may not be yours. If the data root isn't the
+default, pass `--data <dir>` or export `DRAIVER_DATA`.
 
 Your side of the protocol is entirely CLI: `brief` to load, `log` to record,
 `escalate` to ask, `review` to hand off. Run those yourself — never offload your

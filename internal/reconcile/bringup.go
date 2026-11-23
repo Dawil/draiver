@@ -126,6 +126,10 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 	sessionSeq := r.logTail(a.Ticket, a.ID)
 	spec := r.opt.BaseSpec
 	spec.Env = append(append([]string(nil), r.opt.BaseSpec.Env...), agentmsg.SessionEnv(a.Ticket, a.ID, sessionSeq)...)
+	// The session's identity (drvctl-060): DRAIVER_ACTOR=agent:<adapter> and
+	// DRAIVER_ATTEMPT=<id>, so the agent's `draiver` writes are attributed to it and
+	// target its own attempt without an export prefix on every call.
+	spec.Env = append(spec.Env, agentmsg.IdentityEnv(adapterName, a.ID)...)
 
 	handle, err := manage.New(sess, wm, newAdapter, manage.Config{
 		Ticket:  a.Ticket,
@@ -237,6 +241,7 @@ func (r *Reconciler) bringUp(ctx context.Context, a project.Attempt) (*wired, er
 		_ = sess.Close()
 		return nil, fmt.Errorf("completion gate: %w", err)
 	}
+	completeGate.SetBackgroundCap(r.opt.BackgroundCap)
 	watcher := watch.New(r.opt.Root, a.Ticket, a.ID, r.opt.Actor, sess, watch.ProtocolRecognizer{Ticket: a.Ticket})
 
 	return &wired{handle: handle, sess: sess, protoGate: protoGate, permGate: permGate, limitGate: limitGate, completeGate: completeGate, watcher: watcher, repo: repo, spawned: spawned}, nil
@@ -431,7 +436,7 @@ func (r *Reconciler) logTail(ticket, attempt string) int {
 // waters the watermark, so it is always above it).
 func authoritativeWake(eventType string) bool {
 	switch eventType {
-	case "decision", "resolution", "note", "gotcha", testResultType:
+	case "decision", "resolution", "note", "gotcha", testResultType, project.InterruptType:
 		return true
 	}
 	return false
